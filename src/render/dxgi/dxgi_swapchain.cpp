@@ -1239,6 +1239,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           {
             // Phase-1: Try to update texture with new frame data (stable-read required)
             // But blit the texture every frame regardless of update success (last-good-frame)
+            
+            // Compute dimensions once for both upload and blit
+            const UINT maxH = (UINT)std::min (s_h, (int)copyH);
+            const UINT maxW = (UINT)std::min (s_w, (int)copyW);
+            
             bool updated = false;
             D3D11_MAPPED_SUBRESOURCE mapped = { };
 
@@ -1252,9 +1257,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 uint8_t*       dstBase = (uint8_t *)mapped.pData;
 
                 const UINT dstPitch = mapped.RowPitch;
-
-                const UINT maxH = (UINT)std::min (s_h, (int)copyH);
-                const UINT maxW = (UINT)std::min (s_w, (int)copyW);
                 const UINT rowBytes = maxW * 4;
 
                 for (UINT y = 0; y < maxH; ++y)
@@ -1285,8 +1287,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
             // Phase-1: Blit every frame (even if update failed or counter didn't change)
             // This implements last-good-frame persistence
-            const UINT maxH = (UINT)std::min (s_h, (int)copyH);
-            const UINT maxW = (UINT)std::min (s_w, (int)copyW);
             D3D11_BOX srcBox = { 0, 0, 0, maxW, maxH, 1 };
             if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
             ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);

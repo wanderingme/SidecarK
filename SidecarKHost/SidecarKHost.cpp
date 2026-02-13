@@ -512,7 +512,6 @@ static void CreateHostFrameMappingForPid(DWORD pid)
     hdr->width = 256u;
     hdr->height = 256u;
     hdr->stride = 1024u;
-    hdr->frame_counter = 0u;
     
     // Phase-1: Seed 256x256 magenta test frame (BGRA8 format)
     uint8_t* base = reinterpret_cast<uint8_t*>(g_frame_host_view);
