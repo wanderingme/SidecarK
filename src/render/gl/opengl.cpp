@@ -2386,7 +2386,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
   HANDLE  hmap_dbg       = NULL;
   DWORD   gle_open       = 0;
 
-  wsprintfW (map_name, L"Local\\SidecarK_Frame_%lu", (unsigned long)GetCurrentProcessId ());
+  wsprintfW (map_name, L"Local\\SidecarK_Frame_v1_%lu", (unsigned long)GetCurrentProcessId ());
 
   const int R_ENTER         = 301;
   const int R_OPEN_FAIL     = 310;
@@ -2451,7 +2451,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               _snwprintf_s (
                 line2, _countof (line2), _TRUNCATE,
                 L" map=%ls gle=%lu\n",
-                map_name,
+                (const wchar_t*)map_name,
                 (unsigned long)open_gle
               );
               fputws (line2, fp);
@@ -2489,12 +2489,12 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               (int)(ret ? 1 : 0),
               (void *)hDC,
               (unsigned long)tid,
-              map_name,
+              (const wchar_t*)map_name,
               (unsigned long)open_gle,
               (void *)hmap_dbg,
               (unsigned long)gle_open,
               (int)created_mapping,
-              L""
+              (const wchar_t*)L""
             );
             fputws (line, fp2);
             fclose (fp2);
@@ -3552,27 +3552,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
              gle_open = GetLastError ();
              if (hmap_dbg == NULL)
              {
-               constexpr uint64_t kMapSize = 64ull * 1024ull * 1024ull;
-               hmap_dbg = CreateFileMappingW ( INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
-                                              (DWORD)(kMapSize >> 32), (DWORD)(kMapSize & 0xFFFFFFFFu),
-                                              map_name );
-
-               if (hmap_dbg != NULL)
-               {
-                 created_mapping = 1;
-                 gle_open = 0;
-                 open_gle = 0;
-               }
-               else
-               {
-                 open_gle = GetLastError ();
-                 reason   = 301;
-                 goto skf1_epilogue;
-               }
-             }
-             else
-             {
-               created_mapping = 0;
+               // Consumer must never create mapping, only open
+               open_gle = gle_open;
+               reason   = R_OPEN_FAIL;
+               goto skf1_epilogue;
              }
 
              if (hmap_dbg != NULL && s_hMap != nullptr && s_hMap != hmap_dbg)

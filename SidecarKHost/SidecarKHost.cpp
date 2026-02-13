@@ -481,8 +481,9 @@ static void CreateHostFrameMappingForPid(DWORD pid)
     return;
 
   wchar_t name[128]{};
-  wsprintfW(name, L"Local\\SidecarK_Frame_%lu", (unsigned long)pid);
+  wsprintfW(name, L"Local\\SidecarK_Frame_v1_%lu", (unsigned long)pid);
 
+  SetLastError(ERROR_SUCCESS);
   g_frame_host_map = CreateFileMappingW(
     INVALID_HANDLE_VALUE,
     NULL,
@@ -490,29 +491,99 @@ static void CreateHostFrameMappingForPid(DWORD pid)
     0,
     g_frame_host_size,
     name);
+  DWORD createError = GetLastError();
+  
   if (!g_frame_host_map)
+  {
+    wprintf(L"SidecarKHost: CreateFileMappingW failed for %ls, error=%lu\n", name, createError);
     return;
+  }
+
+  // Log keepalive handle that will persist until shutdown
+  wprintf(L"SidecarKHost: Mapping created - name=%ls keepalive_handle=%p create_error=%lu\n", 
+    name, (void*)g_frame_host_map, createError);
 
   g_frame_host_view = MapViewOfFile(g_frame_host_map, FILE_MAP_ALL_ACCESS, 0, 0, g_frame_host_size);
   if (!g_frame_host_view)
   {
+    DWORD mapError = GetLastError();
+    wprintf(L"SidecarKHost: MapViewOfFile failed for %ls, error=%lu\n", name, mapError);
     CloseHandle(g_frame_host_map);
     g_frame_host_map = nullptr;
     return;
   }
 
+  // Verify mapping is openable by consumers (proof of existence)
+  // This is a PROBE handle - opened and immediately closed
+  SetLastError(ERROR_SUCCESS);
+  HANDLE probeHandle = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
+  DWORD openError = GetLastError();
+  
+  if (probeHandle == nullptr)
+  {
+    wprintf(L"SidecarKHost: Verification FAILED - mapping not openable: %ls, error=%lu\n", name, openError);
+    UnmapViewOfFile(g_frame_host_view);
+    CloseHandle(g_frame_host_map);
+    g_frame_host_view = nullptr;
+    g_frame_host_map = nullptr;
+    return;
+  }
+  else
+  {
+    // Close probe handle immediately - keepalive handle (g_frame_host_map) remains open
+    CloseHandle(probeHandle);
+    wprintf(L"SidecarKHost: Mapping verified openable (probe closed, keepalive persists): %ls\n", name);
+  }
+
   auto* hdr = reinterpret_cast<SidecarKFrameHeaderV1*>(g_frame_host_view);
   if (memcmp(hdr->magic, "SKF1", 4) != 0 || hdr->version != 1u)
   {
+    // Initialize SKF1 v1 header
     memcpy(hdr->magic, "SKF1", 4);
     hdr->version = 1u;
     hdr->header_bytes = 0x20u;
-    hdr->data_offset = 0x20u;
-    hdr->pixel_format = 1u;
-    hdr->width = 0u;
-    hdr->height = 0u;
-    hdr->stride = 0u;
-    hdr->frame_counter = 0u;
+    hdr->data_offset = 0x24u;  // Header (0x20) + frame_counter (4 bytes)
+    hdr->pixel_format = 1u;    // BGRA8
+    hdr->width = 256u;
+    hdr->height = 256u;
+    hdr->stride = 256u * 4u;   // 1024 bytes per row
+    hdr->frame_counter = 0u;   // Will be set after pixel data
+
+    // Seed deterministic 256×256 magenta test frame (BGRA8: B=0xFF, G=0x00, R=0xFF, A=0xFF)
+    uint8_t* pixelData = (uint8_t*)g_frame_host_view + hdr->data_offset;
+    const uint32_t magentaBGRA = 0xFF00FFFF;  // Little-endian: B, G, R, A
+    
+    for (uint32_t y = 0; y < hdr->height; ++y)
+    {
+      uint32_t* row = (uint32_t*)(pixelData + y * hdr->stride);
+      for (uint32_t x = 0; x < hdr->width; ++x)
+      {
+        row[x] = magentaBGRA;
+      }
+    }
+
+    // Set frame_counter after writing pixel data (producer protocol)
+    hdr->frame_counter = 1u;
+    
+    wprintf(L"SidecarKHost: Test frame seeded - 256x256 magenta, frame_counter=%u\n", hdr->frame_counter);
+  }
+}
+
+static void ReleaseHostFrameMapping()
+{
+  if (g_frame_host_view)
+  {
+    UnmapViewOfFile(g_frame_host_view);
+    g_frame_host_view = nullptr;
+    wprintf(L"SidecarKHost: Host frame view unmapped\n");
+  }
+
+  if (g_frame_host_map)
+  {
+    wprintf(L"SidecarKHost: Closing keepalive handle=%p\n", (void*)g_frame_host_map);
+    CloseHandle(g_frame_host_map);
+    g_frame_host_map = nullptr;
+    wprintf(L"SidecarKHost: Host frame mapping closed\n");
   }
 }
 
@@ -2173,6 +2244,21 @@ int wmain(int argc, wchar_t** argv)
       }
     }
 
+    // Periodic keepalive verification
+    {
+      static ULONGLONG lastKeepaliveLog = 0;
+      const ULONGLONG now = GetTickCount64();
+      if (now - lastKeepaliveLog >= 5000) // Log every 5 seconds
+      {
+        lastKeepaliveLog = now;
+        if (g_frame_host_map != nullptr)
+        {
+          wprintf(L"SidecarKHost: Mapping keepalive active - targetPid=%lu keepalive_handle=%p\n",
+            (unsigned long)targetPid, (void*)g_frame_host_map);
+        }
+      }
+    }
+
     bool nowVisible = g_frames_streaming;
     if (nowVisible != lastVisible)
     {
@@ -2204,6 +2290,8 @@ int wmain(int argc, wchar_t** argv)
   ShutdownSidecarKControlPlane();
 
   ReleaseFrameMapping();
+
+  ReleaseHostFrameMapping();
 
 
   // Placeholder: next step adds named-pipe control + visible/hidden state.
