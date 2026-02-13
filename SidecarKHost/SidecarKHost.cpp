@@ -507,12 +507,23 @@ static void CreateHostFrameMappingForPid(DWORD pid)
     memcpy(hdr->magic, "SKF1", 4);
     hdr->version = 1u;
     hdr->header_bytes = 0x20u;
-    hdr->data_offset = 0x20u;
+    hdr->data_offset = 0x24u;
     hdr->pixel_format = 1u;
-    hdr->width = 0u;
-    hdr->height = 0u;
-    hdr->stride = 0u;
+    hdr->width = 256u;
+    hdr->height = 256u;
+    hdr->stride = 1024u;
     hdr->frame_counter = 0u;
+    
+    // Phase-1: Seed 256x256 magenta test frame (BGRA8 format)
+    uint8_t* base = reinterpret_cast<uint8_t*>(g_frame_host_view);
+    uint32_t* pixels = reinterpret_cast<uint32_t*>(base + 0x24);
+    for (uint32_t i = 0; i < 256u * 256u; ++i)
+    {
+      pixels[i] = 0xFFFF00FFu; // magenta: BGRA8 = (B=FF, G=00, R=FF, A=FF)
+    }
+    
+    // Set frame_counter = 1 to signal a valid frame exists
+    hdr->frame_counter = 1u;
   }
 }
 

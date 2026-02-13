@@ -1076,41 +1076,29 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
   if (s_hMap == nullptr || s_base == nullptr)
   {
-    if (false && ! SK_ImGui_Visible)
-    {
-      if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_GateSkip);
-      return
-        SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
-                                    nullptr, SK_DXGI_PresentSource::Wrapper );
-    }
+    // Phase-1: default enabled (no ImGui gating)
+    // if (false && ! SK_ImGui_Visible) path is disabled
 
     wchar_t wszName [64] = { };
     wsprintfW (wszName, L"Local\\SidecarK_Frame_%lu", (unsigned long)GetCurrentProcessId ());
 
+    // Phase-1: consumer must open-only (never create)
     s_hMap =
       OpenFileMappingW (FILE_MAP_READ, FALSE, wszName);
 
     if (s_hMap == nullptr)
     {
-      // Create mapping locally as a test source (same name, same size)
-      constexpr uint64_t kMappingSize = 64ull * 1024ull * 1024ull;
-      s_hMap =
-        CreateFileMappingW ( INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
-                             (DWORD)(kMappingSize >> 32), (DWORD)(kMappingSize & 0xFFFFFFFFu),
-                             wszName );
-
-      if (s_hMap == nullptr)
-      {
-        if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_OpenFail);
-        _ReleaseMappedOverlay ();
-        return
-          SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
-                                      nullptr, SK_DXGI_PresentSource::Wrapper );
-      }
+      if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_OpenFail);
+      _ReleaseMappedOverlay ();
+      return
+        SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                    nullptr, SK_DXGI_PresentSource::Wrapper );
     }
 
+    _SidecarLog (L"SKF1 open ok");
+
     s_base =
-      (uint8_t *)MapViewOfFile (s_hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+      (uint8_t *)MapViewOfFile (s_hMap, FILE_MAP_READ, 0, 0, 0);
 
     if (s_base == nullptr)
     {
@@ -1121,27 +1109,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                     nullptr, SK_DXGI_PresentSource::Wrapper );
     }
 
-    if (! s_test_initialized)
-    {
-      uint8_t* p = (uint8_t *)s_base;
-
-      *(uint32_t *)(p + 0x00) = '1FKS';
-      *(uint32_t *)(p + 0x04) = 1u;
-      *(uint32_t *)(p + 0x08) = 0x20u;
-      *(uint32_t *)(p + 0x0C) = 0x20u;
-      *(uint32_t *)(p + 0x10) = 1u;
-      *(uint32_t *)(p + 0x14) = 256u;
-      *(uint32_t *)(p + 0x18) = 256u;
-      *(uint32_t *)(p + 0x1C) = 256u * 4u;
-
-      *(volatile LONG *)(p + 0x20) = 1;
-
-      uint32_t* pixels = (uint32_t *)(p + 0x24);
-      for (uint32_t i = 0; i < 256u * 256u; ++i)
-        pixels [i] = 0xFFFF00FFu;
-
-      s_test_initialized = true;
-    }
+    _SidecarLog (L"SKF1 view ok")
 
     {
       const uint8_t* p = (const uint8_t *)s_base;
@@ -1193,6 +1161,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       s_fmt        = 1;
       s_alpha      = 1;
       s_dataOffset = (size_t)pixel_base_off;
+      
+      _SidecarLog (L"SKF1 header ok w=%u h=%u stride=%u dataOffset=%zu", w, h, stride, pixel_base_off);
     }
   }
 
@@ -1302,9 +1272,17 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
               ctx->Unmap (s_tex, 0);
 
+              static std::atomic_bool s_logged_upload_once = false;
+              if (! s_logged_upload_once.exchange (true))
+                _SidecarLog (L"SKF1 upload ok");
+
               D3D11_BOX srcBox = { 0, 0, 0, maxW, maxH, 1 };
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
               ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);
+
+              static std::atomic_bool s_logged_blit_once = false;
+              if (! s_logged_blit_once.exchange (true))
+                _SidecarLog (L"SKF1 blit ok");
 
               if (s_last_overlay_log_frame.load () + 120 < frame)
               {
