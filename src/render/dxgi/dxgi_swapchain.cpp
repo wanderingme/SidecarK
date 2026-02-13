@@ -1109,7 +1109,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                     nullptr, SK_DXGI_PresentSource::Wrapper );
     }
 
-    _SidecarLog (L"SKF1 view ok")
+    _SidecarLog (L"SKF1 view ok");
 
     {
       const uint8_t* p = (const uint8_t *)s_base;
@@ -1237,62 +1237,68 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (s_tex != nullptr)
           {
+            // Phase-1: Try to update texture with new frame data (stable-read required)
+            // But blit the texture every frame regardless of update success (last-good-frame)
+            bool updated = false;
             D3D11_MAPPED_SUBRESOURCE mapped = { };
 
             if (SUCCEEDED (ctx->Map (s_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             {
               const LONG v1 = *counter_ptr;
-              if (v0 != v1)
+              if (v0 == v1)
               {
-                if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_SeqMismatch);
-                ctx->Unmap (s_tex, 0);
-                bb->Release ();
-                if (ctx != nullptr) ctx->Release ();
-                if (dev != nullptr) dev->Release ();
-                return
-                  SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
-                                              nullptr, SK_DXGI_PresentSource::Wrapper );
+                // Stable read succeeded, safe to copy
+                const uint8_t* srcBase = s_base + s_dataOffset;
+                uint8_t*       dstBase = (uint8_t *)mapped.pData;
+
+                const UINT dstPitch = mapped.RowPitch;
+
+                const UINT maxH = (UINT)std::min (s_h, (int)copyH);
+                const UINT maxW = (UINT)std::min (s_w, (int)copyW);
+                const UINT rowBytes = maxW * 4;
+
+                for (UINT y = 0; y < maxH; ++y)
+                {
+                  memcpy (dstBase + y * dstPitch,
+                          srcBase + (size_t)y * (size_t)s_stride,
+                          rowBytes);
+                }
+
+                updated = true;
+
+                static std::atomic_bool s_logged_upload_once = false;
+                if (! s_logged_upload_once.exchange (true))
+                  _SidecarLog (L"SKF1 upload ok");
               }
-
-              const uint8_t* srcBase = s_base + s_dataOffset;
-              uint8_t*       dstBase = (uint8_t *)mapped.pData;
-
-              const UINT dstPitch = mapped.RowPitch;
-
-              const UINT maxH = (UINT)std::min (s_h, (int)copyH);
-              const UINT maxW = (UINT)std::min (s_w, (int)copyW);
-              const UINT rowBytes = maxW * 4;
-
-              for (UINT y = 0; y < maxH; ++y)
+              else
               {
-                memcpy (dstBase + y * dstPitch,
-                        srcBase + (size_t)y * (size_t)s_stride,
-                        rowBytes);
+                // Stable read failed (counter changed during upload), skip update
+                if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_SeqMismatch);
               }
 
               ctx->Unmap (s_tex, 0);
-
-              static std::atomic_bool s_logged_upload_once = false;
-              if (! s_logged_upload_once.exchange (true))
-                _SidecarLog (L"SKF1 upload ok");
-
-              D3D11_BOX srcBox = { 0, 0, 0, maxW, maxH, 1 };
-              if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
-              ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);
-
-              static std::atomic_bool s_logged_blit_once = false;
-              if (! s_logged_blit_once.exchange (true))
-                _SidecarLog (L"SKF1 blit ok");
-
-              if (s_last_overlay_log_frame.load () + 120 < frame)
-              {
-                s_last_overlay_log_frame.store (frame);
-                _SidecarLog (L"overlay blit: swapchain=%p bbfmt=%d maxW=%u maxH=%u", pReal, (int)bbDesc.Format, maxW, maxH);
-              }
             }
             else
             {
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_MapFail);
+            }
+
+            // Phase-1: Blit every frame (even if update failed or counter didn't change)
+            // This implements last-good-frame persistence
+            const UINT maxH = (UINT)std::min (s_h, (int)copyH);
+            const UINT maxW = (UINT)std::min (s_w, (int)copyW);
+            D3D11_BOX srcBox = { 0, 0, 0, maxW, maxH, 1 };
+            if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
+            ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);
+
+            static std::atomic_bool s_logged_blit_once = false;
+            if (! s_logged_blit_once.exchange (true))
+              _SidecarLog (L"SKF1 blit ok");
+
+            if (s_last_overlay_log_frame.load () + 120 < frame)
+            {
+              s_last_overlay_log_frame.store (frame);
+              _SidecarLog (L"overlay blit: swapchain=%p bbfmt=%d maxW=%u maxH=%u", pReal, (int)bbDesc.Format, maxW, maxH);
             }
           }
         }
