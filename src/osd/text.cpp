@@ -664,6 +664,7 @@ __stdcall
 SK_DrawOSD (void)
 {
   static bool cleared = false;
+  config.osd.show = false;
 
   if (ReadAcquire (&osd_init) == FALSE)
     SK_InstallOSD ();
