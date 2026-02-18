@@ -3,29 +3,48 @@
 ## Project Identity
 
 SidecarK is a SpecialK fork consisting of:
+
 - A host component (injection + lifecycle management)
-- An injected rendering component (DXGI Present path)
-
-Phase 1 concerns the injected D3D11/DXGI render path only.
-
-OpenGL (GL) path is explicitly disabled for Phase 1.
+- An injected rendering component (overlay composite path)
+- A producer that feeds frames via shared memory
 
 ## Architectural Lock-In
 
 1. Host is the sole mapping owner.
-2. Consumer (injected SidecarK) must never create or recreate the shared memory mapping.
+2. Consumer must never create or recreate the shared memory mapping.
 3. Producer must fail fast if mapping is absent.
 4. Injector/bootstrap logic is infrastructure and must not be refactored.
 5. One PR per task. Minimal diffs only.
 
-## Phase 1 Visual Milestone
+## Phase Definitions
 
-Working =
-
-- Producer writes static BGRA test pattern.
-- SidecarK reads it from shared memory.
-- Overlay is visibly composited in DXGI Present.
-- Control plane toggles overlay visibility deterministically.
-- No flicker.
-- No mapping recreation churn.
+Phase 1:
+- Shared memory ingest validated.
+- Static BGRA test frame visible.
+- Composite confirmed.
+- No mapping churn.
 - No injector crash.
+- Deterministic visibility toggle.
+
+Phase 2:
+- Continuous producer-fed streaming.
+- Stable-read semantics enforced.
+- Frame_counter monotonic correctness.
+- Last-good-frame retained on staleness.
+- Producer stop/start handled cleanly.
+- No silent failure.
+- Streaming validated across all supported backends.
+
+## Backend Coverage
+
+Supported:
+- DXGI / D3D11
+- DXGI / D3D12
+- OpenGL / WGL
+
+Not Implemented:
+- Vulkan
+
+Backend parity is required across supported paths.
+Protocol semantics must remain identical.
+Composite implementation may differ, protocol may not.
