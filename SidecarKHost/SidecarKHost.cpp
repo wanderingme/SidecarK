@@ -551,7 +551,7 @@ static void CreateHostFrameMappingForPid(DWORD pid)
 
     // Seed deterministic 256×256 magenta test frame (BGRA8: B=0xFF, G=0x00, R=0xFF, A=0xFF)
     uint8_t* pixelData = (uint8_t*)g_frame_host_view + hdr->data_offset;
-    const uint32_t magentaBGRA = 0xFF00FFFF;  // Little-endian: B, G, R, A
+    const uint32_t magentaBGRA = 0xFFFF00FF;  // Little-endian bytes: FF 00 FF FF (B, G, R, A)
     
     for (uint32_t y = 0; y < hdr->height; ++y)
     {
