@@ -33,6 +33,7 @@ extern bool SidecarK_DiagnosticsEnabled ();
 #define WIN32_LEAN_AND_MEAN
 
 #include <cstdint>
+#include <vector>
 
 #define _L2(w)  L ## w
 #define  _L(w) _L2(w)
@@ -3578,6 +3579,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
            static uint32_t s_last_counter = 0;
            static bool     s_has_frame    = false;
            static GLuint   s_tex          = 0;
+           static std::vector <uint8_t> s_frame_snapshot;
 
            if (s_base == nullptr)
            {
@@ -3643,18 +3645,29 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                    width > 0u && height > 0u && stride >= width * 4u && end_off <= kMapSize)
                 {
                   const uint32_t c1 = *(const uint32_t *)(base + (size_t)counter_off);
-                  const uint32_t c2 = *(const uint32_t *)(base + (size_t)counter_off);
-                  const bool stable = (c1 == c2);
+                  uint32_t       c2 = c1;
                   const bool valid  = (c1 != 0u);
                   const bool counter_changed = (c1 != s_last_counter);
                   ctr_c1 = c1;
                   ctr_c2 = c2;
-                  ctr_stable = stable ? 1 : 0;
                   ctr_changed = counter_changed ? 1 : 0;
                   const uint8_t* pixels          =  base + (size_t)pixel_off;
+                  if (valid)
+                  {
+                    const size_t snapshot_bytes = (size_t)stride * (size_t)height;
+                    if (s_frame_snapshot.size () != snapshot_bytes)
+                      s_frame_snapshot.resize (snapshot_bytes);
+
+                    memcpy (s_frame_snapshot.data (), pixels, snapshot_bytes);
+                    c2 = *(const uint32_t *)(base + (size_t)counter_off);
+                  }
+
+                  const bool stable_after_copy = (c1 == c2);
+                  ctr_c2 = c2;
+                  ctr_stable = stable_after_copy ? 1 : 0;
 
                   GLint prev_unpack = 0;
-                  if (stable && valid && counter_changed)
+                  if (stable_after_copy && valid && counter_changed)
                   {
                    if (s_tex == 0)
                      glGenTextures (1, &s_tex);
@@ -3673,17 +3686,17 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                      glGetIntegerv (GL_UNPACK_ALIGNMENT, &prev_unpack);
                      glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
 
-                     if (s_w != width || s_h != height || s_stride != stride)
-                     {
-                       glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width, (GLsizei)height, 0, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
-                       s_w      = width;
-                       s_h      = height;
-                       s_stride = stride;
-                     }
-                     else
-                     {
-                       glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, (GLsizei)width, (GLsizei)height, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
-                     }
+                      if (s_w != width || s_h != height || s_stride != stride)
+                      {
+                        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width, (GLsizei)height, 0, GL_BGRA, GL_UNSIGNED_BYTE, s_frame_snapshot.data ());
+                        s_w      = width;
+                        s_h      = height;
+                        s_stride = stride;
+                      }
+                      else
+                      {
+                        glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, (GLsizei)width, (GLsizei)height, GL_BGRA, GL_UNSIGNED_BYTE, s_frame_snapshot.data ());
+                      }
 
                      glPixelStorei (GL_UNPACK_ALIGNMENT, prev_unpack);
                      glBindTexture (GL_TEXTURE_2D, (GLuint)prev_tex);
@@ -3694,9 +3707,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                          reason = R_UPLOAD_OK;
                     }
                   }
-                  else if ((! stable || ! valid) && (! s_has_frame))
+                  else if ((! stable_after_copy || ! valid) && (! s_has_frame))
                   {
-                    reason = stable ? R_NO_FRAME_YET : R_STALE_COUNTER;
+                    reason = stable_after_copy ? R_NO_FRAME_YET : R_STALE_COUNTER;
                     reached_draw = false;
                     status =
                       static_cast_pfn <wglSwapBuffers_pfn> (pfnSwapFunc)(hDC);

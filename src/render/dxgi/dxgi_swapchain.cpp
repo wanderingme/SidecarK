@@ -22,6 +22,7 @@
 **/
 
 #include <SpecialK/stdafx.h>
+#include <vector>
 
 #include <SpecialK/render/dxgi/dxgi_swapchain.h>
 #include <SpecialK/render/dxgi/dxgi_util.h>
@@ -1445,7 +1446,18 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
             if (SUCCEEDED (ctx->Map (s_skf1.tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             {
-              // Complete stable read: check c2
+              const UINT maxH = (UINT)std::min ((int)s_skf1.height, (int)copyH);
+              const UINT maxW = (UINT)std::min ((int)s_skf1.width, (int)copyW);
+              const uint8_t* srcBase = s_skf1.view_ptr + s_skf1.data_offset;
+              const size_t snapshot_bytes = (size_t)s_skf1.stride * (size_t)maxH;
+              static std::vector <uint8_t> s_frame_snapshot;
+
+              if (s_frame_snapshot.size () != snapshot_bytes)
+                s_frame_snapshot.resize (snapshot_bytes);
+
+              memcpy (s_frame_snapshot.data (), srcBase, snapshot_bytes);
+
+              // Complete stable read: check c2 after copying frame data
               const LONG c2 = *counter_ptr;
               const bool stable = (c1 == c2);
               const bool valid = (c1 != 0);
@@ -1458,7 +1470,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 if (counter_changed || !s_skf1.has_frame)
                 {
                   // Upload pixel data
-                  const uint8_t* srcBase = s_skf1.view_ptr + s_skf1.data_offset;
+                  srcBase = s_frame_snapshot.data ();
           static std::atomic<bool> s_logged_upload_source = false;
           if (!s_logged_upload_source.exchange(true)) {
             _SidecarLog(L"→ Source: view_ptr=%p data_offset=0x%X srcBase=%p", 
@@ -1474,9 +1486,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                 s_skf1.stride, dstPitch, 256u * 4);
                   }
 
-                  const UINT maxH = (UINT)std::min ((int)s_skf1.height, (int)copyH);
-                  const UINT maxW = (UINT)std::min ((int)s_skf1.width, (int)copyW);
-                  
                   if (s_skf1.texFmt == DXGI_FORMAT_B8G8R8A8_UNORM)
                   {
                     const UINT rowBytes = maxW * 4;
@@ -1654,12 +1663,25 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           {
             volatile LONG* counter_ptr12 = (volatile LONG*)(s_skf1.view_ptr + (s_skf1.data_offset - 4));
             const LONG c1_12 = *counter_ptr12;
-            const LONG c2_12 = *counter_ptr12;
-            const bool stable12 = (c1_12 == c2_12);
+            LONG c2_12 = c1_12;
+            bool stable12 = true;
             const bool valid12  = (c1_12 != 0);
             const bool counter_changed = (c1_12 != s_skf1.last_counter);
+            static std::vector <uint8_t> s_frame_snapshot12;
+            const size_t snapshot_bytes12 = (size_t)s_skf1.stride * (size_t)s_skf1.height;
+            const bool attempting_upload = (counter_changed || !s_skf1.has_frame);
 
-            if (stable12 && valid12 && (counter_changed || !s_skf1.has_frame))
+            if (valid12 && attempting_upload)
+            {
+              if (s_frame_snapshot12.size () != snapshot_bytes12)
+                s_frame_snapshot12.resize (snapshot_bytes12);
+
+              memcpy (s_frame_snapshot12.data (), s_skf1.view_ptr + s_skf1.data_offset, snapshot_bytes12);
+              c2_12 = *counter_ptr12;
+              stable12 = (c1_12 == c2_12);
+            }
+
+            if (stable12 && valid12 && attempting_upload)
             {
               // Create command allocator if needed
               if (s_d3d12_cmd_allocator == nullptr)
@@ -1751,7 +1773,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
                 if (SUCCEEDED(hr12) && uploadData != nullptr)
                 {
-                  const uint8_t* srcPixels = s_skf1.view_ptr + s_skf1.data_offset;
+                  const uint8_t* srcPixels = s_frame_snapshot12.data ();
                   uint8_t* dstBytes = (uint8_t*)uploadData;
                   for (UINT y = 0; y < s_skf1.height; ++y)
                   {
@@ -1829,7 +1851,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 }
               }
             }
-            else if (!stable12)
+            else if (attempting_upload && !stable12)
             {
               static std::atomic<bool> s_logged_d3d12_stale = false;
               if (!s_logged_d3d12_stale.exchange(true))
