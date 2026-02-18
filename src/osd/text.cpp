@@ -664,6 +664,8 @@ __stdcall
 SK_DrawOSD (void)
 {
   static bool cleared = false;
+  if (g_Virule_DisableAllSKUI)
+    return FALSE;
   config.osd.show = false;
 
   if (ReadAcquire (&osd_init) == FALSE)

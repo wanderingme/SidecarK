@@ -69,6 +69,7 @@ volatile DWORD    dwInitThreadId  =   1;
 
 volatile LONG     __SK_Init       = FALSE;
          bool     __SK_bypass     = false;
+         bool     g_Virule_DisableAllSKUI = true;
    const wchar_t* __SK_BootedCore = L"";
   extern bool     __SK_RunDLL_Bypass;
 
