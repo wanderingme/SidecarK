@@ -848,15 +848,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         void* this_ptr = (void *)this;
 
         void** vtbl = nullptr;
-        __try
-        {
-          if (this_ptr != nullptr)
-            vtbl = *(void ***)this_ptr;
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-          vtbl = nullptr;
-        }
+        if (this_ptr != nullptr)
+          vtbl = *(void ***)this_ptr;
 
         fprintf (f, "pid=%lu\n", (unsigned long)pid);
         fprintf (f, "first_entry=Present\n");
@@ -867,9 +860,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         {
           for (int i = 0; i < 25; ++i)
           {
-            void* fn = nullptr;
-            __try { fn = vtbl[i]; }
-            __except (EXCEPTION_EXECUTE_HANDLER) { fn = nullptr; }
+            void* fn = vtbl[i];
 
             fprintf (f, "vtbl[%02d]=%p\n", i, fn);
           }
@@ -1330,8 +1321,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   // STAGE E/F: Upload (if stable) + Always Blit (last-good frame)
   // CRITICAL: This MUST happen BEFORE PresentBase() so overlay is visible!
   // --------------------------------------------------------------------------
-  if (s_skf1.view_ptr != nullptr && s_skf1.width > 0 && s_skf1.height > 0 && 
-      s_skf1.stride > 0 && s_skf1.pixel_format == 1)
+  const bool skf1_stage_ef_ready =
+    (s_skf1.view_ptr != nullptr && s_skf1.width > 0 && s_skf1.height > 0 &&
+     s_skf1.stride > 0 && s_skf1.pixel_format == 1);
+
+  if (skf1_stage_ef_ready)
   {
     static std::atomic<bool> s_logged_ef_entered = false;
     if (!s_logged_ef_entered.exchange(true))
@@ -1996,7 +1990,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         _SidecarLog(L"SKF1 D3D12 skip: reason=DEVICE_UNAVAILABLE hr=0x%08X dev=%p", hr12, dev12);
     }
   }  // End of Stage E/F block (opened at line 1325)
-  else
+  if (!skf1_stage_ef_ready)
   {
     static std::atomic<bool> s_logged_ef_precond_fail = false;
     if (!s_logged_ef_precond_fail.exchange(true))
