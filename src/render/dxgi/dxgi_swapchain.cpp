@@ -1284,7 +1284,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     const uint64_t payload_bytes = (uint64_t)s_skf1.stride * (uint64_t)s_skf1.height;
     const uint64_t pixel_end = (uint64_t)s_skf1.data_offset + payload_bytes;
     const uint64_t kMaxMappingSize = 64ull * 1024ull * 1024ull;
-    const bool size_ok = (payload_bytes > 0 && pixel_end <= kMaxMappingSize);
+    const bool max_size_ok = (payload_bytes > 0 && pixel_end <= kMaxMappingSize);
+    const bool map_size_ok = (s_skf1.view_bytes == 0 || pixel_end <= (uint64_t)s_skf1.view_bytes);
+    const bool size_ok = (max_size_ok && map_size_ok);
 
     if (!magic_ok || !version_ok || !header_ok || !offset_ok || !format_ok || 
         !dims_ok || !stride_ok || !counter_pos_ok || !size_ok)
@@ -1294,11 +1296,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       {
         _SidecarLog(L"SKF1 Stage D FAIL: Header validation - "
                     L"magic=%c%c%c%c ver=%u hdr_bytes=%u data_off=%u fmt=%u w=%u h=%u stride=%u "
-                    L"[magic_ok=%d ver_ok=%d hdr_ok=%d off_ok=%d fmt_ok=%d dims_ok=%d stride_ok=%d counter_ok=%d size_ok=%d]",
+                    L"[magic_ok=%d ver_ok=%d hdr_ok=%d off_ok=%d fmt_ok=%d dims_ok=%d stride_ok=%d counter_ok=%d size_ok=%d map_bytes=%llu pixel_end=%llu]",
                     s_skf1.magic[0], s_skf1.magic[1], s_skf1.magic[2], s_skf1.magic[3],
                     s_skf1.version, s_skf1.header_bytes, s_skf1.data_offset, s_skf1.pixel_format,
                     s_skf1.width, s_skf1.height, s_skf1.stride,
-                    magic_ok, version_ok, header_ok, offset_ok, format_ok, dims_ok, stride_ok, counter_pos_ok, size_ok);
+                    magic_ok, version_ok, header_ok, offset_ok, format_ok, dims_ok, stride_ok, counter_pos_ok, size_ok,
+                    (unsigned long long)s_skf1.view_bytes, (unsigned long long)pixel_end);
       }
       if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_HeaderReject);
       _ReleaseMappedOverlay ();
@@ -1549,6 +1552,18 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               else
               {
                 // Unstable or invalid - skip upload but DON'T clear has_frame
+                if (!stable)
+                {
+                  static std::atomic<bool> s_logged_d3d11_stale = false;
+                  if (!s_logged_d3d11_stale.exchange(true))
+                    _SidecarLog(L"SKF1 D3D11 skip: reason=STALE_COUNTER c1=%ld c2=%ld", (long)c1, (long)c2);
+                }
+                else if (!valid)
+                {
+                  static std::atomic<bool> s_logged_d3d11_zero = false;
+                  if (!s_logged_d3d11_zero.exchange(true))
+                    _SidecarLog(L"SKF1 D3D11 skip: reason=ZERO_COUNTER");
+                }
                 if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_SeqMismatch);
               }
 
@@ -1556,6 +1571,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             }
             else
             {
+              static std::atomic<bool> s_logged_d3d11_map_fail = false;
+              if (!s_logged_d3d11_map_fail.exchange(true))
+                _SidecarLog(L"SKF1 D3D11 skip: reason=MAP_WRITE_FAIL");
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_MapFail);
             }
           }
@@ -1625,6 +1643,18 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
         bb->Release ();
       }
+      else
+      {
+        static std::atomic<bool> s_logged_d3d11_bb_fail = false;
+        if (!s_logged_d3d11_bb_fail.exchange(true))
+          _SidecarLog(L"SKF1 D3D11 skip: reason=BACKBUFFER_OR_CONTEXT_UNAVAILABLE hr=0x%08X bb=%p ctx=%p", hr, bb, ctx);
+      }
+    }
+    else
+    {
+      static std::atomic<bool> s_logged_d3d11_dev_fail = false;
+      if (!s_logged_d3d11_dev_fail.exchange(true))
+        _SidecarLog(L"SKF1 D3D11 skip: reason=DEVICE_UNAVAILABLE hr=0x%08X dev=%p", hr, dev);
     }
 
     if (ctx != nullptr) ctx->Release ();
@@ -1645,7 +1675,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       D3D12_COMMAND_QUEUE_DESC queueDesc = {};
       queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
       queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-      dev12->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue), (void**)&cmdQueue);
+      const HRESULT hrQueue = dev12->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue), (void**)&cmdQueue);
       
       ID3D12Resource* bb12 = nullptr;
       hr12 = pReal->GetBuffer(0, __uuidof(ID3D12Resource), (void**)&bb12);
@@ -1661,7 +1691,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           // STAGE E: Upload pixels if we have new frame data
           if (s_skf1.view_ptr != nullptr && s_skf1.width > 0 && s_skf1.height > 0)
           {
-            volatile LONG* counter_ptr12 = (volatile LONG*)(s_skf1.view_ptr + (s_skf1.data_offset - 4));
+            const uint64_t counter_off12 = (uint64_t)s_skf1.data_offset - 4ull;
+            volatile LONG* counter_ptr12 = (volatile LONG*)(s_skf1.view_ptr + (size_t)counter_off12);
             const LONG c1_12 = *counter_ptr12;
             LONG c2_12 = c1_12;
             bool stable12 = true;
@@ -1947,11 +1978,31 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         
         bb12->Release();
       }
+      else
+      {
+        static std::atomic<bool> s_logged_d3d12_stage_entry_fail = false;
+        if (!s_logged_d3d12_stage_entry_fail.exchange(true))
+          _SidecarLog(L"SKF1 D3D12 skip: reason=BACKBUFFER_OR_QUEUE_UNAVAILABLE hr_buffer=0x%08X hr_queue=0x%08X bb=%p queue=%p",
+                      hr12, hrQueue, bb12, cmdQueue);
+      }
       
       if (cmdQueue != nullptr) cmdQueue->Release();
       dev12->Release();
     }
+    else
+    {
+      static std::atomic<bool> s_logged_d3d12_dev_fail = false;
+      if (!s_logged_d3d12_dev_fail.exchange(true))
+        _SidecarLog(L"SKF1 D3D12 skip: reason=DEVICE_UNAVAILABLE hr=0x%08X dev=%p", hr12, dev12);
+    }
   }  // End of Stage E/F block (opened at line 1325)
+  else
+  {
+    static std::atomic<bool> s_logged_ef_precond_fail = false;
+    if (!s_logged_ef_precond_fail.exchange(true))
+      _SidecarLog(L"SKF1 skip: reason=STAGE_EF_PRECONDITION_FAIL view=%p w=%u h=%u stride=%u fmt=%u",
+                  s_skf1.view_ptr, s_skf1.width, s_skf1.height, s_skf1.stride, s_skf1.pixel_format);
+  }
 
   // Now that overlay is composited, do the actual Present
   if (0 == PresentBase ())

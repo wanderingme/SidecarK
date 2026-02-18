@@ -3579,6 +3579,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
            static uint32_t s_last_counter = 0;
            static bool     s_has_frame    = false;
            static GLuint   s_tex          = 0;
+           static SIZE_T   s_view_bytes   = 0;
            static std::vector <uint8_t> s_frame_snapshot;
 
            if (s_base == nullptr)
@@ -3600,24 +3601,35 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                s_hMap = nullptr;
              }
 
-             s_hMap = hmap_dbg;
+              s_hMap = hmap_dbg;
 
-             s_base = (uint8_t *)MapViewOfFile (s_hMap, FILE_MAP_READ, 0, 0, 0);
-              if (s_base == nullptr)
+              s_base = (uint8_t *)MapViewOfFile (s_hMap, FILE_MAP_READ, 0, 0, 0);
+               if (s_base == nullptr)
+               {
+                 open_gle = GetLastError ();
+                 reason   = R_MAP_FAIL;
+                 goto skf1_epilogue;
+               }
+
+              MEMORY_BASIC_INFORMATION mbi = { };
+              if (VirtualQuery (s_base, &mbi, sizeof (mbi)) != 0)
+                s_view_bytes = mbi.RegionSize;
+              else
+                s_view_bytes = 0;
+
+              if (s_view_bytes == 0)
               {
                 open_gle = GetLastError ();
-                reason   = R_MAP_FAIL;
+                reason = R_MAP_FAIL;
                 goto skf1_epilogue;
               }
-           }
+            }
 
-           if (s_base != nullptr)
-           {
-             constexpr uint64_t kMapSize = 64ull * 1024ull * 1024ull;
-
-             const uint8_t* const base = s_base;
-             const uint32_t magic = *(const uint32_t *)(base + 0x00);
-             const uint32_t ver   = *(const uint32_t *)(base + 0x04);
+            if (s_base != nullptr)
+            {
+              const uint8_t* const base = s_base;
+              const uint32_t magic = *(const uint32_t *)(base + 0x00);
+              const uint32_t ver   = *(const uint32_t *)(base + 0x04);
 
              if (magic == 0x31464B53u && ver == 1u)
              {
@@ -3635,15 +3647,16 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                 hdr_h      = height;
                 hdr_stride = stride;
 
-                const uint64_t counter_off  = (uint64_t)data_offset - 4ull;
-                const uint64_t pixel_off    = (uint64_t)data_offset;
-                const uint64_t bytes        = (uint64_t)stride * (uint64_t)height;
-                const uint64_t end_off      = pixel_off + bytes;
-                const bool counter_pos_ok   = (data_offset >= 0x24u && (counter_off + 4ull == pixel_off));
+                 const uint64_t counter_off  = (uint64_t)data_offset - 4ull;
+                 const uint64_t pixel_off    = (uint64_t)data_offset;
+                 const uint64_t bytes        = (uint64_t)stride * (uint64_t)height;
+                 const uint64_t end_off      = pixel_off + bytes;
+                 const bool counter_pos_ok   = (data_offset >= 0x24u && (counter_off + 4ull == pixel_off));
+                 const bool mapped_size_ok   = (end_off <= (uint64_t)s_view_bytes);
 
-                if (header_bytes >= 0x20u && data_offset >= 0x24u && counter_pos_ok && pixel_format == 1u &&
-                   width > 0u && height > 0u && stride >= width * 4u && end_off <= kMapSize)
-                {
+                 if (header_bytes >= 0x20u && data_offset >= 0x24u && counter_pos_ok && pixel_format == 1u &&
+                   width > 0u && height > 0u && stride >= width * 4u && mapped_size_ok)
+                 {
                   const uint32_t c1 = *(const uint32_t *)(base + (size_t)counter_off);
                   uint32_t       c2 = c1;
                   const bool valid  = (c1 != 0u);
