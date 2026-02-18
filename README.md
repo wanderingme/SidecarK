@@ -81,3 +81,22 @@ This section is the single source of truth for the `SidecarKHost` control-plane 
 
 - `overlay_enabled` gates OSD visibility ONLY.
 - ImGui control panel is NOT gated in this version.
+
+## SidecarK Phase-1 backend coverage (code review status)
+
+The following reflects current implementation status for drawing the SKF1 256x256 test frame.
+
+| Backend path | Current status | Notes |
+| --- | --- | --- |
+| DXGI + D3D11 swapchain | **Validated** | Present hook + SKF1 mapping/header + upload + blit confirmed in logs. Supports `B8G8R8A8`, `R8G8B8A8`, and `R10G10B10A2` backbuffer formats in current path. |
+| DXGI + D3D12 swapchain | **Experimental / not phase-1 validated** | Separate D3D12 path exists, but currently only admits `B8G8R8A8` and `R8G8B8A8` in format gate; treat as not yet validated for broad modern-GPU coverage. |
+| OpenGL (WGL swap) | **Implemented / not phase-1 validated** | SKF1 ingest + texture upload + draw path exists in `opengl.cpp` using `GL_BGRA` uploads, but no phase-1 validation evidence was provided for this title. |
+| Vulkan | **Not implemented for SKF1 phase-1 blit** | No `Local\\SidecarK_Frame_v1_<pid>` SKF1 consumer path in `src/render/vulkan`. |
+
+### Phase-1 gate to proceed
+
+Proceed to Phase-2 only after collecting runtime evidence (per backend) that includes:
+- mapping open (`SKF1 Stage B OK`)
+- header accepted (`SKF1 Stage D OK`)
+- upload accepted (`SKF1 Stage E OK`)
+- blit executed (`SKF1 Stage F OK`)
