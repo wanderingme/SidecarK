@@ -255,11 +255,11 @@ struct sk_config_t
       BYTE toggle [4]     = { VK_CONTROL, VK_SHIFT, 'T', 0 };
     } keys;
 
-    bool   show           = true;
+    bool   show           = false;
   } time;
 
   struct title_s {
-    bool   show           = true;
+    bool   show           = false;
   } title;
 
   struct mem_osd_s {
@@ -336,7 +336,7 @@ struct sk_config_t
 
 
   struct fps_osd_s {
-    bool   show           = true;
+    bool   show           = false;
     bool   compact        = false;
     bool   advanced       = false;
     bool   frametime      = true;
@@ -352,7 +352,7 @@ struct sk_config_t
 
 
   struct gpu_osd_s {
-    bool   show           = true;
+    bool   show           = false;
     bool   print_slowdown = false;
     float  interval       = 0.333333F;
 
