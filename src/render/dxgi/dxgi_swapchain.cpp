@@ -1391,7 +1391,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
             if (!s_skf1.logged_tex_create.exchange(true))
             {
-              _SidecarLog(L"Attempting D3D11 texture creation: %ux%u format=%u (BGRA8)", copyW, copyH, DXGI_FORMAT_B8G8R8A8_UNORM);
+              _SidecarLog(L"Attempting D3D11 texture creation: %ux%u format=%u", copyW, copyH, bbDesc.Format);
             }
 
             D3D11_TEXTURE2D_DESC tdesc = { };
@@ -1399,7 +1399,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             tdesc.Height             = copyH;
             tdesc.MipLevels          = 1;
             tdesc.ArraySize          = 1;
-            tdesc.Format             = DXGI_FORMAT_B8G8R8A8_UNORM;  // CRITICAL FIX: Always BGRA8 to match source data!
+            tdesc.Format             = bbDesc.Format;
             tdesc.SampleDesc.Count   = 1;
             tdesc.SampleDesc.Quality = 0;
             tdesc.Usage              = D3D11_USAGE_DYNAMIC;
@@ -1410,7 +1410,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             HRESULT hrTex = dev->CreateTexture2D (&tdesc, nullptr, &s_skf1.tex);
             if (SUCCEEDED (hrTex) && s_skf1.tex != nullptr)
             {
-              s_skf1.texFmt = DXGI_FORMAT_B8G8R8A8_UNORM;  // Store actual format: BGRA8
+              s_skf1.texFmt = bbDesc.Format;
               if (!s_skf1.logged_tex_success.exchange(true))
               {
                 _SidecarLog(L"Texture created successfully: tex=%p format=%u", s_skf1.tex, s_skf1.texFmt);
@@ -1473,13 +1473,54 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   const UINT maxH = (UINT)std::min ((int)s_skf1.height, (int)copyH);
                   const UINT maxW = (UINT)std::min ((int)s_skf1.width, (int)copyW);
                   
-                  // Simple memcpy upload: both source and texture are BGRA8
-                  const UINT rowBytes = maxW * 4;
-                  for (UINT y = 0; y < maxH; ++y)
+                  if (s_skf1.texFmt == DXGI_FORMAT_B8G8R8A8_UNORM)
                   {
-                    memcpy (dstBase + y * dstPitch,
-                            srcBase + (size_t)y * (size_t)s_skf1.stride,
-                            rowBytes);
+                    const UINT rowBytes = maxW * 4;
+                    for (UINT y = 0; y < maxH; ++y)
+                    {
+                      memcpy (dstBase + y * dstPitch,
+                              srcBase + (size_t)y * (size_t)s_skf1.stride,
+                              rowBytes);
+                    }
+                  }
+                  else if (s_skf1.texFmt == DXGI_FORMAT_R8G8B8A8_UNORM)
+                  {
+                    for (UINT y = 0; y < maxH; ++y)
+                    {
+                      const uint8_t* srcRow = srcBase + (size_t)y * (size_t)s_skf1.stride;
+                      uint8_t*       dstRow = dstBase + y * dstPitch;
+                      for (UINT x = 0; x < maxW; ++x)
+                      {
+                        const uint8_t b = srcRow[x * 4 + 0];
+                        const uint8_t g = srcRow[x * 4 + 1];
+                        const uint8_t r = srcRow[x * 4 + 2];
+                        const uint8_t a = srcRow[x * 4 + 3];
+                        dstRow[x * 4 + 0] = r;
+                        dstRow[x * 4 + 1] = g;
+                        dstRow[x * 4 + 2] = b;
+                        dstRow[x * 4 + 3] = a;
+                      }
+                    }
+                  }
+                  else if (s_skf1.texFmt == DXGI_FORMAT_R10G10B10A2_UNORM)
+                  {
+                    for (UINT y = 0; y < maxH; ++y)
+                    {
+                      const uint8_t* srcRow = srcBase + (size_t)y * (size_t)s_skf1.stride;
+                      uint32_t*      dstRow = (uint32_t *)(dstBase + y * dstPitch);
+                      for (UINT x = 0; x < maxW; ++x)
+                      {
+                        const uint32_t b8 = srcRow[x * 4 + 0];
+                        const uint32_t g8 = srcRow[x * 4 + 1];
+                        const uint32_t r8 = srcRow[x * 4 + 2];
+                        const uint32_t a8 = srcRow[x * 4 + 3];
+                        const uint32_t r10 = (r8 * 1023u + 127u) / 255u;
+                        const uint32_t g10 = (g8 * 1023u + 127u) / 255u;
+                        const uint32_t b10 = (b8 * 1023u + 127u) / 255u;
+                        const uint32_t a2  = (a8 *    3u + 127u) / 255u;
+                        dstRow[x] = (r10) | (g10 << 10u) | (b10 << 20u) | (a2 << 30u);
+                      }
+                    }
                   }
 
                   s_skf1.last_counter = c1;
@@ -1517,23 +1558,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (s_skf1.has_frame && s_skf1.tex != nullptr)
           {
-            // Check if formats match
-            const bool formats_match = (s_skf1.texFmt == bbDesc.Format);
-            
-            if (!formats_match)
-            {
-              // Format mismatch: BGRA8 texture vs R10G10B10A2 backbuffer
-              // CopySubresourceRegion does NOT perform format conversion!
-              static std::atomic<bool> s_logged_format_mismatch = false;
-              if (!s_logged_format_mismatch.exchange(true))
-              {
-                _SidecarLog(L"→ FORMAT MISMATCH: overlay tex=%u backbuffer=%u", s_skf1.texFmt, bbDesc.Format);
-                _SidecarLog(L"→ Cross-format CopySubresourceRegion not supported");
-                _SidecarLog(L"→ Overlay disabled until shader-based blit is implemented");
-              }
-              // Skip blit - need shader-based conversion
-            }
-            else
+            if (s_skf1.texFmt == bbDesc.Format)
             {
               // Formats match - safe to use CopySubresourceRegion
               D3D11_BOX srcBox = { 0, 0, 0, 256u, 256u, 1 };  // Fixed: always 256×256 overlay region
@@ -1554,6 +1579,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 _SidecarLog(L"SKF1 Stage F OK: Blit executed");
               }
             }
+            else
+            {
+              static std::atomic<bool> s_logged_format_mismatch = false;
+              if (!s_logged_format_mismatch.exchange(true))
+              {
+                _SidecarLog(L"→ FORMAT MISMATCH: overlay tex=%u backbuffer=%u", s_skf1.texFmt, bbDesc.Format);
+              }
+            }
 
             // Health signal: log successful composite periodically
 
@@ -1572,7 +1605,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           if (!s_logged_format_fail.exchange(true))
           {
             wchar_t msg[256];
-            wsprintfW(msg, L"→ Format check FAILED: bbDesc.Format=%u (not B8G8R8A8 or R8G8B8A8)", bbDesc.Format);
+            wsprintfW(msg, L"→ Format check FAILED: bbDesc.Format=%u (not B8G8R8A8, R8G8B8A8, or R10G10B10A2)", bbDesc.Format);
             _SidecarLog(msg);
           }
         }
