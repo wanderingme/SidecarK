@@ -15,23 +15,23 @@ Any change requires explicit version bump.
 Host:
 - Creates mapping once per injection session.
 - Binds mapping to injected PID.
-- Keeps mapping alive for the duration of the injection session.
-- May recreate mapping ONLY when starting a new injection session (new target PID).
+- Keeps mapping alive for duration of injection session.
+- May recreate mapping only when starting a new injection session.
 
-Host must NOT recreate mapping based on frame staleness.
+Host must NOT recreate mapping due to frame staleness.
 
-SidecarK (consumer):
+Consumer:
 - Opens mapping only.
 - Never creates mapping.
 - Never recreates mapping.
+- Never writes to mapping.
 
 Producer:
 - Opens mapping only.
 - Fails fast if mapping missing.
+- Never modifies header after initialization.
 
 ## Frame Format (SKF1 v1)
-
-Header layout (little-endian):
 
 Offset | Field
 -------|------
@@ -42,11 +42,10 @@ Offset | Field
 0x10   | pixel_format = 1 (BGRA8)
 0x14   | width
 0x18   | height
-0x1C   | stride (bytes per row)
-0x20   | frame_counter (uint32, volatile)
+0x1C   | stride
+0x20   | frame_counter (volatile uint32)
 0x24   | pixel data begins
 
-Pixel format: BGRA8 (little-endian).
 Stride must be >= width * 4.
 
 ## Producer Write Rules
@@ -57,19 +56,35 @@ Stride must be >= width * 4.
 
 ## Consumer Read Rules (Stable Read)
 
-To avoid torn frames:
-
 1. Read frame_counter (c1).
 2. Copy pixel data into GPU upload buffer.
 3. Read frame_counter again (c2).
-4. Accept frame only if c1 == c2.
-   Otherwise discard and retry next Present.
+4. Accept frame only if:
+   - c1 == c2
+   - c1 != 0
 
-Consumer retains last valid frame if no new stable frame is available.
+If unstable:
+- Discard upload.
+- Retain last valid frame.
 
 ## Staleness Behavior
 
 If producer stops updating:
-- SidecarK retains last valid frame.
-- SidecarK does NOT recreate mapping.
-- SidecarK does NOT blank frame automatically.
+- Consumer retains last valid frame.
+- Consumer does NOT recreate mapping.
+- Consumer does NOT blank frame automatically.
+
+## Backend Parity Requirement
+
+All supported backends must:
+
+- Use identical mapping name construction.
+- Validate identical header layout.
+- Derive counter from (data_offset - 4).
+- Enforce stable-read semantics.
+- Retain last-good-frame behavior.
+- Never mutate mapping memory.
+
+Backend differences are restricted strictly to GPU upload/composite mechanics.
+
+Vulkan is not implemented and not part of this contract.

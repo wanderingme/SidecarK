@@ -13,4 +13,24 @@ Host must:
 Host must NOT:
 - Modify frame protocol.
 - Write pixel data.
-- Recreate mapping due to frame staleness.
+- Recreate mapping due to staleness.
+- Implement backend-specific mapping behavior.
+
+## Backend Neutrality
+
+Mapping lifecycle is independent of rendering backend.
+
+Mapping ownership is bound solely to injected target PID.
+Mapping lifetime does not vary by GPU API.
+
+No backend-specific mapping logic is permitted.
+
+## Backend Coverage
+
+Supported:
+- DXGI / D3D11
+- DXGI / D3D12
+- OpenGL / WGL
+
+Not Implemented:
+- Vulkan
