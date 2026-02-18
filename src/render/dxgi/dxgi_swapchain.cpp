@@ -864,8 +864,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             return false;
 
           const uintptr_t begin      = (uintptr_t)ptr;
-          const uintptr_t end        = begin + bytes;
           const uintptr_t region_end = (uintptr_t)mbi.BaseAddress + (uintptr_t)mbi.RegionSize;
+          if ((uintptr_t)bytes > UINTPTR_MAX - begin)
+            return false;
+          const uintptr_t end        = begin + (uintptr_t)bytes;
 
           return (end <= region_end);
         };
