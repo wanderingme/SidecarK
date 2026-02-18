@@ -2385,13 +2385,26 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
   DWORD   open_gle       = 0;
   HANDLE  hmap_dbg       = NULL;
   DWORD   gle_open       = 0;
+  uint32_t hdr_ver       = 0;
+  uint32_t hdr_bytes     = 0;
+  uint32_t hdr_off       = 0;
+  uint32_t hdr_fmt       = 0;
+  uint32_t hdr_w         = 0;
+  uint32_t hdr_h         = 0;
+  uint32_t hdr_stride    = 0;
+  uint32_t ctr_c1        = 0;
+  uint32_t ctr_c2        = 0;
+  int      ctr_stable    = 0;
+  int      ctr_changed   = 0;
 
   wsprintfW (map_name, L"Local\\SidecarK_Frame_v1_%lu", (unsigned long)GetCurrentProcessId ());
 
   const int R_ENTER         = 301;
   const int R_OPEN_FAIL     = 310;
+  const int R_MAP_FAIL      = 320;
   const int R_HEADER_FAIL   = 330;
   const int R_NO_FRAME_YET  = 340;
+  const int R_STALE_COUNTER = 345;
   const int R_UPLOAD_OK     = 350;
   const int R_COMPOSITE_HIT = 360;
 
@@ -2428,7 +2441,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             wchar_t line [512] = { };
             _snwprintf_s(
               line, _countof(line), _TRUNCATE,
-              L"pid=%lu calls=%ld last_reason=%d reached_draw=%d returned=%d hdc=%p tid=%lu map=%ls gle=%lu hmap=%p gle_open=%lu created=%d%ls\n",
+              L"pid=%lu calls=%ld last_reason=%d reached_draw=%d returned=%d hdc=%p tid=%lu map=%ls gle=%lu hmap=%p gle_open=%lu created=%d hdr(ver=%u bytes=%u off=0x%X fmt=%u w=%u h=%u stride=%u) ctr(c1=%u c2=%u stable=%d changed=%d)%ls\n",
               (unsigned long)pid,
               (long)s_calls,
               (int)r,
@@ -2441,6 +2454,17 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               (void*)hmap_dbg,
               (unsigned long)gle_open,
               (int)created_mapping,
+              (unsigned)hdr_ver,
+              (unsigned)hdr_bytes,
+              (unsigned)hdr_off,
+              (unsigned)hdr_fmt,
+              (unsigned)hdr_w,
+              (unsigned)hdr_h,
+              (unsigned)hdr_stride,
+              (unsigned)ctr_c1,
+              (unsigned)ctr_c2,
+              (int)ctr_stable,
+              (int)ctr_changed,
               (const wchar_t*)suffix_wide
             );
             fputws (line, fp);
@@ -2481,7 +2505,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             wchar_t line [512] = { };
             _snwprintf_s (
               line, _countof (line), _TRUNCATE,
-              L"pid=%lu calls=%ld last_reason=%d reached_draw=%d returned=%d hdc=%p tid=%lu map=%ls gle=%lu hmap=%p gle_open=%lu created=%d%ls\n",
+              L"pid=%lu calls=%ld last_reason=%d reached_draw=%d returned=%d hdc=%p tid=%lu map=%ls gle=%lu hmap=%p gle_open=%lu created=%d hdr(ver=%u bytes=%u off=0x%X fmt=%u w=%u h=%u stride=%u) ctr(c1=%u c2=%u stable=%d changed=%d)%ls\n",
               (unsigned long)pid,
               (long)s_calls,
               (int)r,
@@ -2494,6 +2518,17 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               (void *)hmap_dbg,
               (unsigned long)gle_open,
               (int)created_mapping,
+              (unsigned)hdr_ver,
+              (unsigned)hdr_bytes,
+              (unsigned)hdr_off,
+              (unsigned)hdr_fmt,
+              (unsigned)hdr_w,
+              (unsigned)hdr_h,
+              (unsigned)hdr_stride,
+              (unsigned)ctr_c1,
+              (unsigned)ctr_c2,
+              (int)ctr_stable,
+              (int)ctr_changed,
               (const wchar_t*)L""
             );
             fputws (line, fp2);
@@ -3543,7 +3578,6 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
            static uint32_t s_last_counter = 0;
            static bool     s_has_frame    = false;
            static GLuint   s_tex          = 0;
-           static bool     s_test_initialized = false;
 
            if (s_base == nullptr)
            {
@@ -3566,35 +3600,13 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
              s_hMap = hmap_dbg;
 
-             s_base = (uint8_t *)MapViewOfFile (s_hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-             if (s_base == nullptr)
-             {
-               open_gle = GetLastError ();
-               reason   = 320;
-               goto skf1_epilogue;
-             }
-
-             if (s_base != nullptr && (! s_test_initialized))
-             {
-               uint8_t* p = (uint8_t *)s_base;
-
-               *(uint32_t *)(p + 0x00) = 0x31464B53u; // 'SKF1'
-               *(uint32_t *)(p + 0x04) = 1u;
-               *(uint32_t *)(p + 0x08) = 0x20u;
-                *(uint32_t *)(p + 0x0C) = 0x24u;  // ✅ FIXED: data_offset = 0x24 (pixels start here)
-               *(uint32_t *)(p + 0x10) = 1u;
-               *(uint32_t *)(p + 0x14) = 256u;
-               *(uint32_t *)(p + 0x18) = 256u;
-               *(uint32_t *)(p + 0x1C) = 256u * 4u;
-
-               *(volatile LONG *)(p + 0x20) = 1;
-
-               uint32_t* pixels = (uint32_t *)(p + 0x24);
-               for (uint32_t i = 0; i < 256u * 256u; ++i)
-                 pixels [i] = 0xFFFF00FFu;
-
-               s_test_initialized = true;
-             }
+             s_base = (uint8_t *)MapViewOfFile (s_hMap, FILE_MAP_READ, 0, 0, 0);
+              if (s_base == nullptr)
+              {
+                open_gle = GetLastError ();
+                reason   = R_MAP_FAIL;
+                goto skf1_epilogue;
+              }
            }
 
            if (s_base != nullptr)
@@ -3607,28 +3619,43 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
              if (magic == 0x31464B53u && ver == 1u)
              {
-               const uint32_t header_bytes = *(const uint32_t *)(base + 0x08);
-               const uint32_t data_offset  = *(const uint32_t *)(base + 0x0C);
-               const uint32_t pixel_format = *(const uint32_t *)(base + 0x10);
-               const uint32_t width        = *(const uint32_t *)(base + 0x14);
-               const uint32_t height       = *(const uint32_t *)(base + 0x18);
-               const uint32_t stride       = *(const uint32_t *)(base + 0x1C);
+                const uint32_t header_bytes = *(const uint32_t *)(base + 0x08);
+                const uint32_t data_offset  = *(const uint32_t *)(base + 0x0C);
+                const uint32_t pixel_format = *(const uint32_t *)(base + 0x10);
+                const uint32_t width        = *(const uint32_t *)(base + 0x14);
+                const uint32_t height       = *(const uint32_t *)(base + 0x18);
+                const uint32_t stride       = *(const uint32_t *)(base + 0x1C);
+                hdr_ver    = ver;
+                hdr_bytes  = header_bytes;
+                hdr_off    = data_offset;
+                hdr_fmt    = pixel_format;
+                hdr_w      = width;
+                hdr_h      = height;
+                hdr_stride = stride;
 
-                // ✅ FIXED: Counter at fixed offset 0x20, pixels at data_offset (0x24)
-                const uint64_t counter_off  = 0x20ull;
+                const uint64_t counter_off  = (uint64_t)data_offset - 4ull;
                 const uint64_t pixel_off    = (uint64_t)data_offset;
-               const uint64_t bytes        = (uint64_t)stride * (uint64_t)height;
-               const uint64_t end_off      = pixel_off + bytes;
+                const uint64_t bytes        = (uint64_t)stride * (uint64_t)height;
+                const uint64_t end_off      = pixel_off + bytes;
+                const bool counter_pos_ok   = (data_offset >= 0x24u && (counter_off + 4ull == pixel_off));
 
-                if (header_bytes >= 0x20u && data_offset >= 0x24u && pixel_format == 1u &&
+                if (header_bytes >= 0x20u && data_offset >= 0x24u && counter_pos_ok && pixel_format == 1u &&
                    width > 0u && height > 0u && stride >= width * 4u && end_off <= kMapSize)
-               {
-                 const uint32_t current_counter = *(const uint32_t *)(base + (size_t)counter_off);
-                 const uint8_t* pixels          =  base + (size_t)pixel_off;
+                {
+                  const uint32_t c1 = *(const uint32_t *)(base + (size_t)counter_off);
+                  const uint32_t c2 = *(const uint32_t *)(base + (size_t)counter_off);
+                  const bool stable = (c1 == c2);
+                  const bool valid  = (c1 != 0u);
+                  const bool counter_changed = (c1 != s_last_counter);
+                  ctr_c1 = c1;
+                  ctr_c2 = c2;
+                  ctr_stable = stable ? 1 : 0;
+                  ctr_changed = counter_changed ? 1 : 0;
+                  const uint8_t* pixels          =  base + (size_t)pixel_off;
 
-                 GLint prev_unpack = 0;
-                 if (current_counter != s_last_counter)
-                 {
+                  GLint prev_unpack = 0;
+                  if (stable && valid && counter_changed)
+                  {
                    if (s_tex == 0)
                      glGenTextures (1, &s_tex);
 
@@ -3661,12 +3688,27 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                      glPixelStorei (GL_UNPACK_ALIGNMENT, prev_unpack);
                      glBindTexture (GL_TEXTURE_2D, (GLuint)prev_tex);
 
-                     s_last_counter = current_counter;
-                     s_has_frame    = true;
-                      if (reason == R_ENTER)
-                        reason = R_UPLOAD_OK;
-                   }
-                 }
+                      s_last_counter = c1;
+                      s_has_frame    = true;
+                       if (reason == R_ENTER)
+                         reason = R_UPLOAD_OK;
+                    }
+                  }
+                  else if ((! stable || ! valid) && (! s_has_frame))
+                  {
+                    reason = stable ? R_NO_FRAME_YET : R_STALE_COUNTER;
+                    reached_draw = false;
+                    status =
+                      static_cast_pfn <wglSwapBuffers_pfn> (pfnSwapFunc)(hDC);
+                    SK_GL_SwapInterval (0);
+                    SK_LatentSync_EndSwap ();
+                    if (status)
+                      SK_EndBufferSwap (S_OK);
+                    else
+                      SK_EndBufferSwap (E_UNEXPECTED);
+                    Emit (reason, reached_draw, status);
+                    return status;
+                  }
                   else if (! s_has_frame)
                   {
                     reason = R_NO_FRAME_YET;

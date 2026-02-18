@@ -1011,6 +1011,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static ID3D12Resource*              s_d3d12_staging_texture   = nullptr;
   static ID3D12Resource*              s_d3d12_upload_buffer     = nullptr;
   static ID3D12CommandQueue*          s_d3d12_cmd_queue         = nullptr;
+  static DXGI_FORMAT                  s_d3d12_staging_format    = DXGI_FORMAT_UNKNOWN;
+  static UINT                         s_d3d12_staging_width     = 0;
+  static UINT                         s_d3d12_staging_height    = 0;
+  static UINT64                       s_d3d12_upload_size       = 0;
 
   auto _SidecarLog = [&](const wchar_t* fmt, ...)
   {
@@ -1642,208 +1646,281 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         D3D12_RESOURCE_DESC bbDesc = bb12->GetDesc();
         
         if (bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
-            bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
+            bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
+            bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
         {
           // STAGE E: Upload pixels if we have new frame data
           if (s_skf1.view_ptr != nullptr && s_skf1.width > 0 && s_skf1.height > 0)
           {
             volatile LONG* counter_ptr12 = (volatile LONG*)(s_skf1.view_ptr + (s_skf1.data_offset - 4));
             const LONG c1_12 = *counter_ptr12;
-            
-            if (c1_12 != 0)
+            const LONG c2_12 = *counter_ptr12;
+            const bool stable12 = (c1_12 == c2_12);
+            const bool valid12  = (c1_12 != 0);
+            const bool counter_changed = (c1_12 != s_skf1.last_counter);
+
+            if (stable12 && valid12 && (counter_changed || !s_skf1.has_frame))
             {
-              const bool counter_changed = (c1_12 != s_skf1.last_counter);
-              
-              if (counter_changed || !s_skf1.has_frame)
+              // Create command allocator if needed
+              if (s_d3d12_cmd_allocator == nullptr)
               {
-                // Create upload buffer and staging texture if needed
-                // (Variables declared globally at top of file)
-                
-                // Create command allocator if needed
-                if (s_d3d12_cmd_allocator == nullptr)
+                dev12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                  __uuidof(ID3D12CommandAllocator), (void**)&s_d3d12_cmd_allocator);
+              }
+
+              // Create command list if needed
+              if (s_d3d12_cmd_list == nullptr && s_d3d12_cmd_allocator != nullptr)
+              {
+                dev12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                  s_d3d12_cmd_allocator, nullptr,
+                  __uuidof(ID3D12GraphicsCommandList), (void**)&s_d3d12_cmd_list);
+                s_d3d12_cmd_list->Close(); // Start closed
+              }
+
+              const UINT uploadRowPitch = ((s_skf1.width * 4u + 255u) & ~255u);
+              const UINT64 uploadBufferSize = (UINT64)uploadRowPitch * (UINT64)s_skf1.height;
+
+              // Recreate upload buffer if needed
+              if (s_d3d12_upload_buffer == nullptr || s_d3d12_upload_size < uploadBufferSize)
+              {
+                if (s_d3d12_upload_buffer != nullptr)
                 {
-                  dev12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                    __uuidof(ID3D12CommandAllocator), (void**)&s_d3d12_cmd_allocator);
+                  s_d3d12_upload_buffer->Release();
+                  s_d3d12_upload_buffer = nullptr;
                 }
-                
-                // Create command list if needed
-                if (s_d3d12_cmd_list == nullptr && s_d3d12_cmd_allocator != nullptr)
+
+                D3D12_HEAP_PROPERTIES uploadHeapProps = {};
+                uploadHeapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+                D3D12_RESOURCE_DESC uploadBufferDesc = {};
+                uploadBufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                uploadBufferDesc.Width = uploadBufferSize;
+                uploadBufferDesc.Height = 1;
+                uploadBufferDesc.DepthOrArraySize = 1;
+                uploadBufferDesc.MipLevels = 1;
+                uploadBufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+                uploadBufferDesc.SampleDesc.Count = 1;
+                uploadBufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+                dev12->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE,
+                  &uploadBufferDesc, D3D12_RESOURCE_STATE_GENERIC_READ,
+                  nullptr, __uuidof(ID3D12Resource), (void**)&s_d3d12_upload_buffer);
+                s_d3d12_upload_size = uploadBufferSize;
+              }
+
+              const bool recreate_staging =
+                (s_d3d12_staging_texture == nullptr || s_d3d12_staging_format != bbDesc.Format ||
+                 s_d3d12_staging_width != s_skf1.width || s_d3d12_staging_height != s_skf1.height);
+
+              if (recreate_staging)
+              {
+                if (s_d3d12_staging_texture != nullptr)
                 {
-                  dev12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                    s_d3d12_cmd_allocator, nullptr,
-                    __uuidof(ID3D12GraphicsCommandList), (void**)&s_d3d12_cmd_list);
-                  s_d3d12_cmd_list->Close(); // Start closed
+                  s_d3d12_staging_texture->Release();
+                  s_d3d12_staging_texture = nullptr;
                 }
-                
-                const UINT64 uploadBufferSize = s_skf1.stride * s_skf1.height;
-                
-                // Create upload buffer if needed
-                if (s_d3d12_upload_buffer == nullptr)
+
+                D3D12_HEAP_PROPERTIES defaultHeapProps = {};
+                defaultHeapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+                D3D12_RESOURCE_DESC texDesc = {};
+                texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                texDesc.Width = s_skf1.width;
+                texDesc.Height = s_skf1.height;
+                texDesc.DepthOrArraySize = 1;
+                texDesc.MipLevels = 1;
+                texDesc.Format = bbDesc.Format;
+                texDesc.SampleDesc.Count = 1;
+                texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+                dev12->CreateCommittedResource(&defaultHeapProps, D3D12_HEAP_FLAG_NONE,
+                  &texDesc, D3D12_RESOURCE_STATE_COPY_DEST,
+                  nullptr, __uuidof(ID3D12Resource), (void**)&s_d3d12_staging_texture);
+
+                s_d3d12_staging_format = bbDesc.Format;
+                s_d3d12_staging_width  = s_skf1.width;
+                s_d3d12_staging_height = s_skf1.height;
+              }
+
+              if (s_d3d12_upload_buffer != nullptr && s_d3d12_staging_texture != nullptr &&
+                  s_d3d12_cmd_allocator != nullptr && s_d3d12_cmd_list != nullptr)
+              {
+                void* uploadData = nullptr;
+                D3D12_RANGE readRange = {0, 0};
+                hr12 = s_d3d12_upload_buffer->Map(0, &readRange, &uploadData);
+
+                if (SUCCEEDED(hr12) && uploadData != nullptr)
                 {
-                  D3D12_HEAP_PROPERTIES uploadHeapProps = {};
-                  uploadHeapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-                  
-                  D3D12_RESOURCE_DESC uploadBufferDesc = {};
-                  uploadBufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-                  uploadBufferDesc.Width = uploadBufferSize;
-                  uploadBufferDesc.Height = 1;
-                  uploadBufferDesc.DepthOrArraySize = 1;
-                  uploadBufferDesc.MipLevels = 1;
-                  uploadBufferDesc.Format = DXGI_FORMAT_UNKNOWN;
-                  uploadBufferDesc.SampleDesc.Count = 1;
-                  uploadBufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-                  
-                  dev12->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE,
-                    &uploadBufferDesc, D3D12_RESOURCE_STATE_GENERIC_READ,
-                    nullptr, __uuidof(ID3D12Resource), (void**)&s_d3d12_upload_buffer);
-                }
-                
-                // Create staging texture if needed
-                if (s_d3d12_staging_texture == nullptr)
-                {
-                  D3D12_HEAP_PROPERTIES defaultHeapProps = {};
-                  defaultHeapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-                  
-                  D3D12_RESOURCE_DESC texDesc = {};
-                  texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-                  texDesc.Width = s_skf1.width;
-                  texDesc.Height = s_skf1.height;
-                  texDesc.DepthOrArraySize = 1;
-                  texDesc.MipLevels = 1;
-                  texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-                  texDesc.SampleDesc.Count = 1;
-                  texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-                  
-                  dev12->CreateCommittedResource(&defaultHeapProps, D3D12_HEAP_FLAG_NONE,
-                    &texDesc, D3D12_RESOURCE_STATE_COPY_DEST,
-                    nullptr, __uuidof(ID3D12Resource), (void**)&s_d3d12_staging_texture);
-                }
-                
-                // Upload pixel data
-                if (s_d3d12_upload_buffer != nullptr && s_d3d12_staging_texture != nullptr &&
-                    s_d3d12_cmd_allocator != nullptr && s_d3d12_cmd_list != nullptr)
-                {
-                  // Map and copy pixel data to upload buffer
-                  void* uploadData = nullptr;
-                  D3D12_RANGE readRange = {0, 0};
-                  hr12 = s_d3d12_upload_buffer->Map(0, &readRange, &uploadData);
-                  
-                  if (SUCCEEDED(hr12) && uploadData != nullptr)
+                  const uint8_t* srcPixels = s_skf1.view_ptr + s_skf1.data_offset;
+                  uint8_t* dstBytes = (uint8_t*)uploadData;
+                  for (UINT y = 0; y < s_skf1.height; ++y)
                   {
-                    const uint8_t* srcPixels = s_skf1.view_ptr + s_skf1.data_offset;
-                    memcpy(uploadData, srcPixels, static_cast<size_t>(uploadBufferSize));
-                    s_d3d12_upload_buffer->Unmap(0, nullptr);
-                    
-                    // Record upload commands
-                    s_d3d12_cmd_allocator->Reset();
-                    s_d3d12_cmd_list->Reset(s_d3d12_cmd_allocator, nullptr);
-                    
-                    D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
-                    srcLoc.pResource = s_d3d12_upload_buffer;
-                    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                    srcLoc.PlacedFootprint.Footprint.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-                    srcLoc.PlacedFootprint.Footprint.Width = s_skf1.width;
-                    srcLoc.PlacedFootprint.Footprint.Height = s_skf1.height;
-                    srcLoc.PlacedFootprint.Footprint.Depth = 1;
-                    srcLoc.PlacedFootprint.Footprint.RowPitch = s_skf1.stride;
-                    
-                    D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
-                    dstLoc.pResource = s_d3d12_staging_texture;
-                    dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                    dstLoc.SubresourceIndex = 0;
-                    
-                    s_d3d12_cmd_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
-                    
-                    s_d3d12_cmd_list->Close();
-                    
-                    ID3D12CommandList* cmdLists[] = {s_d3d12_cmd_list};
-                    cmdQueue->ExecuteCommandLists(1, cmdLists);
-                    
-                    s_skf1.last_counter = c1_12;
-                    s_skf1.has_frame = true;
-                    
-                    if (!s_skf1.logged_stage_e_ok.exchange(true))
+                    const uint8_t* srcRow = srcPixels + (size_t)y * (size_t)s_skf1.stride;
+                    uint8_t*       dstRow = dstBytes + (size_t)y * (size_t)uploadRowPitch;
+
+                    if (bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM)
                     {
-                      _SidecarLog(L"SKF1 Stage E OK: D3D12 upload accepted counter=%ld has_frame=1", (long)c1_12);
+                      memcpy(dstRow, srcRow, (size_t)s_skf1.width * 4u);
                     }
+                    else if (bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
+                    {
+                      for (UINT x = 0; x < s_skf1.width; ++x)
+                      {
+                        const uint8_t b = srcRow[x * 4 + 0];
+                        const uint8_t g = srcRow[x * 4 + 1];
+                        const uint8_t r = srcRow[x * 4 + 2];
+                        const uint8_t a = srcRow[x * 4 + 3];
+                        dstRow[x * 4 + 0] = r;
+                        dstRow[x * 4 + 1] = g;
+                        dstRow[x * 4 + 2] = b;
+                        dstRow[x * 4 + 3] = a;
+                      }
+                    }
+                    else
+                    {
+                      uint32_t* dstRow32 = (uint32_t*)dstRow;
+                      for (UINT x = 0; x < s_skf1.width; ++x)
+                      {
+                        const uint32_t b8 = srcRow[x * 4 + 0];
+                        const uint32_t g8 = srcRow[x * 4 + 1];
+                        const uint32_t r8 = srcRow[x * 4 + 2];
+                        const uint32_t a8 = srcRow[x * 4 + 3];
+                        const uint32_t r10 = (r8 * 1023u + 127u) / 255u;
+                        const uint32_t g10 = (g8 * 1023u + 127u) / 255u;
+                        const uint32_t b10 = (b8 * 1023u + 127u) / 255u;
+                        const uint32_t a2  = (a8 *    3u + 127u) / 255u;
+                        dstRow32[x] = (r10) | (g10 << 10u) | (b10 << 20u) | (a2 << 30u);
+                      }
+                    }
+                  }
+                  s_d3d12_upload_buffer->Unmap(0, nullptr);
+
+                  s_d3d12_cmd_allocator->Reset();
+                  s_d3d12_cmd_list->Reset(s_d3d12_cmd_allocator, nullptr);
+
+                  D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
+                  srcLoc.pResource = s_d3d12_upload_buffer;
+                  srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                  srcLoc.PlacedFootprint.Footprint.Format = bbDesc.Format;
+                  srcLoc.PlacedFootprint.Footprint.Width = s_skf1.width;
+                  srcLoc.PlacedFootprint.Footprint.Height = s_skf1.height;
+                  srcLoc.PlacedFootprint.Footprint.Depth = 1;
+                  srcLoc.PlacedFootprint.Footprint.RowPitch = uploadRowPitch;
+
+                  D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
+                  dstLoc.pResource = s_d3d12_staging_texture;
+                  dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                  dstLoc.SubresourceIndex = 0;
+
+                  s_d3d12_cmd_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+
+                  s_d3d12_cmd_list->Close();
+
+                  ID3D12CommandList* cmdLists[] = {s_d3d12_cmd_list};
+                  cmdQueue->ExecuteCommandLists(1, cmdLists);
+
+                  s_skf1.last_counter = c1_12;
+                  s_skf1.has_frame = true;
+
+                  if (!s_skf1.logged_stage_e_ok.exchange(true))
+                  {
+                    _SidecarLog(L"SKF1 Stage E OK: D3D12 upload accepted counter=%ld has_frame=1", (long)c1_12);
                   }
                 }
               }
-              
-              // STAGE F: Blit staging texture to backbuffer
-              if (s_skf1.has_frame && s_d3d12_staging_texture != nullptr &&
-                  s_d3d12_cmd_allocator != nullptr && s_d3d12_cmd_list != nullptr)
+            }
+            else if (!stable12)
+            {
+              static std::atomic<bool> s_logged_d3d12_stale = false;
+              if (!s_logged_d3d12_stale.exchange(true))
+                _SidecarLog(L"SKF1 D3D12 skip: reason=STALE_COUNTER c1=%ld c2=%ld", (long)c1_12, (long)c2_12);
+            }
+            else if (!valid12)
+            {
+              static std::atomic<bool> s_logged_d3d12_zero = false;
+              if (!s_logged_d3d12_zero.exchange(true))
+                _SidecarLog(L"SKF1 D3D12 skip: reason=ZERO_COUNTER");
+            }
+
+            // STAGE F: Blit staging texture to backbuffer (always last-good if available)
+            if (s_skf1.has_frame && s_d3d12_staging_texture != nullptr &&
+                s_d3d12_cmd_allocator != nullptr && s_d3d12_cmd_list != nullptr)
+            {
+              // Record blit commands
+              s_d3d12_cmd_allocator->Reset();
+              s_d3d12_cmd_list->Reset(s_d3d12_cmd_allocator, nullptr);
+
+              // Transition backbuffer to COPY_DEST
+              D3D12_RESOURCE_BARRIER barrierToCopyDest = {};
+              barrierToCopyDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+              barrierToCopyDest.Transition.pResource = bb12;
+              barrierToCopyDest.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+              barrierToCopyDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+              barrierToCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+              s_d3d12_cmd_list->ResourceBarrier(1, &barrierToCopyDest);
+
+              // Transition staging texture to COPY_SOURCE
+              D3D12_RESOURCE_BARRIER barrierToSrc = {};
+              barrierToSrc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+              barrierToSrc.Transition.pResource = s_d3d12_staging_texture;
+              barrierToSrc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+              barrierToSrc.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+              barrierToSrc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+              s_d3d12_cmd_list->ResourceBarrier(1, &barrierToSrc);
+
+              // Copy staging texture to backbuffer
+              D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
+              srcLoc.pResource = s_d3d12_staging_texture;
+              srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+              srcLoc.SubresourceIndex = 0;
+
+              D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
+              dstLoc.pResource = bb12;
+              dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+              dstLoc.SubresourceIndex = 0;
+
+              D3D12_BOX srcBox = {};
+              srcBox.right = s_skf1.width;
+              srcBox.bottom = s_skf1.height;
+              srcBox.back = 1;
+
+              s_d3d12_cmd_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
+
+              // Transition staging texture back to COPY_DEST for next upload
+              D3D12_RESOURCE_BARRIER barrierToDest = {};
+              barrierToDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+              barrierToDest.Transition.pResource = s_d3d12_staging_texture;
+              barrierToDest.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+              barrierToDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+              barrierToDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+              s_d3d12_cmd_list->ResourceBarrier(1, &barrierToDest);
+
+              // Transition backbuffer back to PRESENT
+              D3D12_RESOURCE_BARRIER barrierToPresent = {};
+              barrierToPresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+              barrierToPresent.Transition.pResource = bb12;
+              barrierToPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+              barrierToPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+              barrierToPresent.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+              s_d3d12_cmd_list->ResourceBarrier(1, &barrierToPresent);
+
+              s_d3d12_cmd_list->Close();
+
+              ID3D12CommandList* cmdLists[] = {s_d3d12_cmd_list};
+              cmdQueue->ExecuteCommandLists(1, cmdLists);
+
+              if (!s_skf1.logged_stage_f_ok.exchange(true))
               {
-                // Record blit commands
-                s_d3d12_cmd_allocator->Reset();
-                s_d3d12_cmd_list->Reset(s_d3d12_cmd_allocator, nullptr);
-                
-                // Transition backbuffer to COPY_DEST
-                D3D12_RESOURCE_BARRIER barrierToCopyDest = {};
-                barrierToCopyDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                barrierToCopyDest.Transition.pResource = bb12;
-                barrierToCopyDest.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-                barrierToCopyDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-                barrierToCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                s_d3d12_cmd_list->ResourceBarrier(1, &barrierToCopyDest);
-                
-                // Transition staging texture to COPY_SOURCE
-                D3D12_RESOURCE_BARRIER barrierToSrc = {};
-                barrierToSrc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                barrierToSrc.Transition.pResource = s_d3d12_staging_texture;
-                barrierToSrc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-                barrierToSrc.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-                barrierToSrc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                s_d3d12_cmd_list->ResourceBarrier(1, &barrierToSrc);
-                
-                // Copy staging texture to backbuffer
-                D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
-                srcLoc.pResource = s_d3d12_staging_texture;
-                srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                srcLoc.SubresourceIndex = 0;
-                
-                D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
-                dstLoc.pResource = bb12;
-                dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                dstLoc.SubresourceIndex = 0;
-                
-                D3D12_BOX srcBox = {};
-                srcBox.right = s_skf1.width;
-                srcBox.bottom = s_skf1.height;
-                srcBox.back = 1;
-                
-                s_d3d12_cmd_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
-                
-                // Transition staging texture back to COPY_DEST for next upload
-                D3D12_RESOURCE_BARRIER barrierToDest = {};
-                barrierToDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                barrierToDest.Transition.pResource = s_d3d12_staging_texture;
-                barrierToDest.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-                barrierToDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-                barrierToDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                s_d3d12_cmd_list->ResourceBarrier(1, &barrierToDest);
-                
-                // Transition backbuffer back to PRESENT
-                D3D12_RESOURCE_BARRIER barrierToPresent = {};
-                barrierToPresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                barrierToPresent.Transition.pResource = bb12;
-                barrierToPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-                barrierToPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-                barrierToPresent.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                s_d3d12_cmd_list->ResourceBarrier(1, &barrierToPresent);
-                
-                s_d3d12_cmd_list->Close();
-                
-                ID3D12CommandList* cmdLists[] = {s_d3d12_cmd_list};
-                cmdQueue->ExecuteCommandLists(1, cmdLists);
-                
-                if (!s_skf1.logged_stage_f_ok.exchange(true))
-                {
-                  _SidecarLog(L"SKF1 Stage F OK: D3D12 blit executed");
-                }
+                _SidecarLog(L"SKF1 Stage F OK: D3D12 blit executed");
               }
             }
           }
+        }
+        else
+        {
+          static std::atomic<bool> s_logged_d3d12_bad_format = false;
+          if (!s_logged_d3d12_bad_format.exchange(true))
+            _SidecarLog(L"SKF1 D3D12 skip: reason=BAD_BACKBUFFER_FORMAT fmt=%u", (UINT)bbDesc.Format);
         }
         
         bb12->Release();
