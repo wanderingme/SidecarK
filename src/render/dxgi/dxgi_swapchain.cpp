@@ -1285,7 +1285,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     const uint64_t pixel_end = (uint64_t)s_skf1.data_offset + payload_bytes;
     const uint64_t kMaxMappingSize = 64ull * 1024ull * 1024ull;
     const bool max_size_ok = (payload_bytes > 0 && pixel_end <= kMaxMappingSize);
-    const bool map_size_ok = (s_skf1.view_bytes == 0 || pixel_end <= (uint64_t)s_skf1.view_bytes);
+    const bool map_size_ok = (s_skf1.view_bytes > 0 && pixel_end <= (uint64_t)s_skf1.view_bytes);
     const bool size_ok = (max_size_ok && map_size_ok);
 
     if (!magic_ok || !version_ok || !header_ok || !offset_ok || !format_ok || 
@@ -1365,10 +1365,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
       ID3D11Texture2D* bb = nullptr;
 
-      hr =
+      const HRESULT hrBuffer =
         pReal->GetBuffer (0, __uuidof (ID3D11Texture2D), (void **)&bb);
 
-      if (SUCCEEDED (hr) && bb != nullptr && ctx != nullptr)
+      if (SUCCEEDED (hrBuffer) && bb != nullptr && ctx != nullptr)
       {
         D3D11_TEXTURE2D_DESC bbDesc = { };
         bb->GetDesc (&bbDesc);
@@ -1647,7 +1647,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       {
         static std::atomic<bool> s_logged_d3d11_bb_fail = false;
         if (!s_logged_d3d11_bb_fail.exchange(true))
-          _SidecarLog(L"SKF1 D3D11 skip: reason=BACKBUFFER_OR_CONTEXT_UNAVAILABLE hr=0x%08X bb=%p ctx=%p", hr, bb, ctx);
+          _SidecarLog(L"SKF1 D3D11 skip: reason=BACKBUFFER_OR_CONTEXT_UNAVAILABLE hr_buffer=0x%08X bb=%p ctx=%p", hrBuffer, bb, ctx);
       }
     }
     else
