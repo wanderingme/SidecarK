@@ -2406,6 +2406,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
   const int R_HEADER_FAIL   = 330;
   const int R_NO_FRAME_YET  = 340;
   const int R_STALE_COUNTER = 345;
+  const int R_COUNTER_REGRESSION = 347;
   const int R_UPLOAD_OK     = 350;
   const int R_COMPOSITE_HIT = 360;
 
@@ -3578,6 +3579,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
            static uint32_t s_stride       = 0;
            static uint32_t s_last_counter = 0;
            static bool     s_has_frame    = false;
+           static bool     s_saw_zero_counter = false;
            static GLuint   s_tex          = 0;
            static SIZE_T   s_view_bytes   = 0;
            static std::vector <uint8_t> s_frame_snapshot;
@@ -3660,6 +3662,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                   const uint32_t c1 = *(const uint32_t *)(base + (size_t)counter_off);
                   uint32_t       c2 = c1;
                   const bool valid  = (c1 != 0u);
+                  if (!valid)
+                    s_saw_zero_counter = true;
                   const bool counter_changed = (c1 != s_last_counter);
                   ctr_c1 = c1;
                   ctr_c2 = c2;
@@ -3676,11 +3680,14 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                   }
 
                   const bool stable_after_copy = (c1 == c2);
+                  const bool counter_regressed = (s_has_frame && c1 < s_last_counter);
+                  const bool restart_after_zero = (counter_regressed && s_saw_zero_counter);
+                  const bool monotonic_ok = (!counter_regressed || restart_after_zero || !s_has_frame);
                   ctr_c2 = c2;
                   ctr_stable = stable_after_copy ? 1 : 0;
 
                   GLint prev_unpack = 0;
-                  if (stable_after_copy && valid && counter_changed)
+                  if (stable_after_copy && valid && monotonic_ok && counter_changed)
                   {
                    if (s_tex == 0)
                      glGenTextures (1, &s_tex);
@@ -3714,11 +3721,16 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                      glPixelStorei (GL_UNPACK_ALIGNMENT, prev_unpack);
                      glBindTexture (GL_TEXTURE_2D, (GLuint)prev_tex);
 
-                      s_last_counter = c1;
-                      s_has_frame    = true;
-                       if (reason == R_ENTER)
-                         reason = R_UPLOAD_OK;
+                       s_last_counter = c1;
+                       s_has_frame    = true;
+                       s_saw_zero_counter = false;
+                        if (reason == R_ENTER)
+                          reason = R_UPLOAD_OK;
                     }
+                  }
+                  else if (stable_after_copy && valid && (!monotonic_ok))
+                  {
+                    reason = R_COUNTER_REGRESSION;
                   }
                   else if ((! stable_after_copy || ! valid) && (! s_has_frame))
                   {

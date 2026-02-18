@@ -997,6 +997,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     // Stage E/F: Upload and blit state
     LONG     last_counter = 0;
     bool     has_frame = false;
+    bool     saw_zero_counter = false;
 
     // D3D11 resources
     ID3D11Texture2D* tex = nullptr;
@@ -1101,6 +1102,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     s_skf1.stride = 0;
     s_skf1.last_counter = 0;
     s_skf1.has_frame = false;
+    s_skf1.saw_zero_counter = false;
   };
 
   // STAGE A: PID + Name Selection (no churn)
@@ -1483,12 +1485,17 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               const LONG c2 = *counter_ptr;
               const bool stable = (c1 == c2);
               const bool valid = (c1 != 0);
+              if (!valid)
+                s_skf1.saw_zero_counter = true;
               
-              // Only upload if stable AND valid AND counter changed
-              if (stable && valid)
+              const bool counter_changed   = (c1 != s_skf1.last_counter);
+              const bool counter_regressed = (s_skf1.has_frame && c1 < s_skf1.last_counter);
+              const bool restart_after_zero = (counter_regressed && s_skf1.saw_zero_counter);
+              const bool monotonic_ok      = (!counter_regressed || restart_after_zero || !s_skf1.has_frame);
+
+              // Only upload if stable, valid, and monotonic (or explicit restart-after-zero)
+              if (stable && valid && monotonic_ok)
               {
-                const bool counter_changed = (c1 != s_skf1.last_counter);
-                
                 if (counter_changed || !s_skf1.has_frame)
                 {
                   // Upload pixel data
@@ -1560,6 +1567,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
                   s_skf1.last_counter = c1;
                   s_skf1.has_frame = true;
+                  s_skf1.saw_zero_counter = false;
                   
                   // STAGE E OK
                   if (!s_skf1.logged_stage_e_ok.exchange(true))
@@ -1583,6 +1591,13 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   if (!s_logged_d3d11_zero.exchange(true))
                     _SidecarLog(L"SKF1 D3D11 skip: reason=ZERO_COUNTER");
                 }
+                else if (!monotonic_ok)
+                {
+                  static std::atomic<bool> s_logged_d3d11_regress = false;
+                  if (!s_logged_d3d11_regress.exchange(true))
+                    _SidecarLog(L"SKF1 D3D11 skip: reason=COUNTER_REGRESSION c1=%ld last=%ld zero_seen=%d",
+                                (long)c1, (long)s_skf1.last_counter, s_skf1.saw_zero_counter ? 1 : 0);
+                }
                 if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_SeqMismatch);
               }
 
@@ -1592,7 +1607,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             {
               static std::atomic<bool> s_logged_d3d11_map_fail = false;
               if (!s_logged_d3d11_map_fail.exchange(true))
-                _SidecarLog(L"SKF1 D3D11 skip: reason=MAP_WRITE_FAIL");
+                _SidecarLog(L"SKF1 D3D11 skip: reason=TEX_MAP_WRITE_FAIL");
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_MapFail);
             }
           }
@@ -1716,7 +1731,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             LONG c2_12 = c1_12;
             bool stable12 = true;
             const bool valid12  = (c1_12 != 0);
+            if (!valid12)
+              s_skf1.saw_zero_counter = true;
             const bool counter_changed = (c1_12 != s_skf1.last_counter);
+            const bool counter_regressed = (s_skf1.has_frame && c1_12 < s_skf1.last_counter);
+            const bool restart_after_zero = (counter_regressed && s_skf1.saw_zero_counter);
+            const bool monotonic_ok = (!counter_regressed || restart_after_zero || !s_skf1.has_frame);
             static std::vector <uint8_t> s_frame_snapshot12;
             const size_t snapshot_bytes12 = (size_t)s_skf1.stride * (size_t)s_skf1.height;
             const bool attempting_upload = (counter_changed || !s_skf1.has_frame);
@@ -1731,7 +1751,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               stable12 = (c1_12 == c2_12);
             }
 
-            if (stable12 && valid12 && attempting_upload)
+            if (stable12 && valid12 && monotonic_ok && attempting_upload)
             {
               // Create command allocator if needed
               if (s_d3d12_cmd_allocator == nullptr)
@@ -1893,6 +1913,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
                   s_skf1.last_counter = c1_12;
                   s_skf1.has_frame = true;
+                  s_skf1.saw_zero_counter = false;
 
                   if (!s_skf1.logged_stage_e_ok.exchange(true))
                   {
@@ -1912,6 +1933,13 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               static std::atomic<bool> s_logged_d3d12_zero = false;
               if (!s_logged_d3d12_zero.exchange(true))
                 _SidecarLog(L"SKF1 D3D12 skip: reason=ZERO_COUNTER");
+            }
+            else if (attempting_upload && !monotonic_ok)
+            {
+              static std::atomic<bool> s_logged_d3d12_regress = false;
+              if (!s_logged_d3d12_regress.exchange(true))
+                _SidecarLog(L"SKF1 D3D12 skip: reason=COUNTER_REGRESSION c1=%ld last=%ld zero_seen=%d",
+                            (long)c1_12, (long)s_skf1.last_counter, s_skf1.saw_zero_counter ? 1 : 0);
             }
 
             // STAGE F: Blit staging texture to backbuffer (always last-good if available)
