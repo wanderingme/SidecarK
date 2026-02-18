@@ -6200,6 +6200,7 @@ auto DeclKeybind =
   }
 
   osd.show->load           (config.osd.show);
+  config.osd.show = false;
 
   osd.text.red->load       (config.osd.red);
   osd.text.green->load     (config.osd.green);
