@@ -12,11 +12,16 @@
 #include <dwmapi.h>
 
 static constexpr bool kEnableLegacySKOF_DebugOnly = false;
+// User-editable: set true to enable SidecarK diagnostics token creation.
+static constexpr bool kEnableSidecarKDiagnosticsToken = false;
 
 static HANDLE g_diag_enable_map = nullptr;
 
 static void CreateDiagnosticsEnableTokenForPid(DWORD targetPid)
 {
+  if (!kEnableSidecarKDiagnosticsToken)
+    return;
+
   if (targetPid == 0)
     return;
 
