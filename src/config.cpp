@@ -6199,7 +6199,6 @@ auto DeclKeybind =
     );
   }
 
-  osd.show->load           (config.osd.show);
   config.osd.show = false;
 
   osd.text.red->load       (config.osd.red);
