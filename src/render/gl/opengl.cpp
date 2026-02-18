@@ -2409,6 +2409,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
   const int R_COUNTER_REGRESSION = 347;
   const int R_UPLOAD_OK     = 350;
   const int R_COMPOSITE_HIT = 360;
+  const ULONGLONG kSKF1_StaleCounterTimeoutMs = 2000ull;
 
   reason = R_ENTER;
 
@@ -3580,6 +3581,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
            static uint32_t s_last_counter = 0;
            static bool     s_has_frame    = false;
            static bool     s_saw_zero_counter = false;
+           static ULONGLONG s_stale_counter_since = 0;
            static GLuint   s_tex          = 0;
            static SIZE_T   s_view_bytes   = 0;
            static std::vector <uint8_t> s_frame_snapshot;
@@ -3680,6 +3682,18 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                   }
 
                   const bool stable_after_copy = (c1 == c2);
+                  if (s_has_frame && stable_after_copy && valid && c1 == s_last_counter)
+                  {
+                    const ULONGLONG now_ticks = GetTickCount64 ();
+                    if (s_stale_counter_since == 0)
+                      s_stale_counter_since = now_ticks;
+                    else if (now_ticks - s_stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
+                      s_saw_zero_counter = true;
+                  }
+                  else
+                  {
+                    s_stale_counter_since = 0;
+                  }
                   const bool counter_regressed = (s_has_frame && c1 < s_last_counter);
                   const bool restart_after_zero = (counter_regressed && s_saw_zero_counter);
                   const bool monotonic_ok = (!counter_regressed || restart_after_zero || !s_has_frame);
@@ -3724,6 +3738,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                        s_last_counter = c1;
                        s_has_frame    = true;
                        s_saw_zero_counter = false;
+                       s_stale_counter_since = 0;
                         if (reason == R_ENTER)
                           reason = R_UPLOAD_OK;
                     }

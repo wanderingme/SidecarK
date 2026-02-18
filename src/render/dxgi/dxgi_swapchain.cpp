@@ -32,6 +32,7 @@ extern bool SidecarK_DiagnosticsEnabled ();
 
 static constexpr bool kEnableSKF1_PresentHitCounter = true;
 static constexpr bool kEnableSKF1_SkipCounters      = true;
+static constexpr ULONGLONG kSKF1_StaleCounterTimeoutMs = 2000ull;
 static volatile LONG g_SKF1_PresentHits = 0;
 
 static volatile LONG g_SKF1_GateSkip      = 0;
@@ -998,6 +999,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     LONG     last_counter = 0;
     bool     has_frame = false;
     bool     saw_zero_counter = false;
+    ULONGLONG stale_counter_since = 0;
 
     // D3D11 resources
     ID3D11Texture2D* tex = nullptr;
@@ -1103,6 +1105,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     s_skf1.last_counter = 0;
     s_skf1.has_frame = false;
     s_skf1.saw_zero_counter = false;
+    s_skf1.stale_counter_since = 0;
   };
 
   // STAGE A: PID + Name Selection (no churn)
@@ -1487,6 +1490,19 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               const bool valid = (c1 != 0);
               if (!valid)
                 s_skf1.saw_zero_counter = true;
+
+              if (s_skf1.has_frame && stable && valid && c1 == s_skf1.last_counter)
+              {
+                const ULONGLONG now_ticks = GetTickCount64 ();
+                if (s_skf1.stale_counter_since == 0)
+                  s_skf1.stale_counter_since = now_ticks;
+                else if (now_ticks - s_skf1.stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
+                  s_skf1.saw_zero_counter = true;
+              }
+              else
+              {
+                s_skf1.stale_counter_since = 0;
+              }
               
               const bool counter_changed   = (c1 != s_skf1.last_counter);
               const bool counter_regressed = (s_skf1.has_frame && c1 < s_skf1.last_counter);
@@ -1568,6 +1584,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   s_skf1.last_counter = c1;
                   s_skf1.has_frame = true;
                   s_skf1.saw_zero_counter = false;
+                  s_skf1.stale_counter_since = 0;
                   
                   // STAGE E OK
                   if (!s_skf1.logged_stage_e_ok.exchange(true))
@@ -1751,6 +1768,19 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               stable12 = (c1_12 == c2_12);
             }
 
+            if (s_skf1.has_frame && stable12 && valid12 && c1_12 == s_skf1.last_counter)
+            {
+              const ULONGLONG now_ticks = GetTickCount64 ();
+              if (s_skf1.stale_counter_since == 0)
+                s_skf1.stale_counter_since = now_ticks;
+              else if (now_ticks - s_skf1.stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
+                s_skf1.saw_zero_counter = true;
+            }
+            else
+            {
+              s_skf1.stale_counter_since = 0;
+            }
+
             if (stable12 && valid12 && monotonic_ok && attempting_upload)
             {
               // Create command allocator if needed
@@ -1914,6 +1944,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   s_skf1.last_counter = c1_12;
                   s_skf1.has_frame = true;
                   s_skf1.saw_zero_counter = false;
+                  s_skf1.stale_counter_since = 0;
 
                   if (!s_skf1.logged_stage_e_ok.exchange(true))
                   {
