@@ -847,8 +847,31 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         const DWORD pid = GetCurrentProcessId ();
         void* this_ptr = (void *)this;
 
+        auto IsReadableRange = [](const void* ptr, size_t bytes) -> bool
+        {
+          if (ptr == nullptr || bytes == 0)
+            return false;
+
+          MEMORY_BASIC_INFORMATION mbi = { };
+          if (0 == VirtualQuery (ptr, &mbi, sizeof (mbi)))
+            return false;
+
+          if (mbi.State != MEM_COMMIT)
+            return false;
+
+          if ((mbi.Protect & PAGE_NOACCESS) == PAGE_NOACCESS ||
+              (mbi.Protect & PAGE_GUARD)    == PAGE_GUARD)
+            return false;
+
+          const uintptr_t begin      = (uintptr_t)ptr;
+          const uintptr_t end        = begin + bytes;
+          const uintptr_t region_end = (uintptr_t)mbi.BaseAddress + (uintptr_t)mbi.RegionSize;
+
+          return (end <= region_end);
+        };
+
         void** vtbl = nullptr;
-        if (this_ptr != nullptr)
+        if (IsReadableRange (this_ptr, sizeof (void *)))
           vtbl = *(void ***)this_ptr;
 
         fprintf (f, "pid=%lu\n", (unsigned long)pid);
@@ -856,7 +879,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         fprintf (f, "swapchain=%p\n", this_ptr);
         fprintf (f, "vtbl=%p\n", (void *)vtbl);
 
-        if (vtbl != nullptr)
+        if (vtbl != nullptr && IsReadableRange (vtbl, sizeof (void *) * 25))
         {
           for (int i = 0; i < 25; ++i)
           {
