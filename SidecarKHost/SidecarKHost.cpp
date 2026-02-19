@@ -1490,10 +1490,22 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
       {
         const char* stateStr = g_frames_streaming ? "streaming" : "attached";
         const char* ovStr    = (overlayEnabled && *overlayEnabled) ? "on" : "off";
+        const SidecarKFrameHeaderV1* hostHdr = (g_frame_host_view != nullptr)
+          ? reinterpret_cast<const SidecarKFrameHeaderV1*>(g_frame_host_view)
+          : nullptr;
+        const uint32_t w  = hostHdr ? hostHdr->width         : 0u;
+        const uint32_t h  = hostHdr ? hostHdr->height        : 0u;
+        const uint32_t fc = hostHdr ? hostHdr->frame_counter : 0u;
         const int n = snprintf(statusBuf, sizeof(statusBuf),
-          "state=%s,overlay=%s,pid=%u\n", stateStr, ovStr, (unsigned)targetPid);
+          "state=%s,overlay=%s,pid=%u,w=%u,h=%u,frame=%u\n",
+          stateStr, ovStr, (unsigned)targetPid, (unsigned)w, (unsigned)h, (unsigned)fc);
         if (n > 0 && n < (int)sizeof(statusBuf))
           { resp = statusBuf; respLen = (DWORD)n; }
+      }
+      else if (_stricmp(cmd, "quit") == 0)
+      {
+        resp = "ok\n"; respLen = 3;
+        g_shutdown.store(true);
       }
     }
 
