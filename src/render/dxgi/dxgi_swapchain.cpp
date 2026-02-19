@@ -1027,6 +1027,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static DWORD s_pidCached = 0;  // For reset detection only
   static std::atomic_bool s_logged_swapchain_once = false;
 
+  // Target swapchain: the first swapchain whose backbuffer exactly matches header dims.
+  // All other swapchains skip compositing until a device/pid reset clears this.
+  // Always accessed via InterlockedCompareExchangePointer/InterlockedExchangePointer —
+  // the volatile qualifier is sufficient for pointer-sized interlocked ops on Win32/x64.
+  static IDXGISwapChain* volatile s_target_swapchain = nullptr;
+
   // D3D12 resources
   static ID3D12CommandAllocator*      s_d3d12_cmd_allocator     = nullptr;
   static ID3D12GraphicsCommandList*   s_d3d12_cmd_list          = nullptr;
@@ -1153,6 +1159,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     s_d3d12_staging_width  = 0;
     s_d3d12_staging_height = 0;
     s_d3d12_upload_size    = 0;
+
+    // Release cached target swapchain so the next matching swapchain can claim it
+    InterlockedExchangePointer (reinterpret_cast<void * volatile *> (&s_target_swapchain), nullptr);
   };
 
   // STAGE A: PID + Name Selection (no churn)
@@ -1451,6 +1460,67 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       {
         D3D11_TEXTURE2D_DESC bbDesc = { };
         bb->GetDesc (&bbDesc);
+
+        // Per-second log: swapchain ptr, bb dims, header dims, composite status.
+        // Fires once per second (shared timer across all swapchains to avoid log spam).
+        static ULONGLONG s_last_periodic_log_ms = 0;
+        const ULONGLONG nowMs11 = GetTickCount64 ();
+        if (nowMs11 - s_last_periodic_log_ms >= 1000ULL)
+        {
+          s_last_periodic_log_ms = nowMs11;
+          // Atomic read: cast volatile pointer through void* to get current value.
+          const IDXGISwapChain* cached_sc =
+            static_cast<IDXGISwapChain*>(
+              InterlockedCompareExchangePointer (
+                reinterpret_cast<void * volatile *> (&s_target_swapchain), nullptr, nullptr));
+          // D3D11: bbDesc.Width/Height are UINT (32-bit) — same type as s_skf1.width/height.
+          const bool dims_match = (bbDesc.Width  == s_skf1.width &&
+                                   bbDesc.Height == s_skf1.height);
+          const bool is_target  = (pReal == cached_sc);
+          _SidecarLog(L"[periodic] sc=%p bb=%ux%u hdr=%ux%u dims_match=%d is_target=%d",
+                      (void*)pReal,
+                      bbDesc.Width, bbDesc.Height,
+                      s_skf1.width, s_skf1.height,
+                      dims_match ? 1 : 0,
+                      is_target  ? 1 : 0);
+        }
+
+        // Dims gate: skip this swapchain unless its backbuffer exactly matches header dims.
+        // This prevents compositing onto secondary/UI swapchains with different resolutions.
+        const bool bb_dims_match = (bbDesc.Width  == s_skf1.width &&
+                                    bbDesc.Height == s_skf1.height);
+        if (!bb_dims_match)
+        {
+          bb->Release ();
+          ctx->Release ();
+          dev->Release ();
+          return
+            SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                        nullptr, SK_DXGI_PresentSource::Wrapper );
+        }
+
+        // Target-swapchain gate: claim if unclaimed, skip if another swapchain is already
+        // the target. Uses a single CAS to avoid races between concurrent presents.
+        {
+          void* const prev =
+            InterlockedCompareExchangePointer (
+              reinterpret_cast<void * volatile *> (&s_target_swapchain),
+              reinterpret_cast<void *>(pReal),  // desired
+              nullptr                           // only swap if currently null
+            );
+          // prev == nullptr  → we just claimed it (first match)
+          // prev == pReal    → we are the cached target (keep going)
+          // prev == other    → another swapchain owns this slot (skip)
+          if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
+          {
+            bb->Release ();
+            ctx->Release ();
+            dev->Release ();
+            return
+              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+          }
+        }
 
         static std::atomic<bool> s_logged_format_check = false;
         if (!s_logged_format_check.exchange(true))
@@ -1830,7 +1900,61 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       if (SUCCEEDED(hr12) && bb12 != nullptr && cmdQueue != nullptr)
       {
         D3D12_RESOURCE_DESC bbDesc = bb12->GetDesc();
-        
+
+        // Per-second log: swapchain ptr, bb dims, header dims, composite status.
+        {
+          static ULONGLONG s_last_periodic_log_ms12 = 0;
+          const ULONGLONG nowMs12 = GetTickCount64 ();
+          if (nowMs12 - s_last_periodic_log_ms12 >= 1000ULL)
+          {
+            s_last_periodic_log_ms12 = nowMs12;
+            // Atomic read: cast volatile pointer through void* to get current value.
+            const IDXGISwapChain* cached_sc =
+              static_cast<IDXGISwapChain*>(
+                InterlockedCompareExchangePointer (
+                  reinterpret_cast<void * volatile *> (&s_target_swapchain), nullptr, nullptr));
+            // D3D12: bbDesc.Width is UINT64; s_skf1.width is uint32_t — cast for comparison.
+            const bool dims_match = (bbDesc.Width  == (UINT64)s_skf1.width &&
+                                     bbDesc.Height == s_skf1.height);
+            const bool is_target  = (pReal == cached_sc);
+            _SidecarLog(L"[periodic/d3d12] sc=%p bb=%llux%u hdr=%ux%u dims_match=%d is_target=%d",
+                        (void*)pReal,
+                        (unsigned long long)bbDesc.Width, bbDesc.Height,
+                        s_skf1.width, s_skf1.height,
+                        dims_match ? 1 : 0,
+                        is_target  ? 1 : 0);
+          }
+        }
+
+        // Dims gate: skip unless backbuffer exactly matches header dims.
+        // D3D12: bbDesc.Width is UINT64; cast s_skf1.width to UINT64 for comparison.
+        if (bbDesc.Width != (UINT64)s_skf1.width || bbDesc.Height != s_skf1.height)
+        {
+          bb12->Release ();
+          dev12->Release ();
+          return
+            SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                        nullptr, SK_DXGI_PresentSource::Wrapper );
+        }
+
+        // Target-swapchain gate: claim if unclaimed, skip if another swapchain owns it.
+        {
+          void* const prev =
+            InterlockedCompareExchangePointer (
+              reinterpret_cast<void * volatile *> (&s_target_swapchain),
+              reinterpret_cast<void *>(pReal),
+              nullptr
+            );
+          if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
+          {
+            bb12->Release ();
+            dev12->Release ();
+            return
+              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+          }
+        }
+
         if (bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
             bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
             bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
