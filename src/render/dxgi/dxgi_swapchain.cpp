@@ -1461,35 +1461,38 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         D3D11_TEXTURE2D_DESC bbDesc = { };
         bb->GetDesc (&bbDesc);
 
-        // Per-second log: swapchain ptr, bb dims, header dims, composite status.
-        // Fires once per second (shared timer across all swapchains to avoid log spam).
+        // copyW/copyH: clamp copy rect to min(backbuffer, header).
+        // When header dims are 0 (not yet published by producer), copyW/copyH will be 0
+        // and the 64×64 minimum gate below will reject compositing until real dims arrive.
+        const UINT copyW = (s_skf1.width  > 0u) ? std::min((UINT)bbDesc.Width,  s_skf1.width)  : 0u;
+        const UINT copyH = (s_skf1.height > 0u) ? std::min((UINT)bbDesc.Height, s_skf1.height) : 0u;
+
+        // Per-second log: sc, bbWxH, hdrWxH, copyWxH, is_target, frame_counter.
         static ULONGLONG s_last_periodic_log_ms = 0;
         const ULONGLONG nowMs11 = GetTickCount64 ();
         if (nowMs11 - s_last_periodic_log_ms >= 1000ULL)
         {
           s_last_periodic_log_ms = nowMs11;
-          // Atomic read: cast volatile pointer through void* to get current value.
           const IDXGISwapChain* cached_sc =
             static_cast<IDXGISwapChain*>(
               InterlockedCompareExchangePointer (
                 reinterpret_cast<void * volatile *> (&s_target_swapchain), nullptr, nullptr));
-          // D3D11: bbDesc.Width/Height are UINT (32-bit) — same type as s_skf1.width/height.
-          const bool dims_match = (bbDesc.Width  == s_skf1.width &&
-                                   bbDesc.Height == s_skf1.height);
           const bool is_target  = (pReal == cached_sc);
-          _SidecarLog(L"[periodic] sc=%p bb=%ux%u hdr=%ux%u dims_match=%d is_target=%d",
+          // frame_counter is stored 4 bytes before data_offset; same volatile read pattern as Stage E
+          const LONG fc_log = (s_skf1.view_ptr != nullptr && s_skf1.data_offset >= 4u)
+            ? *reinterpret_cast<volatile const LONG*>(s_skf1.view_ptr + s_skf1.data_offset - 4u)
+            : 0;
+          _SidecarLog(L"[periodic] sc=%p bb=%ux%u hdr=%ux%u copy=%ux%u is_target=%d fc=%ld",
                       (void*)pReal,
                       bbDesc.Width, bbDesc.Height,
                       s_skf1.width, s_skf1.height,
-                      dims_match ? 1 : 0,
-                      is_target  ? 1 : 0);
+                      copyW, copyH,
+                      is_target ? 1 : 0,
+                      (long)fc_log);
         }
 
-        // Dims gate: skip this swapchain unless its backbuffer exactly matches header dims.
-        // This prevents compositing onto secondary/UI swapchains with different resolutions.
-        const bool bb_dims_match = (bbDesc.Width  == s_skf1.width &&
-                                    bbDesc.Height == s_skf1.height);
-        if (!bb_dims_match)
+        // Gate: only composite if clamped region is at least 64×64 and we have header dims.
+        if (copyW < 64u || copyH < 64u)
         {
           bb->Release ();
           ctx->Release ();
@@ -1535,9 +1538,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
             bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
         {
-          const UINT copyW = s_skf1.width;   // Use header dimensions
-          const UINT copyH = s_skf1.height;  // Use header dimensions
-
+          // Texture must match the clamped copy rect, not full header dims.
           if (s_skf1.tex == nullptr || s_skf1.texFmt != bbDesc.Format ||
               s_skf1.texW != copyW || s_skf1.texH != copyH)
           {
@@ -1599,8 +1600,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               _SidecarLog(msg);
             }
 
-            // copyW == s_skf1.width and copyH == s_skf1.height (set at the start of this block).
-            // Aliases kept for use in the conversion loops below.
+            // maxH/maxW alias the clamped copy rect computed before format check.
             const UINT maxH = copyH;
             const UINT maxW = copyW;
             const uint8_t* srcBase = s_skf1.view_ptr + s_skf1.data_offset;
@@ -1764,8 +1764,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           {
             if (s_skf1.texFmt == bbDesc.Format)
             {
-              // Formats match - safe to use CopySubresourceRegion
-              D3D11_BOX srcBox = { 0, 0, 0, s_skf1.width, s_skf1.height, 1 };
+              // Formats match - safe to use CopySubresourceRegion.
+              // Use clamped copy rect (copyW×copyH), not full header dims.
+              D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
               static std::atomic<bool> s_logged_blit_details = false;
               if (!s_logged_blit_details.exchange(true))
               {
@@ -1901,34 +1902,43 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       {
         D3D12_RESOURCE_DESC bbDesc = bb12->GetDesc();
 
-        // Per-second log: swapchain ptr, bb dims, header dims, composite status.
+        // copyW12/copyH12: clamp copy rect to min(backbuffer, header).
+        // When header dims are 0 (not yet published), copyW12/copyH12 will be 0
+        // and the 64×64 gate below will reject compositing until real dims arrive.
+        // D3D12: bbDesc.Width is UINT64; clamp result to UINT for D3D12 API calls.
+        const UINT copyW12 = (s_skf1.width  > 0u)
+          ? (UINT)std::min((UINT64)bbDesc.Width,  (UINT64)s_skf1.width)  : 0u;
+        const UINT copyH12 = (s_skf1.height > 0u)
+          ? std::min(bbDesc.Height, s_skf1.height) : 0u;
+
+        // Per-second log: sc, bbWxH, hdrWxH, copyWxH, is_target, frame_counter.
         {
           static ULONGLONG s_last_periodic_log_ms12 = 0;
           const ULONGLONG nowMs12 = GetTickCount64 ();
           if (nowMs12 - s_last_periodic_log_ms12 >= 1000ULL)
           {
             s_last_periodic_log_ms12 = nowMs12;
-            // Atomic read: cast volatile pointer through void* to get current value.
             const IDXGISwapChain* cached_sc =
               static_cast<IDXGISwapChain*>(
                 InterlockedCompareExchangePointer (
                   reinterpret_cast<void * volatile *> (&s_target_swapchain), nullptr, nullptr));
-            // D3D12: bbDesc.Width is UINT64; s_skf1.width is uint32_t — cast for comparison.
-            const bool dims_match = (bbDesc.Width  == (UINT64)s_skf1.width &&
-                                     bbDesc.Height == s_skf1.height);
             const bool is_target  = (pReal == cached_sc);
-            _SidecarLog(L"[periodic/d3d12] sc=%p bb=%llux%u hdr=%ux%u dims_match=%d is_target=%d",
+            // frame_counter is stored 4 bytes before data_offset; same volatile read pattern as Stage E
+            const LONG fc_log12 = (s_skf1.view_ptr != nullptr && s_skf1.data_offset >= 4u)
+              ? *reinterpret_cast<volatile const LONG*>(s_skf1.view_ptr + s_skf1.data_offset - 4u)
+              : 0;
+            _SidecarLog(L"[periodic/d3d12] sc=%p bb=%llux%u hdr=%ux%u copy=%ux%u is_target=%d fc=%ld",
                         (void*)pReal,
                         (unsigned long long)bbDesc.Width, bbDesc.Height,
                         s_skf1.width, s_skf1.height,
-                        dims_match ? 1 : 0,
-                        is_target  ? 1 : 0);
+                        copyW12, copyH12,
+                        is_target ? 1 : 0,
+                        (long)fc_log12);
           }
         }
 
-        // Dims gate: skip unless backbuffer exactly matches header dims.
-        // D3D12: bbDesc.Width is UINT64; cast s_skf1.width to UINT64 for comparison.
-        if (bbDesc.Width != (UINT64)s_skf1.width || bbDesc.Height != s_skf1.height)
+        // Gate: only composite if clamped region is at least 64×64 and we have header dims.
+        if (copyW12 < 64u || copyH12 < 64u)
         {
           bb12->Release ();
           dev12->Release ();
@@ -1975,7 +1985,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             const bool restart_after_zero = (counter_regressed && s_skf1.saw_zero_counter);
             const bool monotonic_ok = (!counter_regressed || restart_after_zero || !s_skf1.has_frame);
             static std::vector <uint8_t> s_frame_snapshot12;
-            const size_t snapshot_bytes12 = (size_t)s_skf1.stride * (size_t)s_skf1.height;
+            // Snapshot copyH12 rows at full producer stride. stride may exceed copyW12*4
+            // (producer-side padding), so we use s_skf1.stride as the row pitch.
+            const size_t snapshot_bytes12 = (size_t)s_skf1.stride * (size_t)copyH12;
             const bool attempting_upload = (counter_changed || !s_skf1.has_frame);
             bool d3d12_has_upload_for_staging = false;
             UINT d3d12_upload_row_pitch = 0;
@@ -2023,8 +2035,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 s_d3d12_cmd_list->Close(); // Start closed
               }
 
-              const UINT uploadRowPitch = ((s_skf1.width * 4u + 255u) & ~255u);
-              const UINT64 uploadBufferSize = (UINT64)uploadRowPitch * (UINT64)s_skf1.height;
+              const UINT uploadRowPitch = ((copyW12 * 4u + 255u) & ~255u);
+              const UINT64 uploadBufferSize = (UINT64)uploadRowPitch * (UINT64)copyH12;
 
               // Recreate upload buffer if needed
               if (s_d3d12_upload_buffer == nullptr || s_d3d12_upload_size < uploadBufferSize)
@@ -2056,7 +2068,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
               const bool recreate_staging =
                 (s_d3d12_staging_texture == nullptr || s_d3d12_staging_format != bbDesc.Format ||
-                 s_d3d12_staging_width != s_skf1.width || s_d3d12_staging_height != s_skf1.height);
+                 s_d3d12_staging_width != copyW12 || s_d3d12_staging_height != copyH12);
 
               if (recreate_staging)
               {
@@ -2071,8 +2083,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
                 D3D12_RESOURCE_DESC texDesc = {};
                 texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-                texDesc.Width = s_skf1.width;
-                texDesc.Height = s_skf1.height;
+                texDesc.Width = copyW12;
+                texDesc.Height = copyH12;
                 texDesc.DepthOrArraySize = 1;
                 texDesc.MipLevels = 1;
                 texDesc.Format = bbDesc.Format;
@@ -2084,8 +2096,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   nullptr, __uuidof(ID3D12Resource), (void**)&s_d3d12_staging_texture);
 
                 s_d3d12_staging_format = bbDesc.Format;
-                s_d3d12_staging_width  = s_skf1.width;
-                s_d3d12_staging_height = s_skf1.height;
+                s_d3d12_staging_width  = copyW12;
+                s_d3d12_staging_height = copyH12;
               }
 
               if (s_d3d12_upload_buffer != nullptr && s_d3d12_staging_texture != nullptr &&
@@ -2101,18 +2113,18 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 {
                   const uint8_t* srcPixels = s_frame_snapshot12.data ();
                   uint8_t* dstBytes = (uint8_t*)uploadData;
-                  for (UINT y = 0; y < s_skf1.height; ++y)
+                  for (UINT y = 0; y < copyH12; ++y)
                   {
                     const uint8_t* srcRow = srcPixels + (size_t)y * (size_t)s_skf1.stride;
                     uint8_t*       dstRow = dstBytes + (size_t)y * (size_t)uploadRowPitch;
 
                     if (bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM)
                     {
-                      memcpy(dstRow, srcRow, (size_t)s_skf1.width * 4u);
+                      memcpy(dstRow, srcRow, (size_t)copyW12 * 4u);
                     }
                     else if (bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
                     {
-                      for (UINT x = 0; x < s_skf1.width; ++x)
+                      for (UINT x = 0; x < copyW12; ++x)
                       {
                         const uint8_t b = srcRow[x * 4 + 0];
                         const uint8_t g = srcRow[x * 4 + 1];
@@ -2127,7 +2139,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                     else
                     {
                       uint32_t* dstRow32 = (uint32_t*)dstRow;
-                      for (UINT x = 0; x < s_skf1.width; ++x)
+                      for (UINT x = 0; x < copyW12; ++x)
                       {
                         const uint32_t b8 = srcRow[x * 4 + 0];
                         const uint32_t g8 = srcRow[x * 4 + 1];
@@ -2225,8 +2237,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   srcUploadLoc.pResource = s_d3d12_upload_buffer;
                   srcUploadLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
                   srcUploadLoc.PlacedFootprint.Footprint.Format = bbDesc.Format;
-                  srcUploadLoc.PlacedFootprint.Footprint.Width = s_skf1.width;
-                  srcUploadLoc.PlacedFootprint.Footprint.Height = s_skf1.height;
+                  srcUploadLoc.PlacedFootprint.Footprint.Width = copyW12;
+                  srcUploadLoc.PlacedFootprint.Footprint.Height = copyH12;
                   srcUploadLoc.PlacedFootprint.Footprint.Depth = 1;
                   srcUploadLoc.PlacedFootprint.Footprint.RowPitch = d3d12_upload_row_pitch;
 
@@ -2259,8 +2271,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 dstLoc.SubresourceIndex = 0;
 
                 D3D12_BOX srcBox = {};
-                srcBox.right = s_skf1.width;
-                srcBox.bottom = s_skf1.height;
+                srcBox.right = copyW12;
+                srcBox.bottom = copyH12;
                 srcBox.back = 1;
 
                 s_d3d12_cmd_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);

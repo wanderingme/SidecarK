@@ -552,34 +552,21 @@ static void CreateHostFrameMappingForPid(DWORD pid)
   auto* hdr = reinterpret_cast<SidecarKFrameHeaderV1*>(g_frame_host_view);
   if (memcmp(hdr->magic, "SKF1", 4) != 0 || hdr->version != 1u)
   {
-    // Initialize SKF1 v1 header with 1920×1080 default dims (fits within capacity)
+    // Initialize SKF1 v1 header — dims are 0×0 until the producer publishes real dimensions.
     memcpy(hdr->magic, "SKF1", 4);
     hdr->version = 1u;
     hdr->header_bytes = 0x20u;
     hdr->data_offset = 0x24u;  // Header (0x20) + frame_counter (4 bytes)
     hdr->pixel_format = 1u;    // BGRA8
-    hdr->width = 1920u;
-    hdr->height = 1080u;
-    hdr->stride = 1920u * 4u;  // 7680 bytes per row
+    hdr->width = 0u;
+    hdr->height = 0u;
+    hdr->stride = 0u;
 
-    // Safety clamp: ensure data_offset + height*stride <= mapping capacity
-    {
-      const uint64_t payload_bytes = (uint64_t)hdr->height * (uint64_t)hdr->stride;
-      const uint64_t needed_bytes  = (uint64_t)hdr->data_offset + payload_bytes;
-      if (needed_bytes > (uint64_t)g_frame_host_size)
-      {
-        hdr->height = (uint32_t)(((uint64_t)g_frame_host_size - (uint64_t)hdr->data_offset) /
-                                 (uint64_t)hdr->stride);
-        wprintf(L"SidecarKHost: WARNING - dims exceeded capacity, clamped height to %u\n",
-                hdr->height);
-      }
-    }
-
-    // frame_counter=0: no frame published yet; consumers will skip until a real frame arrives
+    // frame_counter=0: no frame published yet; consumers skip until producer sets real dims
     hdr->frame_counter = 0u;
 
-    wprintf(L"SidecarKHost: Header initialized - %ux%u stride=%u capacity=%u bytes\n",
-            hdr->width, hdr->height, hdr->stride, (unsigned)g_frame_host_size);
+    wprintf(L"SidecarKHost: Header initialized - dims=0x0 (producer will set real dims) capacity=%u bytes\n",
+            (unsigned)g_frame_host_size);
   }
 }
 
