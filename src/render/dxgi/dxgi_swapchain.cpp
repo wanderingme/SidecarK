@@ -1490,9 +1490,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             tdesc.Format             = bbDesc.Format;
             tdesc.SampleDesc.Count   = 1;
             tdesc.SampleDesc.Quality = 0;
-            tdesc.Usage              = D3D11_USAGE_DYNAMIC;
-            tdesc.BindFlags          = D3D11_BIND_SHADER_RESOURCE;  // DYNAMIC usage requires at least one bind flag
-            tdesc.CPUAccessFlags     = D3D11_CPU_ACCESS_WRITE;
+            tdesc.Usage              = D3D11_USAGE_DEFAULT;       // DEFAULT: valid source for CopySubresourceRegion
+            tdesc.BindFlags          = D3D11_BIND_SHADER_RESOURCE; // Required by DEFAULT usage
+            tdesc.CPUAccessFlags     = 0;                          // No CPU access needed (UpdateSubresource handles upload)
             tdesc.MiscFlags          = 0;
 
             const ULONGLONG tCreateTex11 = GetTickCount64 ();
@@ -1529,88 +1529,82 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               _SidecarLog(msg);
             }
 
-            D3D11_MAPPED_SUBRESOURCE mapped = { };
+            // copyW == s_skf1.width and copyH == s_skf1.height (set at the start of this block).
+            // Aliases kept for use in the conversion loops below.
+            const UINT maxH = copyH;
+            const UINT maxW = copyW;
+            const uint8_t* srcBase = s_skf1.view_ptr + s_skf1.data_offset;
+            const size_t snapshot_bytes = (size_t)s_skf1.stride * (size_t)maxH;
+            static std::vector <uint8_t> s_frame_snapshot;
 
-            const ULONGLONG tMapTex11 = GetTickCount64 ();
-            if (SUCCEEDED (ctx->Map (s_skf1.tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            if (s_frame_snapshot.size () != snapshot_bytes)
+              s_frame_snapshot.resize (snapshot_bytes);
+
+            const ULONGLONG tCopySnapshot11 = GetTickCount64 ();
+            memcpy (s_frame_snapshot.data (), srcBase, snapshot_bytes);
+            _LogSlowStage (L"D3D11.CopySnapshot", tCopySnapshot11);
+
+            // Complete stable read: check c2 after copying frame data
+            const LONG c2 = *counter_ptr;
+            const bool stable = (c1 == c2);
+            const bool valid = (c1 != 0);
+            if (!valid)
+              s_skf1.saw_zero_counter = true;
+
+            if (s_skf1.has_frame && stable && valid && c1 == s_skf1.last_counter)
             {
-              _LogSlowStage (L"D3D11.MapWriteDiscard", tMapTex11);
-              const UINT maxH = (UINT)std::min ((int)s_skf1.height, (int)copyH);
-              const UINT maxW = (UINT)std::min ((int)s_skf1.width, (int)copyW);
-              const uint8_t* srcBase = s_skf1.view_ptr + s_skf1.data_offset;
-              const size_t snapshot_bytes = (size_t)s_skf1.stride * (size_t)maxH;
-              static std::vector <uint8_t> s_frame_snapshot;
-
-              if (s_frame_snapshot.size () != snapshot_bytes)
-                s_frame_snapshot.resize (snapshot_bytes);
-
-              const ULONGLONG tCopySnapshot11 = GetTickCount64 ();
-              memcpy (s_frame_snapshot.data (), srcBase, snapshot_bytes);
-              _LogSlowStage (L"D3D11.CopySnapshot", tCopySnapshot11);
-
-              // Complete stable read: check c2 after copying frame data
-              const LONG c2 = *counter_ptr;
-              const bool stable = (c1 == c2);
-              const bool valid = (c1 != 0);
-              if (!valid)
+              const ULONGLONG now_ticks = GetTickCount64 ();
+              if (s_skf1.stale_counter_since == 0)
+                s_skf1.stale_counter_since = now_ticks;
+              else if (now_ticks - s_skf1.stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
                 s_skf1.saw_zero_counter = true;
+            }
+            else
+            {
+              s_skf1.stale_counter_since = 0;
+            }
 
-              if (s_skf1.has_frame && stable && valid && c1 == s_skf1.last_counter)
-              {
-                const ULONGLONG now_ticks = GetTickCount64 ();
-                if (s_skf1.stale_counter_since == 0)
-                  s_skf1.stale_counter_since = now_ticks;
-                else if (now_ticks - s_skf1.stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
-                  s_skf1.saw_zero_counter = true;
-              }
-              else
-              {
-                s_skf1.stale_counter_since = 0;
-              }
-              
-              const bool counter_changed   = (c1 != s_skf1.last_counter);
-              const bool counter_regressed = (s_skf1.has_frame && c1 < s_skf1.last_counter);
-              const bool restart_after_zero = (counter_regressed && s_skf1.saw_zero_counter);
-              const bool monotonic_ok      = (!counter_regressed || restart_after_zero || !s_skf1.has_frame);
+            const bool counter_changed   = (c1 != s_skf1.last_counter);
+            const bool counter_regressed = (s_skf1.has_frame && c1 < s_skf1.last_counter);
+            const bool restart_after_zero = (counter_regressed && s_skf1.saw_zero_counter);
+            const bool monotonic_ok      = (!counter_regressed || restart_after_zero || !s_skf1.has_frame);
 
-              // Only upload if stable, valid, and monotonic (or explicit restart-after-zero)
-              if (stable && valid && monotonic_ok)
+            // Only upload if stable, valid, and monotonic (or explicit restart-after-zero)
+            if (stable && valid && monotonic_ok)
+            {
+              if (counter_changed || !s_skf1.has_frame)
               {
-                if (counter_changed || !s_skf1.has_frame)
+                srcBase = s_frame_snapshot.data ();
+                static std::atomic<bool> s_logged_upload_source = false;
+                if (!s_logged_upload_source.exchange(true)) {
+                  _SidecarLog(L"→ Source: view_ptr=%p data_offset=0x%X srcBase=%p stride=%u",
+                              s_skf1.view_ptr, s_skf1.data_offset, srcBase, s_skf1.stride);
+                }
+
+                // Upload via UpdateSubresource: SrcRowPitch = header.stride.
+                // DEFAULT usage texture is a valid CopySubresourceRegion source per D3D11 spec.
+                const ULONGLONG tUpdateSub11 = GetTickCount64 ();
+                if (s_skf1.texFmt == DXGI_FORMAT_B8G8R8A8_UNORM)
                 {
-                  // Upload pixel data
-                  srcBase = s_frame_snapshot.data ();
-          static std::atomic<bool> s_logged_upload_source = false;
-          if (!s_logged_upload_source.exchange(true)) {
-            _SidecarLog(L"→ Source: view_ptr=%p data_offset=0x%X srcBase=%p", 
-                        s_skf1.view_ptr, s_skf1.data_offset, srcBase);
-          }
-                  uint8_t*       dstBase = (uint8_t *)mapped.pData;
+                  // Same pixel format: upload directly using header stride as the source row pitch.
+                  ctx->UpdateSubresource (s_skf1.tex, 0, nullptr, srcBase, s_skf1.stride, 0);
+                }
+                else
+                {
+                  // Pixel format conversion needed: build a tight-packed converted buffer
+                  // (width*4 bytes/row) then upload with SrcRowPitch = width*4.
+                  static std::vector <uint8_t> s_converted11;
+                  const size_t rowBytes = (size_t)maxW * 4u;
+                  const size_t needed   = rowBytes * (size_t)maxH;
+                  if (s_converted11.size () != needed)
+                    s_converted11.resize (needed);
 
-                  const UINT dstPitch = mapped.RowPitch;
-                  static std::atomic<bool> s_logged_stride_pitch = false;
-                  if (!s_logged_stride_pitch.exchange(true))
-                  {
-                    _SidecarLog(L"→ Upload: stride=%u dstRowPitch=%u copyBytesPerRow=%u",
-                                s_skf1.stride, dstPitch, maxW * 4);
-                  }
-
-                  if (s_skf1.texFmt == DXGI_FORMAT_B8G8R8A8_UNORM)
-                  {
-                    const UINT rowBytes = maxW * 4;
-                    for (UINT y = 0; y < maxH; ++y)
-                    {
-                      memcpy (dstBase + y * dstPitch,
-                              srcBase + (size_t)y * (size_t)s_skf1.stride,
-                              rowBytes);
-                    }
-                  }
-                  else if (s_skf1.texFmt == DXGI_FORMAT_R8G8B8A8_UNORM)
+                  if (s_skf1.texFmt == DXGI_FORMAT_R8G8B8A8_UNORM)
                   {
                     for (UINT y = 0; y < maxH; ++y)
                     {
                       const uint8_t* srcRow = srcBase + (size_t)y * (size_t)s_skf1.stride;
-                      uint8_t*       dstRow = dstBase + y * dstPitch;
+                      uint8_t*       dstRow = s_converted11.data () + y * rowBytes;
                       for (UINT x = 0; x < maxW; ++x)
                       {
                         const uint8_t b = srcRow[x * 4 + 0];
@@ -1629,7 +1623,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                     for (UINT y = 0; y < maxH; ++y)
                     {
                       const uint8_t* srcRow = srcBase + (size_t)y * (size_t)s_skf1.stride;
-                      uint32_t*      dstRow = (uint32_t *)(dstBase + y * dstPitch);
+                      uint32_t*      dstRow = (uint32_t *)(s_converted11.data () + y * rowBytes);
                       for (UINT x = 0; x < maxW; ++x)
                       {
                         const uint32_t b8 = srcRow[x * 4 + 0];
@@ -1644,52 +1638,46 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                       }
                     }
                   }
+                  ctx->UpdateSubresource (s_skf1.tex, 0, nullptr,
+                                          s_converted11.data (), (UINT)rowBytes, 0);
+                }
+                _LogSlowStage (L"D3D11.UpdateSubresource", tUpdateSub11);
 
-                  s_skf1.last_counter = c1;
-                  s_skf1.has_frame = true;
-                  s_skf1.saw_zero_counter = false;
-                  s_skf1.stale_counter_since = 0;
-                  
-                  // STAGE E OK
-                  if (!s_skf1.logged_stage_e_ok.exchange(true))
-                  {
-                    _SidecarLog(L"SKF1 Stage E OK: Upload accepted counter=%ld has_frame=1", (long)c1);
-                  }
+                s_skf1.last_counter = c1;
+                s_skf1.has_frame = true;
+                s_skf1.saw_zero_counter = false;
+                s_skf1.stale_counter_since = 0;
+                
+                // STAGE E OK
+                if (!s_skf1.logged_stage_e_ok.exchange(true))
+                {
+                  _SidecarLog(L"SKF1 Stage E OK: Upload accepted counter=%ld has_frame=1", (long)c1);
                 }
               }
-              else
-              {
-                // Unstable or invalid - skip upload but DON'T clear has_frame
-                if (!stable)
-                {
-                  static std::atomic<bool> s_logged_d3d11_stale = false;
-                  if (!s_logged_d3d11_stale.exchange(true))
-                    _SidecarLog(L"SKF1 D3D11 skip: reason=STALE_COUNTER c1=%ld c2=%ld", (long)c1, (long)c2);
-                }
-                else if (!valid)
-                {
-                  static std::atomic<bool> s_logged_d3d11_zero = false;
-                  if (!s_logged_d3d11_zero.exchange(true))
-                    _SidecarLog(L"SKF1 D3D11 skip: reason=ZERO_COUNTER");
-                }
-                else if (!monotonic_ok)
-                {
-                  static std::atomic<bool> s_logged_d3d11_regress = false;
-                  if (!s_logged_d3d11_regress.exchange(true))
-                    _SidecarLog(L"SKF1 D3D11 skip: reason=COUNTER_REGRESSION c1=%ld last=%ld zero_seen=%d",
-                                (long)c1, (long)s_skf1.last_counter, s_skf1.saw_zero_counter ? 1 : 0);
-                }
-                if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_SeqMismatch);
-              }
-
-              ctx->Unmap (s_skf1.tex, 0);
             }
             else
             {
-              static std::atomic<bool> s_logged_d3d11_map_fail = false;
-              if (!s_logged_d3d11_map_fail.exchange(true))
-                _SidecarLog(L"SKF1 D3D11 skip: reason=TEX_MAP_WRITE_FAIL");
-              if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_MapFail);
+              // Unstable or invalid - skip upload but DON'T clear has_frame
+              if (!stable)
+              {
+                static std::atomic<bool> s_logged_d3d11_stale = false;
+                if (!s_logged_d3d11_stale.exchange(true))
+                  _SidecarLog(L"SKF1 D3D11 skip: reason=STALE_COUNTER c1=%ld c2=%ld", (long)c1, (long)c2);
+              }
+              else if (!valid)
+              {
+                static std::atomic<bool> s_logged_d3d11_zero = false;
+                if (!s_logged_d3d11_zero.exchange(true))
+                  _SidecarLog(L"SKF1 D3D11 skip: reason=ZERO_COUNTER");
+              }
+              else if (!monotonic_ok)
+              {
+                static std::atomic<bool> s_logged_d3d11_regress = false;
+                if (!s_logged_d3d11_regress.exchange(true))
+                  _SidecarLog(L"SKF1 D3D11 skip: reason=COUNTER_REGRESSION c1=%ld last=%ld zero_seen=%d",
+                              (long)c1, (long)s_skf1.last_counter, s_skf1.saw_zero_counter ? 1 : 0);
+              }
+              if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_SeqMismatch);
             }
           }
 
