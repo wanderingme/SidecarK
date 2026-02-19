@@ -1031,6 +1031,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static ID3D12Resource*              s_d3d12_staging_texture   = nullptr;
   static ID3D12Resource*              s_d3d12_upload_buffer     = nullptr;
   static ID3D12CommandQueue*          s_d3d12_cmd_queue         = nullptr;
+  static ID3D12Fence*                 s_d3d12_fence             = nullptr;
+  static volatile LONG64              s_d3d12_fence_value       = 0;
   static DXGI_FORMAT                  s_d3d12_staging_format    = DXGI_FORMAT_UNKNOWN;
   static UINT                         s_d3d12_staging_width     = 0;
   static UINT                         s_d3d12_staging_height    = 0;
@@ -1141,6 +1143,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     if (s_d3d12_staging_texture != nullptr) { s_d3d12_staging_texture->Release(); s_d3d12_staging_texture = nullptr; }
     if (s_d3d12_upload_buffer != nullptr)   { s_d3d12_upload_buffer->Release();   s_d3d12_upload_buffer = nullptr; }
     if (s_d3d12_cmd_queue != nullptr)       { s_d3d12_cmd_queue->Release();       s_d3d12_cmd_queue = nullptr; }
+    if (s_d3d12_fence != nullptr)           { s_d3d12_fence->Release();           s_d3d12_fence = nullptr; }
+    s_d3d12_fence_value    = 0;
     s_d3d12_staging_format = DXGI_FORMAT_UNKNOWN;
     s_d3d12_staging_width  = 0;
     s_d3d12_staging_height = 0;
@@ -1807,6 +1811,21 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             reinterpret_cast<void * volatile *> (&s_d3d12_cmd_queue), nullptr, nullptr
           )
         );
+
+      if (s_d3d12_fence == nullptr)
+      {
+        const ULONGLONG tCreateFence12 = GetTickCount64 ();
+        ID3D12Fence* newFence = nullptr;
+        if (SUCCEEDED (dev12->CreateFence (0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&newFence)))
+        {
+          void* priorFence =
+            InterlockedCompareExchangePointer (reinterpret_cast<void * volatile *> (&s_d3d12_fence),
+                                               newFence, nullptr);
+          if (priorFence != nullptr)
+            newFence->Release ();
+        }
+        _LogSlowStage (L"D3D12.CreateFence", tCreateFence12);
+      }
       
       ID3D12Resource* bb12 = nullptr;
       const ULONGLONG tGetBuf12 = GetTickCount64 ();
@@ -1839,6 +1858,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             static std::vector <uint8_t> s_frame_snapshot12;
             const size_t snapshot_bytes12 = (size_t)s_skf1.stride * (size_t)s_skf1.height;
             const bool attempting_upload = (counter_changed || !s_skf1.has_frame);
+            bool d3d12_has_upload_for_staging = false;
+            UINT d3d12_upload_row_pitch = 0;
 
             if (valid12 && attempting_upload)
             {
@@ -2003,31 +2024,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   }
                   s_d3d12_upload_buffer->Unmap(0, nullptr);
 
-                  s_d3d12_cmd_allocator->Reset();
-                  s_d3d12_cmd_list->Reset(s_d3d12_cmd_allocator, nullptr);
-
-                  D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
-                  srcLoc.pResource = s_d3d12_upload_buffer;
-                  srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                  srcLoc.PlacedFootprint.Footprint.Format = bbDesc.Format;
-                  srcLoc.PlacedFootprint.Footprint.Width = s_skf1.width;
-                  srcLoc.PlacedFootprint.Footprint.Height = s_skf1.height;
-                  srcLoc.PlacedFootprint.Footprint.Depth = 1;
-                  srcLoc.PlacedFootprint.Footprint.RowPitch = uploadRowPitch;
-
-                  D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
-                  dstLoc.pResource = s_d3d12_staging_texture;
-                  dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                  dstLoc.SubresourceIndex = 0;
-
-                  s_d3d12_cmd_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
-
-                  s_d3d12_cmd_list->Close();
-
-                  ID3D12CommandList* cmdLists[] = {s_d3d12_cmd_list};
-                  const ULONGLONG tExecUpload12 = GetTickCount64 ();
-                  cmdQueue->ExecuteCommandLists(1, cmdLists);
-                  _LogSlowStage (L"D3D12.ExecuteUploadCmdList", tExecUpload12);
+                  d3d12_has_upload_for_staging = true;
+                  d3d12_upload_row_pitch = uploadRowPitch;
 
                   s_skf1.last_counter = c1_12;
                   s_skf1.has_frame = true;
@@ -2065,74 +2063,121 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             if (s_skf1.has_frame && s_d3d12_staging_texture != nullptr &&
                 s_d3d12_cmd_allocator != nullptr && s_d3d12_cmd_list != nullptr)
             {
-              // Record blit commands
-              s_d3d12_cmd_allocator->Reset();
-              s_d3d12_cmd_list->Reset(s_d3d12_cmd_allocator, nullptr);
-
-              // Transition backbuffer to COPY_DEST
-              D3D12_RESOURCE_BARRIER barrierToCopyDest = {};
-              barrierToCopyDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-              barrierToCopyDest.Transition.pResource = bb12;
-              barrierToCopyDest.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-              barrierToCopyDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-              barrierToCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-              s_d3d12_cmd_list->ResourceBarrier(1, &barrierToCopyDest);
-
-              // Transition staging texture to COPY_SOURCE
-              D3D12_RESOURCE_BARRIER barrierToSrc = {};
-              barrierToSrc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-              barrierToSrc.Transition.pResource = s_d3d12_staging_texture;
-              barrierToSrc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-              barrierToSrc.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-              barrierToSrc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-              s_d3d12_cmd_list->ResourceBarrier(1, &barrierToSrc);
-
-              // Copy staging texture to backbuffer
-              D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
-              srcLoc.pResource = s_d3d12_staging_texture;
-              srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-              srcLoc.SubresourceIndex = 0;
-
-              D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
-              dstLoc.pResource = bb12;
-              dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-              dstLoc.SubresourceIndex = 0;
-
-              D3D12_BOX srcBox = {};
-              srcBox.right = s_skf1.width;
-              srcBox.bottom = s_skf1.height;
-              srcBox.back = 1;
-
-              s_d3d12_cmd_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
-
-              // Transition staging texture back to COPY_DEST for next upload
-              D3D12_RESOURCE_BARRIER barrierToDest = {};
-              barrierToDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-              barrierToDest.Transition.pResource = s_d3d12_staging_texture;
-              barrierToDest.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-              barrierToDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-              barrierToDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-              s_d3d12_cmd_list->ResourceBarrier(1, &barrierToDest);
-
-              // Transition backbuffer back to PRESENT
-              D3D12_RESOURCE_BARRIER barrierToPresent = {};
-              barrierToPresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-              barrierToPresent.Transition.pResource = bb12;
-              barrierToPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-              barrierToPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-              barrierToPresent.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-              s_d3d12_cmd_list->ResourceBarrier(1, &barrierToPresent);
-
-              s_d3d12_cmd_list->Close();
-
-              ID3D12CommandList* cmdLists[] = {s_d3d12_cmd_list};
-              const ULONGLONG tExecBlit12 = GetTickCount64 ();
-              cmdQueue->ExecuteCommandLists(1, cmdLists);
-              _LogSlowStage (L"D3D12.ExecuteBlitCmdList", tExecBlit12);
-
-              if (!s_skf1.logged_stage_f_ok.exchange(true))
+              bool can_blit = true;
+              if (s_d3d12_fence == nullptr)
               {
-                _SidecarLog(L"SKF1 Stage F OK: D3D12 blit executed");
+                static std::atomic<bool> s_logged_d3d12_no_fence = false;
+                if (!s_logged_d3d12_no_fence.exchange(true))
+                  _SidecarLog(L"SKF1 D3D12 skip: reason=NO_FENCE");
+                can_blit = false;
+              }
+
+              const UINT64 fenceNeed =
+                (UINT64)InterlockedCompareExchange64 (&s_d3d12_fence_value, 0, 0);
+              if (can_blit && fenceNeed != 0 &&
+                  s_d3d12_fence->GetCompletedValue() < fenceNeed)
+              {
+                static std::atomic<bool> s_logged_d3d12_busy = false;
+                if (!s_logged_d3d12_busy.exchange(true))
+                  _SidecarLog(L"SKF1 D3D12 skip: reason=GPU_BUSY fence_done=%llu fence_need=%llu",
+                              (unsigned long long)s_d3d12_fence->GetCompletedValue(),
+                              (unsigned long long)fenceNeed);
+                can_blit = false;
+              }
+
+              if (can_blit)
+              {
+                // Record blit commands
+                s_d3d12_cmd_allocator->Reset();
+                s_d3d12_cmd_list->Reset(s_d3d12_cmd_allocator, nullptr);
+
+                // Transition backbuffer to COPY_DEST
+                D3D12_RESOURCE_BARRIER barrierToCopyDest = {};
+                barrierToCopyDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrierToCopyDest.Transition.pResource = bb12;
+                barrierToCopyDest.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+                barrierToCopyDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+                barrierToCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                s_d3d12_cmd_list->ResourceBarrier(1, &barrierToCopyDest);
+
+                if (d3d12_has_upload_for_staging && s_d3d12_upload_buffer != nullptr)
+                {
+                  D3D12_TEXTURE_COPY_LOCATION srcUploadLoc = {};
+                  srcUploadLoc.pResource = s_d3d12_upload_buffer;
+                  srcUploadLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                  srcUploadLoc.PlacedFootprint.Footprint.Format = bbDesc.Format;
+                  srcUploadLoc.PlacedFootprint.Footprint.Width = s_skf1.width;
+                  srcUploadLoc.PlacedFootprint.Footprint.Height = s_skf1.height;
+                  srcUploadLoc.PlacedFootprint.Footprint.Depth = 1;
+                  srcUploadLoc.PlacedFootprint.Footprint.RowPitch = d3d12_upload_row_pitch;
+
+                  D3D12_TEXTURE_COPY_LOCATION dstStageLoc = {};
+                  dstStageLoc.pResource = s_d3d12_staging_texture;
+                  dstStageLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                  dstStageLoc.SubresourceIndex = 0;
+
+                  s_d3d12_cmd_list->CopyTextureRegion(&dstStageLoc, 0, 0, 0, &srcUploadLoc, nullptr);
+                }
+
+                // Transition staging texture to COPY_SOURCE
+                D3D12_RESOURCE_BARRIER barrierToSrc = {};
+                barrierToSrc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrierToSrc.Transition.pResource = s_d3d12_staging_texture;
+                barrierToSrc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+                barrierToSrc.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                barrierToSrc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                s_d3d12_cmd_list->ResourceBarrier(1, &barrierToSrc);
+
+                // Copy staging texture to backbuffer
+                D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
+                srcLoc.pResource = s_d3d12_staging_texture;
+                srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                srcLoc.SubresourceIndex = 0;
+
+                D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
+                dstLoc.pResource = bb12;
+                dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                dstLoc.SubresourceIndex = 0;
+
+                D3D12_BOX srcBox = {};
+                srcBox.right = s_skf1.width;
+                srcBox.bottom = s_skf1.height;
+                srcBox.back = 1;
+
+                s_d3d12_cmd_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
+
+                // Transition staging texture back to COPY_DEST for next upload
+                D3D12_RESOURCE_BARRIER barrierToDest = {};
+                barrierToDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrierToDest.Transition.pResource = s_d3d12_staging_texture;
+                barrierToDest.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                barrierToDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+                barrierToDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                s_d3d12_cmd_list->ResourceBarrier(1, &barrierToDest);
+
+                // Transition backbuffer back to PRESENT
+                D3D12_RESOURCE_BARRIER barrierToPresent = {};
+                barrierToPresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrierToPresent.Transition.pResource = bb12;
+                barrierToPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+                barrierToPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+                barrierToPresent.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                s_d3d12_cmd_list->ResourceBarrier(1, &barrierToPresent);
+
+                s_d3d12_cmd_list->Close();
+
+                ID3D12CommandList* cmdLists[] = {s_d3d12_cmd_list};
+                const ULONGLONG tExecBlit12 = GetTickCount64 ();
+                cmdQueue->ExecuteCommandLists(1, cmdLists);
+                _LogSlowStage (L"D3D12.ExecuteBlitCmdList", tExecBlit12);
+                const UINT64 nextFence =
+                  (UINT64)InterlockedIncrement64 (&s_d3d12_fence_value);
+                cmdQueue->Signal(s_d3d12_fence, nextFence);
+
+                if (!s_skf1.logged_stage_f_ok.exchange(true))
+                {
+                  _SidecarLog(L"SKF1 Stage F OK: D3D12 blit executed");
+                }
               }
             }
           }
