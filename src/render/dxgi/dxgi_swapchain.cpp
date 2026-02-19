@@ -1011,16 +1011,23 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     std::atomic_bool logged_enabled_on = false;
     std::atomic_bool logged_stage_a_ok = false;
     std::atomic_bool logged_stage_b_ok = false;
-    std::atomic_bool logged_stage_b_fail = false;
     std::atomic_bool logged_stage_c_ok = false;
-    std::atomic_bool logged_stage_c_fail = false;
     std::atomic_bool logged_stage_d_ok = false;
-    std::atomic_bool logged_stage_d_fail = false;
     std::atomic_bool logged_stage_e_ok = false;
     std::atomic_bool logged_stage_f_ok = false;
     std::atomic_bool logged_tex_create = false;
     std::atomic_bool logged_tex_success = false;
     std::atomic_bool logged_tex_failure = false;
+
+    // Once-per-second throttle timestamps (ms) for skip-reason logs.
+    // Not atomic: intentionally consistent with stale_counter_since.
+    // Present() is called from a single render thread per device context;
+    // worst-case of a concurrent access is one duplicate log line.
+    ULONGLONG last_open_fail_ms       = 0;
+    ULONGLONG last_view_fail_ms       = 0;
+    ULONGLONG last_invalid_header_ms  = 0;
+    ULONGLONG last_tear_ms            = 0;
+    ULONGLONG last_stalled_ms         = 0;
   };
 
   static SKF1_RuntimeStatus s_skf1;
@@ -1187,11 +1194,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     s_skf1.logged_enabled_on.store(false);
     s_skf1.logged_stage_a_ok.store(false);
     s_skf1.logged_stage_b_ok.store(false);
-    s_skf1.logged_stage_b_fail.store(false);
     s_skf1.logged_stage_c_ok.store(false);
-    s_skf1.logged_stage_c_fail.store(false);
     s_skf1.logged_stage_d_ok.store(false);
-    s_skf1.logged_stage_d_fail.store(false);
     s_skf1.logged_stage_e_ok.store(false);
     s_skf1.logged_stage_f_ok.store(false);
 
@@ -1277,9 +1281,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     if (s_skf1.hMap == nullptr)
     {
       // STAGE B FAIL
-      if (!s_skf1.logged_stage_b_fail.exchange(true))
+      const ULONGLONG nowB = GetTickCount64 ();
+      if (nowB - s_skf1.last_open_fail_ms >= 1000ull)
       {
-        _SidecarLog(L"SKF1 Stage B FAIL: OpenFileMappingW name=%ls gle=%lu", 
+        s_skf1.last_open_fail_ms = nowB;
+        _SidecarLog(L"OPEN_FAIL: OpenFileMappingW name=%ls gle=%lu", 
                     s_skf1.mapping_name, (unsigned long)s_skf1.last_open_gle);
       }
       if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_OpenFail);
@@ -1308,9 +1314,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     if (s_skf1.view_ptr == nullptr)
     {
       // STAGE C FAIL
-      if (!s_skf1.logged_stage_c_fail.exchange(true))
+      const ULONGLONG nowC = GetTickCount64 ();
+      if (nowC - s_skf1.last_view_fail_ms >= 1000ull)
       {
-        _SidecarLog(L"SKF1 Stage C FAIL: MapViewOfFile name=%ls hMap=%p gle=%lu", 
+        s_skf1.last_view_fail_ms = nowC;
+        _SidecarLog(L"VIEW_FAIL: MapViewOfFile name=%ls hMap=%p gle=%lu", 
                     s_skf1.mapping_name, (void*)s_skf1.hMap, (unsigned long)s_skf1.last_view_gle);
       }
       if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_MapFail);
@@ -1353,11 +1361,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     const uint32_t expected_magic = '1FKS';
     const bool magic_ok   = (memcmp(s_skf1.magic, &expected_magic, 4) == 0);
     const bool version_ok = (s_skf1.version == 1);
-    const bool header_ok  = (s_skf1.header_bytes >= 0x20u);
-    const bool offset_ok  = (s_skf1.data_offset >= 0x24u);
+    const bool header_ok  = (s_skf1.header_bytes == 0x20u);
+    const bool offset_ok  = (s_skf1.data_offset == 0x24u);
     const bool format_ok  = (s_skf1.pixel_format == 1);
-    const bool dims_ok    = (s_skf1.width > 0 && s_skf1.height > 0 && s_skf1.stride > 0);
-    const bool stride_ok  = (s_skf1.stride >= s_skf1.width * 4 && s_skf1.stride <= s_skf1.width * 16);
+    const bool dims_ok    = (s_skf1.width > 0 && s_skf1.height > 0);
+    const bool stride_ok  = (s_skf1.stride == (uint32_t)((uint64_t)s_skf1.width * 4u));
     
     const uint64_t counter_off = (uint64_t)s_skf1.data_offset - 4ull;
     const bool counter_pos_ok = (counter_off + 4ull == (uint64_t)s_skf1.data_offset);
@@ -1372,10 +1380,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     if (!magic_ok || !version_ok || !header_ok || !offset_ok || !format_ok || 
         !dims_ok || !stride_ok || !counter_pos_ok || !size_ok)
     {
-      // STAGE D FAIL - dump all header fields for diagnosis
-      if (!s_skf1.logged_stage_d_fail.exchange(true))
+      // STAGE D FAIL - once/sec throttled log
+      const ULONGLONG nowD = GetTickCount64 ();
+      if (nowD - s_skf1.last_invalid_header_ms >= 1000ull)
       {
-        _SidecarLog(L"SKF1 Stage D FAIL: Header validation - "
+        s_skf1.last_invalid_header_ms = nowD;
+        _SidecarLog(L"INVALID_HEADER: "
                     L"magic=%c%c%c%c ver=%u hdr_bytes=%u data_off=%u fmt=%u w=%u h=%u stride=%u "
                     L"[magic_ok=%d ver_ok=%d hdr_ok=%d off_ok=%d fmt_ok=%d dims_ok=%d stride_ok=%d counter_ok=%d size_ok=%d map_bytes=%llu pixel_end=%llu]",
                     s_skf1.magic[0], s_skf1.magic[1], s_skf1.magic[2], s_skf1.magic[3],
@@ -1627,7 +1637,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               if (s_skf1.stale_counter_since == 0)
                 s_skf1.stale_counter_since = now_ticks;
               else if (now_ticks - s_skf1.stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
+              {
                 s_skf1.saw_zero_counter = true;
+                if (now_ticks - s_skf1.last_stalled_ms >= 1000ull)
+                {
+                  s_skf1.last_stalled_ms = now_ticks;
+                  _SidecarLog(L"STALLED: counter=%ld unchanged for >%llums", (long)c1, (unsigned long long)kSKF1_StaleCounterTimeoutMs);
+                }
+              }
             }
             else
             {
@@ -1730,9 +1747,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               // Unstable or invalid - skip upload but DON'T clear has_frame
               if (!stable)
               {
-                static std::atomic<bool> s_logged_d3d11_stale = false;
-                if (!s_logged_d3d11_stale.exchange(true))
-                  _SidecarLog(L"SKF1 D3D11 skip: reason=STALE_COUNTER c1=%ld c2=%ld", (long)c1, (long)c2);
+                const ULONGLONG nowT = GetTickCount64 ();
+                if (nowT - s_skf1.last_tear_ms >= 1000ull)
+                {
+                  s_skf1.last_tear_ms = nowT;
+                  _SidecarLog(L"TEAR: c1=%ld c2=%ld", (long)c1, (long)c2);
+                }
               }
               else if (!valid)
               {
@@ -2010,7 +2030,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               if (s_skf1.stale_counter_since == 0)
                 s_skf1.stale_counter_since = now_ticks;
               else if (now_ticks - s_skf1.stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
+              {
                 s_skf1.saw_zero_counter = true;
+                if (now_ticks - s_skf1.last_stalled_ms >= 1000ull)
+                {
+                  s_skf1.last_stalled_ms = now_ticks;
+                  _SidecarLog(L"STALLED: counter=%ld unchanged for >%llums", (long)c1_12, (unsigned long long)kSKF1_StaleCounterTimeoutMs);
+                }
+              }
             }
             else
             {
@@ -2172,9 +2199,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             }
             else if (attempting_upload && !stable12)
             {
-              static std::atomic<bool> s_logged_d3d12_stale = false;
-              if (!s_logged_d3d12_stale.exchange(true))
-                _SidecarLog(L"SKF1 D3D12 skip: reason=STALE_COUNTER c1=%ld c2=%ld", (long)c1_12, (long)c2_12);
+              const ULONGLONG nowT12 = GetTickCount64 ();
+              if (nowT12 - s_skf1.last_tear_ms >= 1000ull)
+              {
+                s_skf1.last_tear_ms = nowT12;
+                _SidecarLog(L"TEAR: c1=%ld c2=%ld", (long)c1_12, (long)c2_12);
+              }
             }
             else if (!valid12)
             {

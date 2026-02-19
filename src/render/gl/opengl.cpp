@@ -2406,7 +2406,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
   const int R_HEADER_FAIL   = 330;
   const int R_NO_FRAME_YET  = 340;
   const int R_STALE_COUNTER = 345;
+  const int R_TEAR          = 346;
   const int R_COUNTER_REGRESSION = 347;
+  const int R_STALLED       = 348;
   const int R_UPLOAD_OK     = 350;
   const int R_COMPOSITE_HIT = 360;
   const ULONGLONG kSKF1_StaleCounterTimeoutMs = 2000ull;
@@ -3655,11 +3657,11 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                  const uint64_t pixel_off    = (uint64_t)data_offset;
                  const uint64_t bytes        = (uint64_t)stride * (uint64_t)height;
                  const uint64_t end_off      = pixel_off + bytes;
-                 const bool counter_pos_ok   = (data_offset >= 0x24u && (counter_off + 4ull == pixel_off));
+                 const bool counter_pos_ok   = (data_offset == 0x24u && (counter_off + 4ull == pixel_off));
                  const bool mapped_size_ok   = (end_off <= (uint64_t)s_view_bytes);
 
-                 if (header_bytes >= 0x20u && data_offset >= 0x24u && counter_pos_ok && pixel_format == 1u &&
-                   width > 0u && height > 0u && stride >= width * 4u && mapped_size_ok)
+                 if (header_bytes == 0x20u && data_offset == 0x24u && counter_pos_ok && pixel_format == 1u &&
+                   width > 0u && height > 0u && stride == (uint32_t)((uint64_t)width * 4u) && mapped_size_ok)
                  {
                   const uint32_t c1 = *(const uint32_t *)(base + (size_t)counter_off);
                   uint32_t       c2 = c1;
@@ -3688,7 +3690,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                     if (s_stale_counter_since == 0)
                       s_stale_counter_since = now_ticks;
                     else if (now_ticks - s_stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
+                    {
                       s_saw_zero_counter = true;
+                      reason = R_STALLED;
+                    }
                   }
                   else
                   {
@@ -3776,6 +3781,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                       SK_EndBufferSwap (E_UNEXPECTED);
                     Emit (reason, reached_draw, status);
                     return status;
+                  }
+                  else if (! stable_after_copy)
+                  {
+                    reason = R_TEAR; // torn read - keep last-good frame, fall through to draw
                   }
 
                  if (s_has_frame && s_tex != 0)
