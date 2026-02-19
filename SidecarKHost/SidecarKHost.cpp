@@ -1395,7 +1395,7 @@ static void ShutdownSidecarKControlPlane()
   }
 }
 
-static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t* overlayEnabled)
+static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t* overlayEnabled, DWORD targetPid)
 {
   while (!g_shutdown.load())
   {
@@ -1458,24 +1458,42 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
         break;
     }
 
+    // Trim trailing whitespace (\r, space, tab) accumulated before the '\n'
+    while (lineLen > 0 && (line[lineLen - 1] == '\r' || line[lineLen - 1] == ' ' || line[lineLen - 1] == '\t'))
+      line[--lineLen] = '\0';
+
+    // Trim leading whitespace
+    char* cmd = line;
+    while (*cmd == ' ' || *cmd == '\t' || *cmd == '\r') ++cmd;
+
+    char statusBuf[128]{};
     const char* resp = "err\n";
     DWORD respLen = 4;
 
     if (done)
     {
-      if (strcmp(line, "overlay on") == 0)
+      if (_stricmp(cmd, "overlay on") == 0)
       {
         if (overlayEnabled) *overlayEnabled = 1u;
         resp = "ok\n"; respLen = 3;
       }
-      else if (strcmp(line, "overlay off") == 0)
+      else if (_stricmp(cmd, "overlay off") == 0)
       {
         if (overlayEnabled) *overlayEnabled = 0u;
         resp = "ok\n"; respLen = 3;
       }
-      else if (strcmp(line, "ping") == 0)
+      else if (_stricmp(cmd, "ping") == 0)
       {
         resp = "pong\n"; respLen = 5;
+      }
+      else if (_stricmp(cmd, "status") == 0)
+      {
+        const char* stateStr = g_frames_streaming ? "streaming" : "attached";
+        const char* ovStr    = (overlayEnabled && *overlayEnabled) ? "on" : "off";
+        const int n = snprintf(statusBuf, sizeof(statusBuf),
+          "state=%s,overlay=%s,pid=%u\n", stateStr, ovStr, (unsigned)targetPid);
+        if (n > 0 && n < (int)sizeof(statusBuf))
+          { resp = statusBuf; respLen = (DWORD)n; }
       }
     }
 
@@ -1936,12 +1954,12 @@ int wmain(int argc, wchar_t** argv)
     g_control_pipe_thread = CreateThread(
       nullptr, 0,
       [](LPVOID p) -> DWORD {
-        auto* ctx = reinterpret_cast<std::tuple<std::wstring, volatile uint32_t*>*>(p);
-        RunControlPipeServer(std::get<0>(*ctx), std::get<1>(*ctx));
+        auto* ctx = reinterpret_cast<std::tuple<std::wstring, volatile uint32_t*, DWORD>*>(p);
+        RunControlPipeServer(std::get<0>(*ctx), std::get<1>(*ctx), std::get<2>(*ctx));
         delete ctx;
         return 0;
       },
-      new std::tuple<std::wstring, volatile uint32_t*>(controlPipeName, g_control_overlay_enabled),
+      new std::tuple<std::wstring, volatile uint32_t*, DWORD>(controlPipeName, g_control_overlay_enabled, targetPid),
       0, nullptr
     );
   }
