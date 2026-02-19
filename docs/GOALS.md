@@ -49,6 +49,9 @@ Backend parity is required across supported paths.
 Protocol semantics must remain identical.
 Composite implementation may differ, protocol may not.
 ## Phase 3
+
+**Definition:** External UI frame producer publishes BGRA frames into the existing SKF1 mapping; SidecarK consumer/compositor unchanged.
+
 ### Phase 3 Scope Lock (Repo Split)
 
 Phase 3 implementation work happens in the external Frame Producer / Control Client repos.
@@ -61,10 +64,23 @@ SidecarK Phase 3 rule:
 Phase 3:
 - Replace test-producer visuals with a real overlay surface producer (UI → BGRA frame stream).
 - Producer remains a separate subprocess and is backend-agnostic.
+- Producer opens the existing SKF1 mapping (open-only; never creates it).
 - Producer writes BGRA8 frames into the existing SKF1 mapping only.
 - Consumer/compositor code remains untouched.
 - SKF1 ABI remains unchanged (no version bump).
 - Producer may skip frame publication when UI is unchanged (counter does not advance).
 - No new cross-process synchronization primitives.
+
+### Phase 3 Explicit Guardrails
+
+The following are hard constraints for Phase 3. Any PR that violates one must be rejected:
+
+| Guardrail | Rule |
+|-----------|------|
+| No new shared memory fields | The SKF1 header layout is frozen. No field may be added, removed, or reordered. |
+| No new sync primitives | No mutexes, events, semaphores, or other cross-process sync objects may be introduced. |
+| Producer is open-only | Producer calls `OpenFileMappingW`; it must never call `CreateFileMappingW`. |
+| `frame_counter` is last write | Pixel data must be written before `frame_counter` is incremented (release semantics). |
+| Control client never touches shared memory | Control client must not open, read, or write the SKF1 mapping under any circumstances. |
 
 Phase 3 completes the SidecarK subprocess by making the producer generate real UI frames instead of a seeded test frame.

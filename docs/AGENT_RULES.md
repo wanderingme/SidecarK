@@ -45,6 +45,8 @@ Backend differences are restricted strictly to upload/composite mechanics.
 No backend may diverge from protocol semantics.
 ## Phase 3 Rules
 
+**Phase 3 definition:** External UI frame producer publishes BGRA frames into the existing SKF1 mapping; SidecarK consumer/compositor unchanged.
+
 Phase 3 work is limited to implementing a real producer (UI → BGRA frame stream) while keeping Phase 2 consumer/compositor untouched.
 
 Allowed changes:
@@ -56,7 +58,15 @@ Forbidden changes:
 - Any modifications to injected consumer/compositor paths for the sake of the producer.
 - Any new shared-memory fields or side-channel backchannels.
 - Any blocking waits/sleeps added to Present/composite paths.
-Additional Phase 3 guardrails:
-- Control client must never open/read/write the SKF1 mapping.
-- Control client communicates only with the producer process (out-of-band from SKF1).
-- SidecarK Phase 3 is docs-only; reject any PR that touches C/C++ source.
+- Any `.cpp`, `.h`, `.rc`, `.def`, or build script changes (e.g., `.vcxproj`, `.sln`, `Makefile`, `CMakeLists.txt`).
+
+### Phase 3 Explicit Guardrails
+
+These rules are non-negotiable. Reject any PR that violates any of the following:
+
+1. **No new shared memory fields.** The SKF1 header layout is frozen at Phase 2. No field additions, removals, or reorderings are permitted.
+2. **No new sync primitives.** No mutexes, events, semaphores, or any other cross-process synchronization objects may be introduced.
+3. **Producer is open-only.** The producer must call `OpenFileMappingW` and must never call `CreateFileMappingW`. Fail fast if mapping is absent.
+4. **`frame_counter` is last write.** Pixel data must be fully written before `frame_counter` is incremented (release/barrier semantics required).
+5. **Control client never touches shared memory.** The control client must not open, read, or write the SKF1 mapping under any circumstances. It communicates exclusively with the producer via an out-of-band channel (stdin/pipe/socket/etc).
+6. **SidecarK is docs-only in Phase 3.** Reject any PR that touches C/C++ source, headers, resource files, or build scripts in this repository.

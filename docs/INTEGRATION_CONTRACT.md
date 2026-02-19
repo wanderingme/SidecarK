@@ -90,6 +90,8 @@ Backend differences are restricted strictly to GPU upload/composite mechanics.
 Vulkan is not implemented and not part of this contract.
 ## Phase 3: UI Surface Producer (No Protocol Change)
 
+**Definition:** External UI frame producer publishes BGRA frames into the existing SKF1 mapping; SidecarK consumer/compositor unchanged.
+
 Phase 3 replaces the test-producer visuals with a real UI surface producer.
 
 Contractual invariants:
@@ -111,6 +113,19 @@ Alpha semantics:
 Control plane:
 - Any producer runtime controls (on/off/fps/quit) must be implemented out-of-band from SKF1.
 - No additional fields may be added to the shared mapping.
+
+### Phase 3 Explicit Guardrails
+
+The following constraints are binding for all Phase 3 work. Any violation is grounds for PR rejection:
+
+| Guardrail | Requirement |
+|-----------|-------------|
+| No new shared memory fields | SKF1 header layout is frozen. Zero field additions, removals, or reorderings. |
+| No new sync primitives | No cross-process mutexes, events, semaphores, or equivalent objects. |
+| Producer is open-only | Producer calls `OpenFileMappingW` only; `CreateFileMappingW` is forbidden in the producer. |
+| `frame_counter` is last write | Pixel data must be written before `frame_counter` is incremented (release semantics). |
+| Control client never touches shared memory | Control client must not call `OpenFileMappingW` or `CreateFileMappingW` or access any byte of the SKF1 mapping. |
+
 ### Control Client Boundary (Explicit)
 
 A separate control client may exist.
