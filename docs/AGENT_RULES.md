@@ -43,3 +43,16 @@ Not Implemented:
 All supported backends must consume the identical SKF1 protocol.
 Backend differences are restricted strictly to upload/composite mechanics.
 No backend may diverge from protocol semantics.
+## Phase 3 Rules
+
+Phase 3 work is limited to implementing a real producer (UI → BGRA frame stream) while keeping Phase 2 consumer/compositor untouched.
+
+Allowed changes:
+- Producer subprocess implementation details.
+- Producer control plane (out-of-band from SKF1): on/off/fps/quit/clear.
+
+Forbidden changes:
+- Any modifications to SKF1 header layout, offsets, or version.
+- Any modifications to injected consumer/compositor paths for the sake of the producer.
+- Any new shared-memory fields or side-channel backchannels.
+- Any blocking waits/sleeps added to Present/composite paths.

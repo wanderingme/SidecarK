@@ -88,3 +88,26 @@ All supported backends must:
 Backend differences are restricted strictly to GPU upload/composite mechanics.
 
 Vulkan is not implemented and not part of this contract.
+## Phase 3: UI Surface Producer (No Protocol Change)
+
+Phase 3 replaces the test-producer visuals with a real UI surface producer.
+
+Contractual invariants:
+- Mapping name is unchanged.
+- SKF1 header layout is unchanged.
+- Pixel format remains BGRA8 (pixel_format=1).
+- Consumer/compositor code is unchanged.
+- No new cross-process synchronization primitives are introduced.
+
+Producer behavior additions (allowed):
+- Producer may skip frame publication when UI is unchanged (frame_counter does not advance).
+- Producer may rate-limit output.
+
+Alpha semantics:
+- Producer writes BGRA8 including A channel.
+- Consumer/compositor behavior is authoritative; Phase 3 must not require consumer changes.
+- Producer must therefore match the alpha convention already used by the compositor in Phase 2 (no change implied by Phase 3).
+
+Control plane:
+- Any producer runtime controls (on/off/fps/quit) must be implemented out-of-band from SKF1.
+- No additional fields may be added to the shared mapping.

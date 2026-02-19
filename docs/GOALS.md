@@ -48,3 +48,15 @@ Not Implemented:
 Backend parity is required across supported paths.
 Protocol semantics must remain identical.
 Composite implementation may differ, protocol may not.
+## Phase 3
+
+Phase 3:
+- Replace test-producer visuals with a real overlay surface producer (UI → BGRA frame stream).
+- Producer remains a separate subprocess and is backend-agnostic.
+- Producer writes BGRA8 frames into the existing SKF1 mapping only.
+- Consumer/compositor code remains untouched.
+- SKF1 ABI remains unchanged (no version bump).
+- Producer may skip frame publication when UI is unchanged (counter does not advance).
+- No new cross-process synchronization primitives.
+
+Phase 3 completes the SidecarK subprocess by making the producer generate real UI frames instead of a seeded test frame.

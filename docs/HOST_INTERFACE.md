@@ -34,3 +34,17 @@ Supported:
 
 Not Implemented:
 - Vulkan
+## Phase 3
+
+Phase 3 does not change Host responsibilities.
+
+Host remains:
+- Sole mapping owner.
+- Responsible for header initialization.
+- Responsible for mapping lifetime.
+
+Host does NOT:
+- Render UI.
+- Publish frames.
+- Coordinate producer cadence.
+- Modify SKF1 ABI.
