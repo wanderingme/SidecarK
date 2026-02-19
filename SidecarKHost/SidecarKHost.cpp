@@ -458,7 +458,16 @@ static HANDLE g_control_pipe_thread = nullptr;
 
 static HANDLE g_frame_host_map = nullptr;
 static void* g_frame_host_view = nullptr;
-static constexpr DWORD g_frame_host_size = 64u * 1024u * 1024u;
+
+// Ceiling resolution for mapping capacity (host is the capacity + contract owner).
+// Mapping is created once and kept stable across game resizes; never recreated.
+static constexpr uint32_t kSKF1_MaxWidth  = 5120u;  // 5K wide (headroom above 4K)
+static constexpr uint32_t kSKF1_MaxHeight = 2880u;  // 5K tall (headroom above 4K)
+// view_bytes = header (0x24) + max_w * max_h * 4 bytes (BGRA8)
+static constexpr DWORD g_frame_host_size =
+    static_cast<DWORD>(0x24u + (uint64_t)kSKF1_MaxWidth * kSKF1_MaxHeight * 4u);
+static_assert(0x24u + (uint64_t)kSKF1_MaxWidth * kSKF1_MaxHeight * 4u <= 0xFFFFFFFFu,
+              "g_frame_host_size overflows DWORD");
 
 #pragma pack(push, 1)
 struct SidecarKFrameHeaderV1
@@ -543,34 +552,21 @@ static void CreateHostFrameMappingForPid(DWORD pid)
   auto* hdr = reinterpret_cast<SidecarKFrameHeaderV1*>(g_frame_host_view);
   if (memcmp(hdr->magic, "SKF1", 4) != 0 || hdr->version != 1u)
   {
-    // Initialize SKF1 v1 header
+    // Initialize SKF1 v1 header — dims are 0×0 until the producer publishes real dimensions.
     memcpy(hdr->magic, "SKF1", 4);
     hdr->version = 1u;
     hdr->header_bytes = 0x20u;
     hdr->data_offset = 0x24u;  // Header (0x20) + frame_counter (4 bytes)
     hdr->pixel_format = 1u;    // BGRA8
-    hdr->width = 256u;
-    hdr->height = 256u;
-    hdr->stride = 256u * 4u;   // 1024 bytes per row
-    hdr->frame_counter = 0u;   // Will be set after pixel data
+    hdr->width = 0u;
+    hdr->height = 0u;
+    hdr->stride = 0u;
 
-    // Seed deterministic 256×256 magenta test frame (BGRA8: B=0xFF, G=0x00, R=0xFF, A=0xFF)
-    uint8_t* pixelData = (uint8_t*)g_frame_host_view + hdr->data_offset;
-    const uint32_t magentaBGRA = 0xFFFF00FF;  // Little-endian bytes: FF 00 FF FF (B, G, R, A)
-    
-    for (uint32_t y = 0; y < hdr->height; ++y)
-    {
-      uint32_t* row = (uint32_t*)(pixelData + y * hdr->stride);
-      for (uint32_t x = 0; x < hdr->width; ++x)
-      {
-        row[x] = magentaBGRA;
-      }
-    }
+    // frame_counter=0: no frame published yet; consumers skip until producer sets real dims
+    hdr->frame_counter = 0u;
 
-    // Set frame_counter after writing pixel data (producer protocol)
-    hdr->frame_counter = 1u;
-    
-    wprintf(L"SidecarKHost: Test frame seeded - 256x256 magenta, frame_counter=%u\n", hdr->frame_counter);
+    wprintf(L"SidecarKHost: Header initialized - dims=0x0 (producer will set real dims) capacity=%u bytes\n",
+            (unsigned)g_frame_host_size);
   }
 }
 

@@ -947,7 +947,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   g_dxgi_overlay_owner.exchange (true, std::memory_order_relaxed);
 
   // SidecarK proof-of-life: copy an existing overlay pixel buffer from shared
-  // memory into the game backbuffer every Present (top-left 256x256).
+  // memory into the game backbuffer every Present (dimensions from SKF1 header).
   #pragma pack(push, 1)
   struct SK_OverlayFrameHeader
   {
@@ -1004,6 +1004,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     // D3D11 resources
     ID3D11Texture2D* tex = nullptr;
     DXGI_FORMAT      texFmt = DXGI_FORMAT_UNKNOWN;
+    UINT             texW = 0;
+    UINT             texH = 0;
 
     // One-time transition markers
     std::atomic_bool logged_enabled_on = false;
@@ -1024,6 +1026,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static SKF1_RuntimeStatus s_skf1;
   static DWORD s_pidCached = 0;  // For reset detection only
   static std::atomic_bool s_logged_swapchain_once = false;
+
+  // Target swapchain: the first swapchain whose backbuffer exactly matches header dims.
+  // All other swapchains skip compositing until a device/pid reset clears this.
+  // Not declared volatile — accessed exclusively via Interlocked ops (which provide
+  // the necessary memory ordering). Matches the pattern of other D3D resources here.
+  static IDXGISwapChain* s_target_swapchain = nullptr;
 
   // D3D12 resources
   static ID3D12CommandAllocator*      s_d3d12_cmd_allocator     = nullptr;
@@ -1110,6 +1118,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     }
 
     s_skf1.texFmt = DXGI_FORMAT_UNKNOWN;
+    s_skf1.texW   = 0;
+    s_skf1.texH   = 0;
 
     if (s_skf1.view_ptr != nullptr)
     {
@@ -1149,6 +1159,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     s_d3d12_staging_width  = 0;
     s_d3d12_staging_height = 0;
     s_d3d12_upload_size    = 0;
+
+    // Release cached target swapchain so the next matching swapchain can claim it
+    InterlockedExchangePointer (reinterpret_cast<void **> (&s_target_swapchain), nullptr);
   };
 
   // STAGE A: PID + Name Selection (no churn)
@@ -1448,6 +1461,70 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         D3D11_TEXTURE2D_DESC bbDesc = { };
         bb->GetDesc (&bbDesc);
 
+        // copyW/copyH: clamp copy rect to min(backbuffer, header).
+        // When header dims are 0 (not yet published by producer), copyW/copyH will be 0
+        // and the 64×64 minimum gate below will reject compositing until real dims arrive.
+        const UINT copyW = (s_skf1.width  > 0u) ? std::min((UINT)bbDesc.Width,  s_skf1.width)  : 0u;
+        const UINT copyH = (s_skf1.height > 0u) ? std::min((UINT)bbDesc.Height, s_skf1.height) : 0u;
+
+        // Per-second log: sc, bbWxH, hdrWxH, copyWxH, is_target, frame_counter.
+        static ULONGLONG s_last_periodic_log_ms = 0;
+        const ULONGLONG nowMs11 = GetTickCount64 ();
+        if (nowMs11 - s_last_periodic_log_ms >= 1000ULL)
+        {
+          s_last_periodic_log_ms = nowMs11;
+          const IDXGISwapChain* cached_sc =
+            static_cast<IDXGISwapChain*>(
+              InterlockedCompareExchangePointer (
+                reinterpret_cast<void * volatile *> (&s_target_swapchain), nullptr, nullptr));
+          const bool is_target  = (pReal == cached_sc);
+          // frame_counter is stored 4 bytes before data_offset; same volatile read pattern as Stage E
+          const LONG fc_log = (s_skf1.view_ptr != nullptr && s_skf1.data_offset >= 4u)
+            ? *reinterpret_cast<volatile const LONG*>(s_skf1.view_ptr + s_skf1.data_offset - 4u)
+            : 0;
+          _SidecarLog(L"[periodic] sc=%p bb=%ux%u hdr=%ux%u copy=%ux%u is_target=%d fc=%ld",
+                      (void*)pReal,
+                      bbDesc.Width, bbDesc.Height,
+                      s_skf1.width, s_skf1.height,
+                      copyW, copyH,
+                      is_target ? 1 : 0,
+                      (long)fc_log);
+        }
+
+        // Gate: only composite if clamped region is at least 64×64 and we have header dims.
+        if (copyW < 64u || copyH < 64u)
+        {
+          bb->Release ();
+          ctx->Release ();
+          dev->Release ();
+          return
+            SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                        nullptr, SK_DXGI_PresentSource::Wrapper );
+        }
+
+        // Target-swapchain gate: claim if unclaimed, skip if another swapchain is already
+        // the target. Uses a single CAS to avoid races between concurrent presents.
+        {
+          void* const prev =
+            InterlockedCompareExchangePointer (
+              reinterpret_cast<void * volatile *> (&s_target_swapchain),
+              reinterpret_cast<void *>(pReal),  // desired
+              nullptr                           // only swap if currently null
+            );
+          // prev == nullptr  → we just claimed it (first match)
+          // prev == pReal    → we are the cached target (keep going)
+          // prev == other    → another swapchain owns this slot (skip)
+          if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
+          {
+            bb->Release ();
+            ctx->Release ();
+            dev->Release ();
+            return
+              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+          }
+        }
+
         static std::atomic<bool> s_logged_format_check = false;
         if (!s_logged_format_check.exchange(true))
         {
@@ -1461,10 +1538,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
             bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
         {
-          const UINT copyW = 256u;  // Fixed: always 256×256 for overlay (don't use header width - frame producer may change it)
-          const UINT copyH = 256u;
-
-          if (s_skf1.tex == nullptr || s_skf1.texFmt != bbDesc.Format)
+          // Texture must match the clamped copy rect, not full header dims.
+          if (s_skf1.tex == nullptr || s_skf1.texFmt != bbDesc.Format ||
+              s_skf1.texW != copyW || s_skf1.texH != copyH)
           {
             if (s_skf1.tex != nullptr)
             {
@@ -1485,9 +1561,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             tdesc.Format             = bbDesc.Format;
             tdesc.SampleDesc.Count   = 1;
             tdesc.SampleDesc.Quality = 0;
-            tdesc.Usage              = D3D11_USAGE_DYNAMIC;
-            tdesc.BindFlags          = D3D11_BIND_SHADER_RESOURCE;  // DYNAMIC usage requires at least one bind flag
-            tdesc.CPUAccessFlags     = D3D11_CPU_ACCESS_WRITE;
+            tdesc.Usage              = D3D11_USAGE_DEFAULT;       // DEFAULT: valid source for CopySubresourceRegion
+            tdesc.BindFlags          = D3D11_BIND_SHADER_RESOURCE; // Required by DEFAULT usage
+            tdesc.CPUAccessFlags     = 0;                          // No CPU access needed (UpdateSubresource handles upload)
             tdesc.MiscFlags          = 0;
 
             const ULONGLONG tCreateTex11 = GetTickCount64 ();
@@ -1496,9 +1572,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             if (SUCCEEDED (hrTex) && s_skf1.tex != nullptr)
             {
               s_skf1.texFmt = bbDesc.Format;
+              s_skf1.texW   = copyW;
+              s_skf1.texH   = copyH;
               if (!s_skf1.logged_tex_success.exchange(true))
               {
-                _SidecarLog(L"Texture created successfully: tex=%p format=%u", s_skf1.tex, s_skf1.texFmt);
+                _SidecarLog(L"Texture created successfully: tex=%p format=%u %ux%u", s_skf1.tex, s_skf1.texFmt, copyW, copyH);
               }
             }
             else
@@ -1522,88 +1600,81 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               _SidecarLog(msg);
             }
 
-            D3D11_MAPPED_SUBRESOURCE mapped = { };
+            // maxH/maxW alias the clamped copy rect computed before format check.
+            const UINT maxH = copyH;
+            const UINT maxW = copyW;
+            const uint8_t* srcBase = s_skf1.view_ptr + s_skf1.data_offset;
+            const size_t snapshot_bytes = (size_t)s_skf1.stride * (size_t)maxH;
+            static std::vector <uint8_t> s_frame_snapshot;
 
-            const ULONGLONG tMapTex11 = GetTickCount64 ();
-            if (SUCCEEDED (ctx->Map (s_skf1.tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            if (s_frame_snapshot.size () != snapshot_bytes)
+              s_frame_snapshot.resize (snapshot_bytes);
+
+            const ULONGLONG tCopySnapshot11 = GetTickCount64 ();
+            memcpy (s_frame_snapshot.data (), srcBase, snapshot_bytes);
+            _LogSlowStage (L"D3D11.CopySnapshot", tCopySnapshot11);
+
+            // Complete stable read: check c2 after copying frame data
+            const LONG c2 = *counter_ptr;
+            const bool stable = (c1 == c2);
+            const bool valid = (c1 != 0);
+            if (!valid)
+              s_skf1.saw_zero_counter = true;
+
+            if (s_skf1.has_frame && stable && valid && c1 == s_skf1.last_counter)
             {
-              _LogSlowStage (L"D3D11.MapWriteDiscard", tMapTex11);
-              const UINT maxH = (UINT)std::min ((int)s_skf1.height, (int)copyH);
-              const UINT maxW = (UINT)std::min ((int)s_skf1.width, (int)copyW);
-              const uint8_t* srcBase = s_skf1.view_ptr + s_skf1.data_offset;
-              const size_t snapshot_bytes = (size_t)s_skf1.stride * (size_t)maxH;
-              static std::vector <uint8_t> s_frame_snapshot;
-
-              if (s_frame_snapshot.size () != snapshot_bytes)
-                s_frame_snapshot.resize (snapshot_bytes);
-
-              const ULONGLONG tCopySnapshot11 = GetTickCount64 ();
-              memcpy (s_frame_snapshot.data (), srcBase, snapshot_bytes);
-              _LogSlowStage (L"D3D11.CopySnapshot", tCopySnapshot11);
-
-              // Complete stable read: check c2 after copying frame data
-              const LONG c2 = *counter_ptr;
-              const bool stable = (c1 == c2);
-              const bool valid = (c1 != 0);
-              if (!valid)
+              const ULONGLONG now_ticks = GetTickCount64 ();
+              if (s_skf1.stale_counter_since == 0)
+                s_skf1.stale_counter_since = now_ticks;
+              else if (now_ticks - s_skf1.stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
                 s_skf1.saw_zero_counter = true;
+            }
+            else
+            {
+              s_skf1.stale_counter_since = 0;
+            }
 
-              if (s_skf1.has_frame && stable && valid && c1 == s_skf1.last_counter)
-              {
-                const ULONGLONG now_ticks = GetTickCount64 ();
-                if (s_skf1.stale_counter_since == 0)
-                  s_skf1.stale_counter_since = now_ticks;
-                else if (now_ticks - s_skf1.stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
-                  s_skf1.saw_zero_counter = true;
-              }
-              else
-              {
-                s_skf1.stale_counter_since = 0;
-              }
-              
-              const bool counter_changed   = (c1 != s_skf1.last_counter);
-              const bool counter_regressed = (s_skf1.has_frame && c1 < s_skf1.last_counter);
-              const bool restart_after_zero = (counter_regressed && s_skf1.saw_zero_counter);
-              const bool monotonic_ok      = (!counter_regressed || restart_after_zero || !s_skf1.has_frame);
+            const bool counter_changed   = (c1 != s_skf1.last_counter);
+            const bool counter_regressed = (s_skf1.has_frame && c1 < s_skf1.last_counter);
+            const bool restart_after_zero = (counter_regressed && s_skf1.saw_zero_counter);
+            const bool monotonic_ok      = (!counter_regressed || restart_after_zero || !s_skf1.has_frame);
 
-              // Only upload if stable, valid, and monotonic (or explicit restart-after-zero)
-              if (stable && valid && monotonic_ok)
+            // Only upload if stable, valid, and monotonic (or explicit restart-after-zero)
+            if (stable && valid && monotonic_ok)
+            {
+              if (counter_changed || !s_skf1.has_frame)
               {
-                if (counter_changed || !s_skf1.has_frame)
+                srcBase = s_frame_snapshot.data ();
+                static std::atomic<bool> s_logged_upload_source = false;
+                if (!s_logged_upload_source.exchange(true)) {
+                  _SidecarLog(L"→ Source: view_ptr=%p data_offset=0x%X srcBase=%p stride=%u",
+                              s_skf1.view_ptr, s_skf1.data_offset, srcBase, s_skf1.stride);
+                }
+
+                // Upload via UpdateSubresource: SrcRowPitch = header.stride.
+                // DEFAULT usage texture is a valid CopySubresourceRegion source per D3D11 spec.
+                const ULONGLONG tUpdateSub11 = GetTickCount64 ();
+                if (s_skf1.texFmt == DXGI_FORMAT_B8G8R8A8_UNORM)
                 {
-                  // Upload pixel data
-                  srcBase = s_frame_snapshot.data ();
-          static std::atomic<bool> s_logged_upload_source = false;
-          if (!s_logged_upload_source.exchange(true)) {
-            _SidecarLog(L"→ Source: view_ptr=%p data_offset=0x%X srcBase=%p", 
-                        s_skf1.view_ptr, s_skf1.data_offset, srcBase);
-          }
-                  uint8_t*       dstBase = (uint8_t *)mapped.pData;
+                  // Same pixel format: upload directly using header stride as the source row pitch.
+                  ctx->UpdateSubresource (s_skf1.tex, 0, nullptr, srcBase, s_skf1.stride, 0);
+                }
+                else
+                {
+                  // Pixel format conversion needed: build a tight-packed converted buffer
+                  // (width*4 bytes/row) then upload with SrcRowPitch = width*4.
+                  static std::vector <uint8_t> s_converted11;
+                  const size_t rowBytes = (size_t)maxW * 4u;
+                  const size_t needed   = rowBytes * (size_t)maxH;
+                  if (s_converted11.size () != needed)
+                    s_converted11.resize (needed);
 
-                  const UINT dstPitch = mapped.RowPitch;
-                  static std::atomic<bool> s_logged_stride_pitch = false;
-                  if (!s_logged_stride_pitch.exchange(true))
-                  {
-                    _SidecarLog(L"→ Upload: stride=%u dstRowPitch=%u copyBytesPerRow=%u",
-                                s_skf1.stride, dstPitch, 256u * 4);
-                  }
-
-                  if (s_skf1.texFmt == DXGI_FORMAT_B8G8R8A8_UNORM)
-                  {
-                    const UINT rowBytes = maxW * 4;
-                    for (UINT y = 0; y < maxH; ++y)
-                    {
-                      memcpy (dstBase + y * dstPitch,
-                              srcBase + (size_t)y * (size_t)s_skf1.stride,
-                              rowBytes);
-                    }
-                  }
-                  else if (s_skf1.texFmt == DXGI_FORMAT_R8G8B8A8_UNORM)
+                  if (s_skf1.texFmt == DXGI_FORMAT_R8G8B8A8_UNORM)
                   {
                     for (UINT y = 0; y < maxH; ++y)
                     {
                       const uint8_t* srcRow = srcBase + (size_t)y * (size_t)s_skf1.stride;
-                      uint8_t*       dstRow = dstBase + y * dstPitch;
+                      uint8_t*       dstRow = s_converted11.data () + y * rowBytes;
                       for (UINT x = 0; x < maxW; ++x)
                       {
                         const uint8_t b = srcRow[x * 4 + 0];
@@ -1622,7 +1693,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                     for (UINT y = 0; y < maxH; ++y)
                     {
                       const uint8_t* srcRow = srcBase + (size_t)y * (size_t)s_skf1.stride;
-                      uint32_t*      dstRow = (uint32_t *)(dstBase + y * dstPitch);
+                      uint32_t*      dstRow = (uint32_t *)(s_converted11.data () + y * rowBytes);
                       for (UINT x = 0; x < maxW; ++x)
                       {
                         const uint32_t b8 = srcRow[x * 4 + 0];
@@ -1637,52 +1708,46 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                       }
                     }
                   }
+                  ctx->UpdateSubresource (s_skf1.tex, 0, nullptr,
+                                          s_converted11.data (), (UINT)rowBytes, 0);
+                }
+                _LogSlowStage (L"D3D11.UpdateSubresource", tUpdateSub11);
 
-                  s_skf1.last_counter = c1;
-                  s_skf1.has_frame = true;
-                  s_skf1.saw_zero_counter = false;
-                  s_skf1.stale_counter_since = 0;
-                  
-                  // STAGE E OK
-                  if (!s_skf1.logged_stage_e_ok.exchange(true))
-                  {
-                    _SidecarLog(L"SKF1 Stage E OK: Upload accepted counter=%ld has_frame=1", (long)c1);
-                  }
+                s_skf1.last_counter = c1;
+                s_skf1.has_frame = true;
+                s_skf1.saw_zero_counter = false;
+                s_skf1.stale_counter_since = 0;
+                
+                // STAGE E OK
+                if (!s_skf1.logged_stage_e_ok.exchange(true))
+                {
+                  _SidecarLog(L"SKF1 Stage E OK: Upload accepted counter=%ld has_frame=1", (long)c1);
                 }
               }
-              else
-              {
-                // Unstable or invalid - skip upload but DON'T clear has_frame
-                if (!stable)
-                {
-                  static std::atomic<bool> s_logged_d3d11_stale = false;
-                  if (!s_logged_d3d11_stale.exchange(true))
-                    _SidecarLog(L"SKF1 D3D11 skip: reason=STALE_COUNTER c1=%ld c2=%ld", (long)c1, (long)c2);
-                }
-                else if (!valid)
-                {
-                  static std::atomic<bool> s_logged_d3d11_zero = false;
-                  if (!s_logged_d3d11_zero.exchange(true))
-                    _SidecarLog(L"SKF1 D3D11 skip: reason=ZERO_COUNTER");
-                }
-                else if (!monotonic_ok)
-                {
-                  static std::atomic<bool> s_logged_d3d11_regress = false;
-                  if (!s_logged_d3d11_regress.exchange(true))
-                    _SidecarLog(L"SKF1 D3D11 skip: reason=COUNTER_REGRESSION c1=%ld last=%ld zero_seen=%d",
-                                (long)c1, (long)s_skf1.last_counter, s_skf1.saw_zero_counter ? 1 : 0);
-                }
-                if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_SeqMismatch);
-              }
-
-              ctx->Unmap (s_skf1.tex, 0);
             }
             else
             {
-              static std::atomic<bool> s_logged_d3d11_map_fail = false;
-              if (!s_logged_d3d11_map_fail.exchange(true))
-                _SidecarLog(L"SKF1 D3D11 skip: reason=TEX_MAP_WRITE_FAIL");
-              if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_MapFail);
+              // Unstable or invalid - skip upload but DON'T clear has_frame
+              if (!stable)
+              {
+                static std::atomic<bool> s_logged_d3d11_stale = false;
+                if (!s_logged_d3d11_stale.exchange(true))
+                  _SidecarLog(L"SKF1 D3D11 skip: reason=STALE_COUNTER c1=%ld c2=%ld", (long)c1, (long)c2);
+              }
+              else if (!valid)
+              {
+                static std::atomic<bool> s_logged_d3d11_zero = false;
+                if (!s_logged_d3d11_zero.exchange(true))
+                  _SidecarLog(L"SKF1 D3D11 skip: reason=ZERO_COUNTER");
+              }
+              else if (!monotonic_ok)
+              {
+                static std::atomic<bool> s_logged_d3d11_regress = false;
+                if (!s_logged_d3d11_regress.exchange(true))
+                  _SidecarLog(L"SKF1 D3D11 skip: reason=COUNTER_REGRESSION c1=%ld last=%ld zero_seen=%d",
+                              (long)c1, (long)s_skf1.last_counter, s_skf1.saw_zero_counter ? 1 : 0);
+              }
+              if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_SeqMismatch);
             }
           }
 
@@ -1699,8 +1764,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           {
             if (s_skf1.texFmt == bbDesc.Format)
             {
-              // Formats match - safe to use CopySubresourceRegion
-              D3D11_BOX srcBox = { 0, 0, 0, 256u, 256u, 1 };  // Fixed: always 256×256 overlay region
+              // Formats match - safe to use CopySubresourceRegion.
+              // Use clamped copy rect (copyW×copyH), not full header dims.
+              D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
               static std::atomic<bool> s_logged_blit_details = false;
               if (!s_logged_blit_details.exchange(true))
               {
@@ -1835,7 +1901,70 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       if (SUCCEEDED(hr12) && bb12 != nullptr && cmdQueue != nullptr)
       {
         D3D12_RESOURCE_DESC bbDesc = bb12->GetDesc();
-        
+
+        // copyW12/copyH12: clamp copy rect to min(backbuffer, header).
+        // When header dims are 0 (not yet published), copyW12/copyH12 will be 0
+        // and the 64×64 gate below will reject compositing until real dims arrive.
+        // D3D12: bbDesc.Width is UINT64; clamp result to UINT for D3D12 API calls.
+        const UINT copyW12 = (s_skf1.width  > 0u)
+          ? (UINT)std::min((UINT64)bbDesc.Width,  (UINT64)s_skf1.width)  : 0u;
+        const UINT copyH12 = (s_skf1.height > 0u)
+          ? std::min(bbDesc.Height, s_skf1.height) : 0u;
+
+        // Per-second log: sc, bbWxH, hdrWxH, copyWxH, is_target, frame_counter.
+        {
+          static ULONGLONG s_last_periodic_log_ms12 = 0;
+          const ULONGLONG nowMs12 = GetTickCount64 ();
+          if (nowMs12 - s_last_periodic_log_ms12 >= 1000ULL)
+          {
+            s_last_periodic_log_ms12 = nowMs12;
+            const IDXGISwapChain* cached_sc =
+              static_cast<IDXGISwapChain*>(
+                InterlockedCompareExchangePointer (
+                  reinterpret_cast<void * volatile *> (&s_target_swapchain), nullptr, nullptr));
+            const bool is_target  = (pReal == cached_sc);
+            // frame_counter is stored 4 bytes before data_offset; same volatile read pattern as Stage E
+            const LONG fc_log12 = (s_skf1.view_ptr != nullptr && s_skf1.data_offset >= 4u)
+              ? *reinterpret_cast<volatile const LONG*>(s_skf1.view_ptr + s_skf1.data_offset - 4u)
+              : 0;
+            _SidecarLog(L"[periodic/d3d12] sc=%p bb=%llux%u hdr=%ux%u copy=%ux%u is_target=%d fc=%ld",
+                        (void*)pReal,
+                        (unsigned long long)bbDesc.Width, bbDesc.Height,
+                        s_skf1.width, s_skf1.height,
+                        copyW12, copyH12,
+                        is_target ? 1 : 0,
+                        (long)fc_log12);
+          }
+        }
+
+        // Gate: only composite if clamped region is at least 64×64 and we have header dims.
+        if (copyW12 < 64u || copyH12 < 64u)
+        {
+          bb12->Release ();
+          dev12->Release ();
+          return
+            SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                        nullptr, SK_DXGI_PresentSource::Wrapper );
+        }
+
+        // Target-swapchain gate: claim if unclaimed, skip if another swapchain owns it.
+        {
+          void* const prev =
+            InterlockedCompareExchangePointer (
+              reinterpret_cast<void * volatile *> (&s_target_swapchain),
+              reinterpret_cast<void *>(pReal),
+              nullptr
+            );
+          if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
+          {
+            bb12->Release ();
+            dev12->Release ();
+            return
+              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+          }
+        }
+
         if (bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
             bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
             bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
@@ -1856,7 +1985,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             const bool restart_after_zero = (counter_regressed && s_skf1.saw_zero_counter);
             const bool monotonic_ok = (!counter_regressed || restart_after_zero || !s_skf1.has_frame);
             static std::vector <uint8_t> s_frame_snapshot12;
-            const size_t snapshot_bytes12 = (size_t)s_skf1.stride * (size_t)s_skf1.height;
+            // Snapshot copyH12 rows at full producer stride. stride may exceed copyW12*4
+            // (producer-side padding), so we use s_skf1.stride as the row pitch.
+            const size_t snapshot_bytes12 = (size_t)s_skf1.stride * (size_t)copyH12;
             const bool attempting_upload = (counter_changed || !s_skf1.has_frame);
             bool d3d12_has_upload_for_staging = false;
             UINT d3d12_upload_row_pitch = 0;
@@ -1904,8 +2035,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 s_d3d12_cmd_list->Close(); // Start closed
               }
 
-              const UINT uploadRowPitch = ((s_skf1.width * 4u + 255u) & ~255u);
-              const UINT64 uploadBufferSize = (UINT64)uploadRowPitch * (UINT64)s_skf1.height;
+              const UINT uploadRowPitch = ((copyW12 * 4u + 255u) & ~255u);
+              const UINT64 uploadBufferSize = (UINT64)uploadRowPitch * (UINT64)copyH12;
 
               // Recreate upload buffer if needed
               if (s_d3d12_upload_buffer == nullptr || s_d3d12_upload_size < uploadBufferSize)
@@ -1937,7 +2068,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
               const bool recreate_staging =
                 (s_d3d12_staging_texture == nullptr || s_d3d12_staging_format != bbDesc.Format ||
-                 s_d3d12_staging_width != s_skf1.width || s_d3d12_staging_height != s_skf1.height);
+                 s_d3d12_staging_width != copyW12 || s_d3d12_staging_height != copyH12);
 
               if (recreate_staging)
               {
@@ -1952,8 +2083,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
                 D3D12_RESOURCE_DESC texDesc = {};
                 texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-                texDesc.Width = s_skf1.width;
-                texDesc.Height = s_skf1.height;
+                texDesc.Width = copyW12;
+                texDesc.Height = copyH12;
                 texDesc.DepthOrArraySize = 1;
                 texDesc.MipLevels = 1;
                 texDesc.Format = bbDesc.Format;
@@ -1965,8 +2096,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   nullptr, __uuidof(ID3D12Resource), (void**)&s_d3d12_staging_texture);
 
                 s_d3d12_staging_format = bbDesc.Format;
-                s_d3d12_staging_width  = s_skf1.width;
-                s_d3d12_staging_height = s_skf1.height;
+                s_d3d12_staging_width  = copyW12;
+                s_d3d12_staging_height = copyH12;
               }
 
               if (s_d3d12_upload_buffer != nullptr && s_d3d12_staging_texture != nullptr &&
@@ -1982,18 +2113,18 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 {
                   const uint8_t* srcPixels = s_frame_snapshot12.data ();
                   uint8_t* dstBytes = (uint8_t*)uploadData;
-                  for (UINT y = 0; y < s_skf1.height; ++y)
+                  for (UINT y = 0; y < copyH12; ++y)
                   {
                     const uint8_t* srcRow = srcPixels + (size_t)y * (size_t)s_skf1.stride;
                     uint8_t*       dstRow = dstBytes + (size_t)y * (size_t)uploadRowPitch;
 
                     if (bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM)
                     {
-                      memcpy(dstRow, srcRow, (size_t)s_skf1.width * 4u);
+                      memcpy(dstRow, srcRow, (size_t)copyW12 * 4u);
                     }
                     else if (bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
                     {
-                      for (UINT x = 0; x < s_skf1.width; ++x)
+                      for (UINT x = 0; x < copyW12; ++x)
                       {
                         const uint8_t b = srcRow[x * 4 + 0];
                         const uint8_t g = srcRow[x * 4 + 1];
@@ -2008,7 +2139,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                     else
                     {
                       uint32_t* dstRow32 = (uint32_t*)dstRow;
-                      for (UINT x = 0; x < s_skf1.width; ++x)
+                      for (UINT x = 0; x < copyW12; ++x)
                       {
                         const uint32_t b8 = srcRow[x * 4 + 0];
                         const uint32_t g8 = srcRow[x * 4 + 1];
@@ -2106,8 +2237,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   srcUploadLoc.pResource = s_d3d12_upload_buffer;
                   srcUploadLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
                   srcUploadLoc.PlacedFootprint.Footprint.Format = bbDesc.Format;
-                  srcUploadLoc.PlacedFootprint.Footprint.Width = s_skf1.width;
-                  srcUploadLoc.PlacedFootprint.Footprint.Height = s_skf1.height;
+                  srcUploadLoc.PlacedFootprint.Footprint.Width = copyW12;
+                  srcUploadLoc.PlacedFootprint.Footprint.Height = copyH12;
                   srcUploadLoc.PlacedFootprint.Footprint.Depth = 1;
                   srcUploadLoc.PlacedFootprint.Footprint.RowPitch = d3d12_upload_row_pitch;
 
@@ -2140,8 +2271,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 dstLoc.SubresourceIndex = 0;
 
                 D3D12_BOX srcBox = {};
-                srcBox.right = s_skf1.width;
-                srcBox.bottom = s_skf1.height;
+                srcBox.right = copyW12;
+                srcBox.bottom = copyH12;
                 srcBox.back = 1;
 
                 s_d3d12_cmd_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
