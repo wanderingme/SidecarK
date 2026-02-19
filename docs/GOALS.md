@@ -49,6 +49,14 @@ Backend parity is required across supported paths.
 Protocol semantics must remain identical.
 Composite implementation may differ, protocol may not.
 ## Phase 3
+### Phase 3 Scope Lock (Repo Split)
+
+Phase 3 implementation work happens in the external Frame Producer / Control Client repos.
+
+SidecarK Phase 3 rule:
+- SidecarK code changes are forbidden (docs-only).
+- Consumer/compositor remains Phase 2-complete.
+- SKF1 ABI and mapping name remain unchanged.
 
 Phase 3:
 - Replace test-producer visuals with a real overlay surface producer (UI → BGRA frame stream).

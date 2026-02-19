@@ -48,3 +48,8 @@ Host does NOT:
 - Publish frames.
 - Coordinate producer cadence.
 - Modify SKF1 ABI.
+## Phase 3 Scope Lock (Docs-Only)
+
+Phase 3 does not permit SidecarK host/consumer code changes.
+
+Only documentation updates are allowed in this repo for Phase 3.

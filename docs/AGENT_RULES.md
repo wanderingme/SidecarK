@@ -56,3 +56,7 @@ Forbidden changes:
 - Any modifications to injected consumer/compositor paths for the sake of the producer.
 - Any new shared-memory fields or side-channel backchannels.
 - Any blocking waits/sleeps added to Present/composite paths.
+Additional Phase 3 guardrails:
+- Control client must never open/read/write the SKF1 mapping.
+- Control client communicates only with the producer process (out-of-band from SKF1).
+- SidecarK Phase 3 is docs-only; reject any PR that touches C/C++ source.

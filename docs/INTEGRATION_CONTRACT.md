@@ -111,3 +111,13 @@ Alpha semantics:
 Control plane:
 - Any producer runtime controls (on/off/fps/quit) must be implemented out-of-band from SKF1.
 - No additional fields may be added to the shared mapping.
+### Control Client Boundary (Explicit)
+
+A separate control client may exist.
+
+It must:
+- Never open/read/write the SKF1 mapping.
+- Never derive state by inspecting shared memory.
+
+It must:
+- Communicate only with the producer process via an out-of-band channel (stdin/pipe/socket/etc).
