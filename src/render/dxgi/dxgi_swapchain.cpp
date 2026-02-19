@@ -1070,6 +1070,35 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     fclose (f);
   };
 
+  static constexpr ULONGLONG kSKF1_SlowStageThresholdMs = 10ull;
+  auto _LogSlowStage = [&](const wchar_t* stage, ULONGLONG beginMs)
+  {
+    const ULONGLONG deltaMs = GetTickCount64 () - beginMs;
+    if (deltaMs < kSKF1_SlowStageThresholdMs)
+      return;
+
+    void*  stackFrames[8] = { };
+    USHORT frames      =
+      CaptureStackBackTrace (0, _countof (stackFrames), stackFrames, nullptr);
+
+    wchar_t stackBuf [512] = { };
+    for (USHORT i = 0; i < frames; ++i)
+    {
+      const size_t off = wcslen (stackBuf);
+      if (off >= _countof (stackBuf) - 32)
+        break;
+
+      _snwprintf_s ( stackBuf + off, _countof (stackBuf) - off, _TRUNCATE,
+                     (i == 0) ? L"%p" : L",%p", stackFrames [i] );
+    }
+
+    _SidecarLog (L"SKF1 slow-stage: stage=%ls dt_ms=%llu tid=%lu locks=none(explicit) stack=%ls",
+                 stage != nullptr ? stage : L"(null)",
+                 (unsigned long long)deltaMs,
+                 (unsigned long)GetCurrentThreadId (),
+                 stackBuf);
+  };
+
   auto _ReleaseMappedOverlay = [&]()
   {
     if (s_skf1.tex != nullptr)
@@ -1106,6 +1135,16 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     s_skf1.has_frame = false;
     s_skf1.saw_zero_counter = false;
     s_skf1.stale_counter_since = 0;
+
+    if (s_d3d12_cmd_list != nullptr)        { s_d3d12_cmd_list->Release();        s_d3d12_cmd_list = nullptr; }
+    if (s_d3d12_cmd_allocator != nullptr)   { s_d3d12_cmd_allocator->Release();   s_d3d12_cmd_allocator = nullptr; }
+    if (s_d3d12_staging_texture != nullptr) { s_d3d12_staging_texture->Release(); s_d3d12_staging_texture = nullptr; }
+    if (s_d3d12_upload_buffer != nullptr)   { s_d3d12_upload_buffer->Release();   s_d3d12_upload_buffer = nullptr; }
+    if (s_d3d12_cmd_queue != nullptr)       { s_d3d12_cmd_queue->Release();       s_d3d12_cmd_queue = nullptr; }
+    s_d3d12_staging_format = DXGI_FORMAT_UNKNOWN;
+    s_d3d12_staging_width  = 0;
+    s_d3d12_staging_height = 0;
+    s_d3d12_upload_size    = 0;
   };
 
   // STAGE A: PID + Name Selection (no churn)
@@ -1213,7 +1252,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     // STAGE B: OpenFileMappingW
     // ------------------------------------------------------------------------
     SetLastError (ERROR_SUCCESS);
+    const ULONGLONG tOpenMap = GetTickCount64 ();
     s_skf1.hMap = OpenFileMappingW (FILE_MAP_READ, FALSE, s_skf1.mapping_name);
+    _LogSlowStage (L"StageB.OpenFileMappingW", tOpenMap);
     s_skf1.last_open_gle = GetLastError ();
 
     if (s_skf1.hMap == nullptr)
@@ -1242,7 +1283,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     // STAGE C: MapViewOfFile (map whole object, no size dependence)
     // ------------------------------------------------------------------------
     SetLastError (ERROR_SUCCESS);
+    const ULONGLONG tMapView = GetTickCount64 ();
     s_skf1.view_ptr = (uint8_t *)MapViewOfFile (s_skf1.hMap, FILE_MAP_READ, 0, 0, 0);
+    _LogSlowStage (L"StageC.MapViewOfFile", tMapView);
     s_skf1.last_view_gle = GetLastError ();
 
     if (s_skf1.view_ptr == nullptr)
@@ -1374,8 +1417,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     ID3D11Device*        dev = nullptr;
     ID3D11DeviceContext* ctx = nullptr;
 
+    const ULONGLONG tGetDev11 = GetTickCount64 ();
     HRESULT hr =
       pReal->GetDevice (__uuidof (ID3D11Device), (void **)&dev);
+    _LogSlowStage (L"D3D11.GetDevice", tGetDev11);
 
     if (SUCCEEDED (hr) && dev != nullptr)
     {
@@ -1389,8 +1434,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
       ID3D11Texture2D* bb = nullptr;
 
+      const ULONGLONG tGetBuf11 = GetTickCount64 ();
       const HRESULT hrBuffer =
         pReal->GetBuffer (0, __uuidof (ID3D11Texture2D), (void **)&bb);
+      _LogSlowStage (L"D3D11.GetBuffer", tGetBuf11);
 
       if (SUCCEEDED (hrBuffer) && bb != nullptr && ctx != nullptr)
       {
@@ -1439,7 +1486,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             tdesc.CPUAccessFlags     = D3D11_CPU_ACCESS_WRITE;
             tdesc.MiscFlags          = 0;
 
+            const ULONGLONG tCreateTex11 = GetTickCount64 ();
             HRESULT hrTex = dev->CreateTexture2D (&tdesc, nullptr, &s_skf1.tex);
+            _LogSlowStage (L"D3D11.CreateTexture2D", tCreateTex11);
             if (SUCCEEDED (hrTex) && s_skf1.tex != nullptr)
             {
               s_skf1.texFmt = bbDesc.Format;
@@ -1471,8 +1520,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
             D3D11_MAPPED_SUBRESOURCE mapped = { };
 
+            const ULONGLONG tMapTex11 = GetTickCount64 ();
             if (SUCCEEDED (ctx->Map (s_skf1.tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             {
+              _LogSlowStage (L"D3D11.MapWriteDiscard", tMapTex11);
               const UINT maxH = (UINT)std::min ((int)s_skf1.height, (int)copyH);
               const UINT maxW = (UINT)std::min ((int)s_skf1.width, (int)copyW);
               const uint8_t* srcBase = s_skf1.view_ptr + s_skf1.data_offset;
@@ -1482,7 +1533,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               if (s_frame_snapshot.size () != snapshot_bytes)
                 s_frame_snapshot.resize (snapshot_bytes);
 
+              const ULONGLONG tCopySnapshot11 = GetTickCount64 ();
               memcpy (s_frame_snapshot.data (), srcBase, snapshot_bytes);
+              _LogSlowStage (L"D3D11.CopySnapshot", tCopySnapshot11);
 
               // Complete stable read: check c2 after copying frame data
               const LONG c2 = *counter_ptr;
@@ -1653,7 +1706,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
               }
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
+              const ULONGLONG tCopySub11 = GetTickCount64 ();
               ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
+              _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
 
               // STAGE F OK
               if (!s_skf1.logged_stage_f_ok.exchange(true))
@@ -1717,19 +1772,46 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   else
   {
     ID3D12Device* dev12 = nullptr;
+    const ULONGLONG tGetDev12 = GetTickCount64 ();
     HRESULT hr12 = pReal->GetDevice(__uuidof(ID3D12Device), (void**)&dev12);
+    _LogSlowStage (L"D3D12.GetDevice", tGetDev12);
     
     if (SUCCEEDED(hr12) && dev12 != nullptr)
     {
-      // Get command queue from device
-      ID3D12CommandQueue* cmdQueue = nullptr;
-      D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-      queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-      queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-      const HRESULT hrQueue = dev12->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue), (void**)&cmdQueue);
+      // Create once and reuse command queue (avoid per-Present queue creation stalls)
+      HRESULT hrQueue = S_OK;
+      if (s_d3d12_cmd_queue == nullptr)
+      {
+        D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+        const ULONGLONG tCreateQueue12 = GetTickCount64 ();
+        ID3D12CommandQueue* newQueue = nullptr;
+        hrQueue = dev12->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue), (void**)&newQueue);
+        if (SUCCEEDED (hrQueue) && newQueue != nullptr)
+        {
+          void* prior =
+            InterlockedCompareExchangePointer (reinterpret_cast<void * volatile *> (&s_d3d12_cmd_queue),
+                                               newQueue, nullptr);
+          if (prior != nullptr)
+          {
+            newQueue->Release ();
+          }
+        }
+        _LogSlowStage (L"D3D12.CreateCommandQueue", tCreateQueue12);
+      }
+      // Atomic pointer read (CAS with same compare/exchange values).
+      ID3D12CommandQueue* cmdQueue =
+        reinterpret_cast <ID3D12CommandQueue *>(
+          InterlockedCompareExchangePointer (
+            reinterpret_cast<void * volatile *> (&s_d3d12_cmd_queue), nullptr, nullptr
+          )
+        );
       
       ID3D12Resource* bb12 = nullptr;
+      const ULONGLONG tGetBuf12 = GetTickCount64 ();
       hr12 = pReal->GetBuffer(0, __uuidof(ID3D12Resource), (void**)&bb12);
+      _LogSlowStage (L"D3D12.GetBuffer", tGetBuf12);
       
       if (SUCCEEDED(hr12) && bb12 != nullptr && cmdQueue != nullptr)
       {
@@ -1763,7 +1845,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               if (s_frame_snapshot12.size () != snapshot_bytes12)
                 s_frame_snapshot12.resize (snapshot_bytes12);
 
+              const ULONGLONG tCopySnapshot12 = GetTickCount64 ();
               memcpy (s_frame_snapshot12.data (), s_skf1.view_ptr + s_skf1.data_offset, snapshot_bytes12);
+              _LogSlowStage (L"D3D12.CopySnapshot", tCopySnapshot12);
               c2_12 = *counter_ptr12;
               stable12 = (c1_12 == c2_12);
             }
@@ -1869,7 +1953,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               {
                 void* uploadData = nullptr;
                 D3D12_RANGE readRange = {0, 0};
+                const ULONGLONG tMapUpload12 = GetTickCount64 ();
                 hr12 = s_d3d12_upload_buffer->Map(0, &readRange, &uploadData);
+                _LogSlowStage (L"D3D12.UploadBufferMap", tMapUpload12);
 
                 if (SUCCEEDED(hr12) && uploadData != nullptr)
                 {
@@ -1939,7 +2025,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   s_d3d12_cmd_list->Close();
 
                   ID3D12CommandList* cmdLists[] = {s_d3d12_cmd_list};
+                  const ULONGLONG tExecUpload12 = GetTickCount64 ();
                   cmdQueue->ExecuteCommandLists(1, cmdLists);
+                  _LogSlowStage (L"D3D12.ExecuteUploadCmdList", tExecUpload12);
 
                   s_skf1.last_counter = c1_12;
                   s_skf1.has_frame = true;
@@ -2038,7 +2126,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               s_d3d12_cmd_list->Close();
 
               ID3D12CommandList* cmdLists[] = {s_d3d12_cmd_list};
+              const ULONGLONG tExecBlit12 = GetTickCount64 ();
               cmdQueue->ExecuteCommandLists(1, cmdLists);
+              _LogSlowStage (L"D3D12.ExecuteBlitCmdList", tExecBlit12);
 
               if (!s_skf1.logged_stage_f_ok.exchange(true))
               {
@@ -2064,7 +2154,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                       hr12, hrQueue, bb12, cmdQueue);
       }
       
-      if (cmdQueue != nullptr) cmdQueue->Release();
       dev12->Release();
     }
     else
@@ -2083,10 +2172,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   }
 
   // Now that overlay is composited, do the actual Present
+  const ULONGLONG tPresentBase = GetTickCount64 ();
   if (0 == PresentBase ())
   {
     SyncInterval = 0;
   }
+  _LogSlowStage (L"PresentBase", tPresentBase);
 
   return
     SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
