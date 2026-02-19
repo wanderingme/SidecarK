@@ -947,7 +947,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   g_dxgi_overlay_owner.exchange (true, std::memory_order_relaxed);
 
   // SidecarK proof-of-life: copy an existing overlay pixel buffer from shared
-  // memory into the game backbuffer every Present (top-left 256x256).
+  // memory into the game backbuffer every Present (dimensions from SKF1 header).
   #pragma pack(push, 1)
   struct SK_OverlayFrameHeader
   {
@@ -1004,6 +1004,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     // D3D11 resources
     ID3D11Texture2D* tex = nullptr;
     DXGI_FORMAT      texFmt = DXGI_FORMAT_UNKNOWN;
+    UINT             texW = 0;
+    UINT             texH = 0;
 
     // One-time transition markers
     std::atomic_bool logged_enabled_on = false;
@@ -1110,6 +1112,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     }
 
     s_skf1.texFmt = DXGI_FORMAT_UNKNOWN;
+    s_skf1.texW   = 0;
+    s_skf1.texH   = 0;
 
     if (s_skf1.view_ptr != nullptr)
     {
@@ -1461,10 +1465,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
             bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
         {
-          const UINT copyW = 256u;  // Fixed: always 256×256 for overlay (don't use header width - frame producer may change it)
-          const UINT copyH = 256u;
+          const UINT copyW = s_skf1.width;   // Use header dimensions
+          const UINT copyH = s_skf1.height;  // Use header dimensions
 
-          if (s_skf1.tex == nullptr || s_skf1.texFmt != bbDesc.Format)
+          if (s_skf1.tex == nullptr || s_skf1.texFmt != bbDesc.Format ||
+              s_skf1.texW != copyW || s_skf1.texH != copyH)
           {
             if (s_skf1.tex != nullptr)
             {
@@ -1496,9 +1501,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             if (SUCCEEDED (hrTex) && s_skf1.tex != nullptr)
             {
               s_skf1.texFmt = bbDesc.Format;
+              s_skf1.texW   = copyW;
+              s_skf1.texH   = copyH;
               if (!s_skf1.logged_tex_success.exchange(true))
               {
-                _SidecarLog(L"Texture created successfully: tex=%p format=%u", s_skf1.tex, s_skf1.texFmt);
+                _SidecarLog(L"Texture created successfully: tex=%p format=%u %ux%u", s_skf1.tex, s_skf1.texFmt, copyW, copyH);
               }
             }
             else
@@ -1585,7 +1592,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   if (!s_logged_stride_pitch.exchange(true))
                   {
                     _SidecarLog(L"→ Upload: stride=%u dstRowPitch=%u copyBytesPerRow=%u",
-                                s_skf1.stride, dstPitch, 256u * 4);
+                                s_skf1.stride, dstPitch, maxW * 4);
                   }
 
                   if (s_skf1.texFmt == DXGI_FORMAT_B8G8R8A8_UNORM)
@@ -1700,7 +1707,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             if (s_skf1.texFmt == bbDesc.Format)
             {
               // Formats match - safe to use CopySubresourceRegion
-              D3D11_BOX srcBox = { 0, 0, 0, 256u, 256u, 1 };  // Fixed: always 256×256 overlay region
+              D3D11_BOX srcBox = { 0, 0, 0, s_skf1.width, s_skf1.height, 1 };
               static std::atomic<bool> s_logged_blit_details = false;
               if (!s_logged_blit_details.exchange(true))
               {
