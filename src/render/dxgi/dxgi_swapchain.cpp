@@ -1029,9 +1029,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
   // Target swapchain: the first swapchain whose backbuffer exactly matches header dims.
   // All other swapchains skip compositing until a device/pid reset clears this.
-  // Always accessed via InterlockedCompareExchangePointer/InterlockedExchangePointer —
-  // the volatile qualifier is sufficient for pointer-sized interlocked ops on Win32/x64.
-  static IDXGISwapChain* volatile s_target_swapchain = nullptr;
+  // Not declared volatile — accessed exclusively via Interlocked ops (which provide
+  // the necessary memory ordering). Matches the pattern of other D3D resources here.
+  static IDXGISwapChain* s_target_swapchain = nullptr;
 
   // D3D12 resources
   static ID3D12CommandAllocator*      s_d3d12_cmd_allocator     = nullptr;
