@@ -1161,7 +1161,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     s_d3d12_upload_size    = 0;
 
     // Release cached target swapchain so the next matching swapchain can claim it
-    InterlockedExchangePointer (reinterpret_cast<void * volatile *> (&s_target_swapchain), nullptr);
+    InterlockedExchangePointer (reinterpret_cast<void **> (&s_target_swapchain), nullptr);
   };
 
   // STAGE A: PID + Name Selection (no churn)
