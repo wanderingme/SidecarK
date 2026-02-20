@@ -447,6 +447,7 @@ static bool WaitForModuleLoaded(DWORD pid, const wchar_t* moduleBasename, DWORD 
 
 
 static std::atomic_bool g_shutdown{ false };
+static std::atomic_bool g_attach_confirmed{ false };
 static bool g_frame_source_seen = false;
 
 static DWORD g_host_pid = 0;
@@ -1488,6 +1489,8 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
       }
       else if (_stricmp(cmd, "status") == 0)
       {
+        const bool attached   = g_attach_confirmed.load();
+        const char* stateStr  = attached ? "attached" : "idle";
         const uint32_t ovVal = (overlayEnabled && *overlayEnabled) ? 1u : 0u;
         const SidecarKFrameHeaderV1* hostHdr = (g_frame_host_view != nullptr)
           ? reinterpret_cast<const SidecarKFrameHeaderV1*>(g_frame_host_view)
@@ -1495,9 +1498,10 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
         const uint32_t w  = hostHdr ? hostHdr->width         : 0u;
         const uint32_t h  = hostHdr ? hostHdr->height        : 0u;
         const uint32_t fc = hostHdr ? hostHdr->frame_counter : 0u;
+        const DWORD pid  = attached ? (DWORD)targetPid : 0u;
         const int n = snprintf(statusBuf, sizeof(statusBuf),
-          "state=attached pid=%u overlay=%u w=%u h=%u frame=%u last_err=none bb=0x0\n",
-          (unsigned)targetPid, (unsigned)ovVal, (unsigned)w, (unsigned)h, (unsigned)fc);
+          "state=%s pid=%u overlay=%u w=%u h=%u frame=%u last_err=none bb=0x0\n",
+          stateStr, (unsigned)pid, (unsigned)ovVal, (unsigned)w, (unsigned)h, (unsigned)fc);
         if (n > 0 && n < (int)sizeof(statusBuf))
           { resp = statusBuf; respLen = (DWORD)n; }
       }
@@ -2103,6 +2107,7 @@ int wmain(int argc, wchar_t** argv)
 
   const std::wstring pipeName = PipeNameForTarget(targetPid);
   AppendLog(logPath, (L"pipe: " + pipeName).c_str());
+  g_attach_confirmed.store(true);
   WriteStatusAtomic(statusPath, L"attached", targetPid, L"none");
 
   CreateHostFrameMappingForPid(targetPid);

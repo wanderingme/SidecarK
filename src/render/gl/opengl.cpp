@@ -3588,46 +3588,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
            static SIZE_T   s_view_bytes   = 0;
            static std::vector <uint8_t> s_frame_snapshot;
 
-           // Overlay-enabled gate: open SKC1 mapping once, read flag each SwapBuffers.
-           // If host has disabled the overlay, skip all composite work (zero GPU calls).
-           static HANDLE             s_skc1_map     = nullptr;
-           static void*              s_skc1_view    = nullptr;
-           static volatile uint32_t* s_skc1_enabled = nullptr;
-           if (s_skc1_map == nullptr)
-           {
-             wchar_t skc1_name [128] = { };
-             wsprintfW (skc1_name, L"Local\\SidecarK_Control_%lu",
-                        (unsigned long)GetCurrentProcessId ());
-             HANDLE h = OpenFileMappingW (FILE_MAP_READ, FALSE, skc1_name);
-             if (h != nullptr)
-             {
-               void* v = MapViewOfFile (h, FILE_MAP_READ, 0, 0, 4096);
-               if (v != nullptr)
-               {
-                 BYTE* b = static_cast<BYTE*>(v);
-                 if (memcmp (b, "SKC1", 4) == 0 &&
-                     *reinterpret_cast<const uint32_t*>(b + 4) == 1u)
-                 {
-                   s_skc1_enabled = reinterpret_cast<volatile uint32_t*>(b + 8);
-                   s_skc1_map  = h;
-                   s_skc1_view = v;
-                 }
-                 else
-                 {
-                   UnmapViewOfFile (v);
-                   CloseHandle (h);
-                 }
-               }
-               else
-               {
-                 CloseHandle (h);
-               }
-             }
-           }
-           const bool skf1_ov_on =
-             (s_skc1_enabled == nullptr || *s_skc1_enabled != 0u);
-
-           if (skf1_ov_on && s_base == nullptr)
+           if (s_base == nullptr)
            {
              SetLastError (ERROR_SUCCESS);
              hmap_dbg = OpenFileMappingW (FILE_MAP_READ, FALSE, map_name);
@@ -3670,7 +3631,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               }
             }
 
-            if (skf1_ov_on && s_base != nullptr)
+            if (s_base != nullptr)
             {
               const uint8_t* const base = s_base;
               const uint32_t magic = *(const uint32_t *)(base + 0x00);
