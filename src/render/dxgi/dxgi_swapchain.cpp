@@ -1242,19 +1242,52 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   // Every stage has explicit OK/FAIL markers with GetLastError() capture
   // ============================================================================
 
-  // Log enabled status once
-  if (!s_skf1.logged_enabled_on.exchange(true))
+  // Overlay-enabled gate: open SKC1 mapping once per process, then read the
+  // volatile enabled flag each Present.  When the host sets overlay=off the
+  // flag drops to 0 and we skip ALL composite work (zero GPU calls/uploads).
   {
-    _SidecarLog(L"SKF1 enabled default ON");
-  }
+    static HANDLE             s_skc1_map     = nullptr;
+    static void*              s_skc1_view    = nullptr;
+    static volatile uint32_t* s_skc1_enabled = nullptr;
 
-  // Check gate (disabled for Phase-1)
-  if (false && ! SK_ImGui_Visible)
-  {
-    if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_GateSkip);
-    return
-      SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
-                                  nullptr, SK_DXGI_PresentSource::Wrapper );
+    if (s_skc1_map == nullptr)
+    {
+      wchar_t skc1_name [128] = { };
+      wsprintfW (skc1_name, L"Local\\SidecarK_Control_%lu",
+                 (unsigned long)GetCurrentProcessId ());
+      HANDLE h = OpenFileMappingW (FILE_MAP_READ, FALSE, skc1_name);
+      if (h != nullptr)
+      {
+        void* v = MapViewOfFile (h, FILE_MAP_READ, 0, 0, 4096);
+        if (v != nullptr)
+        {
+          BYTE* b = static_cast<BYTE*>(v);
+          if (memcmp (b, "SKC1", 4) == 0 &&
+              *reinterpret_cast<const uint32_t*>(b + 4) == 1u)
+          {
+            s_skc1_enabled = reinterpret_cast<volatile uint32_t*>(b + 8);
+            s_skc1_map  = h;
+            s_skc1_view = v;
+          }
+          else
+          {
+            UnmapViewOfFile (v);
+            CloseHandle (h);
+          }
+        }
+        else
+        {
+          CloseHandle (h);
+        }
+      }
+    }
+
+    if (s_skc1_enabled != nullptr && *s_skc1_enabled == 0u)
+    {
+      if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_GateSkip);
+      return SK_DXGI_DispatchPresent (pReal, SyncInterval, Flags,
+                                      nullptr, SK_DXGI_PresentSource::Wrapper);
+    }
   }
 
   // --------------------------------------------------------------------------

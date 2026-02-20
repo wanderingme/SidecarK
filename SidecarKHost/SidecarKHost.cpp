@@ -1488,8 +1488,7 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
       }
       else if (_stricmp(cmd, "status") == 0)
       {
-        const char* stateStr = g_frames_streaming ? "streaming" : "attached";
-        const char* ovStr    = (overlayEnabled && *overlayEnabled) ? "on" : "off";
+        const uint32_t ovVal = (overlayEnabled && *overlayEnabled) ? 1u : 0u;
         const SidecarKFrameHeaderV1* hostHdr = (g_frame_host_view != nullptr)
           ? reinterpret_cast<const SidecarKFrameHeaderV1*>(g_frame_host_view)
           : nullptr;
@@ -1497,8 +1496,8 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
         const uint32_t h  = hostHdr ? hostHdr->height        : 0u;
         const uint32_t fc = hostHdr ? hostHdr->frame_counter : 0u;
         const int n = snprintf(statusBuf, sizeof(statusBuf),
-          "state=%s,overlay=%s,pid=%u,w=%u,h=%u,frame=%u\n",
-          stateStr, ovStr, (unsigned)targetPid, (unsigned)w, (unsigned)h, (unsigned)fc);
+          "state=attached pid=%u overlay=%u w=%u h=%u frame=%u last_err=none bb=0x0\n",
+          (unsigned)targetPid, (unsigned)ovVal, (unsigned)w, (unsigned)h, (unsigned)fc);
         if (n > 0 && n < (int)sizeof(statusBuf))
           { resp = statusBuf; respLen = (DWORD)n; }
       }
@@ -2131,9 +2130,6 @@ int wmain(int argc, wchar_t** argv)
     return ATTACH_FAILED;
   }
 
-  bool lastVisible = false;
-  bool lastStreaming = false;
-
   while (!g_shutdown.load())
   {
     if (!g_frame_source_seen)
@@ -2288,25 +2284,6 @@ int wmain(int argc, wchar_t** argv)
             (unsigned long)targetPid, (void*)g_frame_host_map);
         }
       }
-    }
-
-    bool nowVisible = g_frames_streaming;
-    if (nowVisible != lastVisible)
-    {
-      WriteStatusAtomic(statusPath,
-        nowVisible ? L"overlay_visible" : L"overlay_hidden",
-        targetPid,
-        L"none");
-      lastVisible = nowVisible;
-    }
-
-    if (g_frames_streaming != lastStreaming)
-    {
-      WriteStatusAtomic(statusPath,
-        g_frames_streaming ? L"frames_streaming" : L"attached",
-        targetPid,
-        L"none");
-      lastStreaming = g_frames_streaming;
     }
 
     Sleep(50);
