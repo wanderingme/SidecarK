@@ -36,21 +36,23 @@ jobs:
 
     - name: Prepare environment variables for the artifact name
       run: |
-        $Version = (Get-Item "$HOME\Documents\My Mods\SpecialK\SpecialK*.dll").VersionInfo.ProductVersion | Select-Object -First 1
+        $Version = (Get-Item "${{ github.workspace }}\build\Release\x64\SidecarK64.dll").VersionInfo.ProductVersion | Select-Object -First 1
         If ($null -eq $Version) { $Version = "unknown" }
         "SK_VERSION=$Version" | Out-File -FilePath $env:GITHUB_ENV -Encoding UTF8 -Append
         "SHORT_SHA=$("${{ github.sha }}".SubString(0, 8))" | Out-File -FilePath $env:GITHUB_ENV -Encoding UTF8 -Append
 
     - uses: actions/upload-artifact@v4
       with:
-        name: SpecialK_${{ env.SK_VERSION }}_${{ env.SHORT_SHA }}
+        name: SidecarK_${{ env.SK_VERSION }}_${{ env.SHORT_SHA }}
         path: |
-          ~\Documents\My Mods\SpecialK\*.dll
+          ${{ github.workspace }}\build\Release\Win32\SidecarK32.dll
+          ${{ github.workspace }}\build\Release\x64\SidecarK64.dll
         if-no-files-found: error
 
     - uses: actions/upload-artifact@v4
       with:
-        name: SpecialK_${{ env.SK_VERSION }}_${{ env.SHORT_SHA }}_debug_symbols
+        name: SidecarK_${{ env.SK_VERSION }}_${{ env.SHORT_SHA }}_debug_symbols
         path: |
-          ~\Documents\My Mods\SpecialK\*.pdb
+          ${{ github.workspace }}\build\Release\Win32\SidecarK32.pdb
+          ${{ github.workspace }}\build\Release\x64\SidecarK64.pdb
         if-no-files-found: warn
