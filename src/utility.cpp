@@ -3473,8 +3473,8 @@ SK_CanRestartGame (void)
         {
           std::filesystem::path global_dll =
             SK_FormatStringW (
-              SK_RunLHIfBitness (64, LR"(%ws/SpecialK64.dll)",
-                                     LR"(%ws/SpecialK32.dll)"),
+              SK_RunLHIfBitness (64, LR"(%ws/SidecarK64.dll)",
+                                     LR"(%ws/SidecarK32.dll)"),
               SK_GetInstallPath () );
     
                     wcsncpy_s ( wszFullname, MAX_PATH, global_dll.c_str (), _TRUNCATE );
@@ -3485,8 +3485,8 @@ SK_CanRestartGame (void)
         {
           std::filesystem::path global_dll =
             SK_FormatStringW (
-              SK_RunLHIfBitness (64, LR"(%ws/SpecialK64.dll)",
-                                     LR"(%ws/SpecialK32.dll)"),
+              SK_RunLHIfBitness (64, LR"(%ws/SidecarK64.dll)",
+                                     LR"(%ws/SidecarK32.dll)"),
               SK_GetInstallPath () );
     
                     wcsncpy_s ( wszFullname, MAX_PATH, global_dll.c_str (), _TRUNCATE );
@@ -3537,8 +3537,8 @@ SK_RestartGame (const wchar_t* wszDLL, const wchar_t* wszFailMsg)
     {
       std::filesystem::path global_dll =
         SK_FormatStringW (
-          SK_RunLHIfBitness (64, LR"(%ws/SpecialK64.dll)",
-                                 LR"(%ws/SpecialK32.dll)"),
+          SK_RunLHIfBitness (64, LR"(%ws/SidecarK64.dll)",
+                                 LR"(%ws/SidecarK32.dll)"),
           SK_GetInstallPath () );
 
                 wcsncpy_s ( wszFullname, MAX_PATH, global_dll.c_str (), _TRUNCATE );
@@ -3549,8 +3549,8 @@ SK_RestartGame (const wchar_t* wszDLL, const wchar_t* wszFailMsg)
     {
       std::filesystem::path global_dll =
         SK_FormatStringW (
-          SK_RunLHIfBitness (64, LR"(%ws/SpecialK64.dll)",
-                                 LR"(%ws/SpecialK32.dll)"),
+          SK_RunLHIfBitness (64, LR"(%ws/SidecarK64.dll)",
+                                 LR"(%ws/SidecarK32.dll)"),
           SK_GetInstallPath () );
 
                 wcsncpy_s ( wszFullname, MAX_PATH, global_dll.c_str (), _TRUNCATE );
@@ -4962,8 +4962,8 @@ SK_GetCanonicalDLLForRole (DLL_ROLE role)
     case DLL_ROLE::DInput8:
       return L"dinput8.dll";
     default:
-      return SK_RunLHIfBitness ( 64, L"SpecialK64.dll",
-                                     L"SpecialK32.dll" );
+      return SK_RunLHIfBitness ( 64, L"SidecarK64.dll",
+                                     L"SidecarK32.dll" );
   }
 }
 

@@ -1560,12 +1560,21 @@ SK_HasGlobalInjector (void)
     wcsncpy_s ( wszBasePath, MAX_PATH,
           SK_GetInstallPath (), _TRUNCATE );
 
-    lstrcatW (wszBasePath, SK_RunLHIfBitness ( 64, L"SpecialK64.dll",
-                                                   L"SpecialK32.dll" ));
-
-    bool result = (GetFileAttributesW (wszBasePath) != INVALID_FILE_ATTRIBUTES);
-    last_test   = result ?
-                       1 : -1;
+    // Check SidecarK name first; fall back to legacy SpecialK name
+    wchar_t wszTest [MAX_PATH + 2] = { };
+    wcsncpy_s (wszTest, MAX_PATH, wszBasePath, _TRUNCATE);
+    lstrcatW  (wszTest, SK_RunLHIfBitness ( 64, L"SidecarK64.dll",
+                                                L"SidecarK32.dll" ));
+    if (GetFileAttributesW (wszTest) != INVALID_FILE_ATTRIBUTES)
+    {
+      last_test = 1;
+    }
+    else
+    {
+      lstrcatW (wszBasePath, SK_RunLHIfBitness ( 64, L"SpecialK64.dll",
+                                                     L"SpecialK32.dll" ));
+      last_test = (GetFileAttributesW (wszBasePath) != INVALID_FILE_ATTRIBUTES) ? 1 : -1;
+    }
   }
 
   return (last_test != -1);
@@ -1739,10 +1748,11 @@ SK_EstablishRootPath (void)
     wszConfigPath, sizeof (wchar_t) * (MAX_PATH + 2)
   );
 
-  if (SK_GetModuleName (SK_GetDLL ())._Equal (
-    SK_RunLHIfBitness (64, L"SpecialK64.dll",
-                           L"SpecialK32.dll")))
   {
+    auto modname = SK_GetModuleName (SK_GetDLL ());
+    if ( modname._Equal (SK_RunLHIfBitness (64, L"SidecarK64.dll", L"SidecarK32.dll")) ||
+         modname._Equal (SK_RunLHIfBitness (64, L"SpecialK64.dll", L"SpecialK32.dll")) )
+    {
     try {
       std::filesystem::path path =
         SK_GetModuleFullName (SK_GetDLL ());
@@ -1758,6 +1768,7 @@ SK_EstablishRootPath (void)
 #ifdef DEBUG
       _debugbreak ();
 #endif
+    }
     }
   }
 

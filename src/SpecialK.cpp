@@ -341,6 +341,10 @@ SK_KeepAway (void)
   GetModuleFileName ( skModuleRegistry::Self (),
                       wszDllFullName, MAX_PATH    );
   if ( StrStrIW (     wszDllFullName,
+           SK_RunLHIfBitness ( 64, L"SidecarK64.dll",
+                                   L"SidecarK32.dll" )
+                ) == nullptr &&
+       StrStrIW (     wszDllFullName,
            SK_RunLHIfBitness ( 64, L"SpecialK64.dll",
                                    L"SpecialK32.dll" )
                 ) == nullptr
@@ -1474,7 +1478,9 @@ SK_EstablishDllRole (skWin32Module&& _sk_module)
   // This is an injected DLL, not a wrapper DLL...
   //
   else if ( SK_Path_wcsstr (wszShort, L"SpecialK32.dll") != nullptr ||
-            SK_Path_wcsstr (wszShort, L"SpecialK64.dll") != nullptr )
+            SK_Path_wcsstr (wszShort, L"SpecialK64.dll") != nullptr ||
+            SK_Path_wcsstr (wszShort, L"SidecarK32.dll") != nullptr ||
+            SK_Path_wcsstr (wszShort, L"SidecarK64.dll") != nullptr )
   {
              // SET the injected state
              SK_IsInjected (true);

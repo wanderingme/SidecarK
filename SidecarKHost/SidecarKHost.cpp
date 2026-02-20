@@ -1077,7 +1077,7 @@ static InjectResult InjectDllByCreateRemoteThread(DWORD pid, const std::wstring&
 
   // Already loaded check (deterministic already_loaded result)
   MODULEENTRY32W me{};
-  if (GetMatchingModuleInfo(pid, L"SpecialK32.dll", me))
+  if (GetMatchingModuleInfo(pid, L"SidecarK32.dll", me))
   {
     SetLastError(ERROR_ALREADY_EXISTS);
     return InjectResult::AlreadyLoaded;
@@ -1186,11 +1186,11 @@ static bool TryGetFileMTime(const wchar_t* path, FILETIME& outFt)
 static void LogModuleCheckSpecialK32(const std::wstring& logPath, DWORD pid)
 {
   MODULEENTRY32W me{};
-  const bool found = GetMatchingModuleInfo(pid, L"SpecialK32.dll", me);
+  const bool found = GetMatchingModuleInfo(pid, L"SidecarK32.dll", me);
 
   {
     wchar_t msg[256]{};
-    swprintf(msg, _countof(msg), L"module_check pid=%lu found_specialk32=%d",
+    swprintf(msg, _countof(msg), L"module_check pid=%lu found_sidecark32=%d",
       (unsigned long)pid,
       found ? 1 : 0);
     AppendLog(logPath, msg);
@@ -1199,14 +1199,14 @@ static void LogModuleCheckSpecialK32(const std::wstring& logPath, DWORD pid)
 
   if (!found)
   {
-    AppendLog(logPath, L"ERROR: injected but SpecialK32.dll not present in module list");
-    HostLogAppend(L"ERROR: injected but SpecialK32.dll not present in module list");
+    AppendLog(logPath, L"ERROR: injected but SidecarK32.dll not present in module list");
+    HostLogAppend(L"ERROR: injected but SidecarK32.dll not present in module list");
     return;
   }
 
   {
     wchar_t msg[1024]{};
-    swprintf(msg, _countof(msg), L"specialk32_loaded path=%s base=0x%p",
+    swprintf(msg, _countof(msg), L"sidecark32_loaded path=%s base=0x%p",
       me.szExePath,
       me.modBaseAddr);
     AppendLog(logPath, msg);
@@ -1217,7 +1217,7 @@ static void LogModuleCheckSpecialK32(const std::wstring& logPath, DWORD pid)
   if (TryGetFileMTime(me.szExePath, ft))
   {
     wchar_t msg[256]{};
-    swprintf(msg, _countof(msg), L"specialk32_disk_mtime ft=0x%08lX%08lX",
+    swprintf(msg, _countof(msg), L"sidecark32_disk_mtime ft=0x%08lX%08lX",
       (unsigned long)ft.dwHighDateTime,
       (unsigned long)ft.dwLowDateTime);
     AppendLog(logPath, msg);
@@ -1225,8 +1225,8 @@ static void LogModuleCheckSpecialK32(const std::wstring& logPath, DWORD pid)
   }
   else
   {
-    AppendLog(logPath, L"specialk32_disk_mtime ft=unavailable");
-    HostLogAppend(L"specialk32_disk_mtime ft=unavailable");
+    AppendLog(logPath, L"sidecark32_disk_mtime ft=unavailable");
+    HostLogAppend(L"sidecark32_disk_mtime ft=unavailable");
   }
 }
 
@@ -1254,7 +1254,7 @@ static void LogModuleCheckSpecialK32Delayed(const std::wstring& logPath, DWORD p
   if (Module32FirstW(snap, &me))
   {
     do {
-      if (_wcsicmp(me.szModule, L"SpecialK32.dll") == 0)
+      if (_wcsicmp(me.szModule, L"SidecarK32.dll") == 0)
       {
         found = true;
         break;
@@ -1680,8 +1680,8 @@ int wmain(int argc, wchar_t** argv)
 
   const wchar_t* attachMode = attachPidStr.empty() ? (attachExe.empty() ? L"wait-for-exe" : L"attach-exe") : L"attach-pid";
   const std::wstring attachExeForLog = attachPidStr.empty() ? (attachExe.empty() ? Basename(waitExe) : Basename(attachExe)) : L"";
-  const std::wstring specialkForLog = exeDir + L"\\SpecialK32.dll";
-  const bool is64ForLog = (_wcsicmp(Basename(specialkForLog).c_str(), L"SpecialK64.dll") == 0);
+  const std::wstring specialkForLog = exeDir + L"\\SidecarK32.dll";
+  const bool is64ForLog = (_wcsicmp(Basename(specialkForLog).c_str(), L"SidecarK64.dll") == 0);
 
   AppendLogf(logPath,
     L"startup inject_requested=%ls inject_mode=%ls inject_source=%ls attach_mode=%ls pid=%lu exe=%ls specialk=%ls is64=%d",
@@ -1942,7 +1942,7 @@ int wmain(int argc, wchar_t** argv)
   }
 
   const std::wstring dllToInject =
-    exeDir + (target_is64 ? L"\\SpecialK64.dll" : L"\\SpecialK32.dll");
+    exeDir + (target_is64 ? L"\\SidecarK64.dll" : L"\\SidecarK32.dll");
 
   AppendLogf(logPath, L"inject_select pid=%lu host_ptr_bits=%d target_is64=%d dll=%ls",
     (unsigned long)targetPid,
@@ -1979,8 +1979,8 @@ int wmain(int argc, wchar_t** argv)
     );
   }
 
-  const bool is64 = (_wcsicmp(Basename(dllToInject).c_str(), L"SpecialK64.dll") == 0);
-  const wchar_t* moduleBasename = is64 ? L"SpecialK64.dll" : L"SpecialK32.dll";
+  const bool is64 = (_wcsicmp(Basename(dllToInject).c_str(), L"SidecarK64.dll") == 0);
+  const wchar_t* moduleBasename = is64 ? L"SidecarK64.dll" : L"SidecarK32.dll";
   const std::wstring specialkDllFullPath = dllToInject;
 
   bool rundllInstallAttempted = false;
@@ -2066,7 +2066,7 @@ int wmain(int argc, wchar_t** argv)
 
     {
       MODULEENTRY32W me{};
-      const bool found = GetMatchingModuleInfo(targetPid, L"SpecialK32.dll", me);
+      const bool found = GetMatchingModuleInfo(targetPid, L"SidecarK32.dll", me);
       if (found)
       {
         const std::wstring targetExeFullPath = GetProcessImagePath(targetPid);
@@ -2076,10 +2076,10 @@ int wmain(int argc, wchar_t** argv)
 
     {
       MODULEENTRY32W me{};
-      const bool found = GetMatchingModuleInfo(targetPid, L"SpecialK32.dll", me);
+      const bool found = GetMatchingModuleInfo(targetPid, L"SidecarK32.dll", me);
 
       wchar_t msg[256]{};
-      swprintf(msg, _countof(msg), L"module_check pid=%lu found_specialk32=%d",
+      swprintf(msg, _countof(msg), L"module_check pid=%lu found_sidecark32=%d",
         (unsigned long)targetPid,
         found ? 1 : 0);
       AppendLog(logPath, msg);
@@ -2088,7 +2088,7 @@ int wmain(int argc, wchar_t** argv)
       if (found)
       {
         wchar_t msg2[1024]{};
-        swprintf(msg2, _countof(msg2), L"specialk32_loaded path=%s base=0x%p",
+        swprintf(msg2, _countof(msg2), L"sidecark32_loaded path=%s base=0x%p",
           me.szExePath,
           me.modBaseAddr);
         AppendLog(logPath, msg2);
@@ -2099,7 +2099,7 @@ int wmain(int argc, wchar_t** argv)
     if (remoteOk == 1)
     {
       MODULEENTRY32W me{};
-      const bool found = GetMatchingModuleInfo(targetPid, L"SpecialK32.dll", me);
+      const bool found = GetMatchingModuleInfo(targetPid, L"SidecarK32.dll", me);
       if (found)
         LogModuleCheckSpecialK32Delayed(logPath, targetPid);
     }

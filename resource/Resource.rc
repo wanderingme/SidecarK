@@ -69,9 +69,9 @@ BEGIN
             VALUE "FileDescription", "Special K Modding System"
             VALUE "FileVersion",     SK_VERSION_STR_A
 #ifdef _WIN64
-            VALUE "InternalName",    "SpecialK64.dll"
+            VALUE "InternalName",    "SidecarK64.dll"
 #else
-            VALUE "InternalName",    "SpecialK32.dll"
+            VALUE "InternalName",    "SidecarK32.dll"
 #endif
             VALUE "LegalCopyright",  "Copyleft © 2015-2025"
             VALUE "ProductName",     "Special K"
