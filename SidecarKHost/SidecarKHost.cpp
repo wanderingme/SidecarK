@@ -936,8 +936,22 @@ static bool HasFlag(int argc, wchar_t** argv, const wchar_t* key)
   return false;
 }
 
+// SidecarK mode: AppendLog routes to OutputDebugString when logPath is empty
+//                (deployment-dir file sink is disabled by default).
 static void AppendLog(const std::wstring& logPath, const wchar_t* msg)
 {
+  if (logPath.empty())
+  {
+    // No file path: emit to OutputDebugString for in-process diagnostics only.
+    if (msg && *msg)
+    {
+      wchar_t buf[1024]{};
+      _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"SidecarKHost: %s\n", msg);
+      OutputDebugStringW(buf);
+    }
+    return;
+  }
+
   FILE* f = nullptr;
   _wfopen_s(&f, logPath.c_str(), L"a+, ccs=UTF-8");
   if (!f) return;
@@ -969,8 +983,13 @@ static void LogOverlayHeaderDetails(const std::wstring& logPath, DWORD pid, cons
   AppendLog(logPath, msg);
 }
 
+// SidecarK mode: WriteStatusAtomic is a no-op when statusPath is empty.
+//                Status is available exclusively via the IPC control pipe "status" command.
 static void WriteStatusAtomic(const std::wstring& statusPath, const wchar_t* state, DWORD pid, const wchar_t* lastError)
 {
+  if (statusPath.empty())
+    return; // SidecarK mode: no status.json in deployment directory
+
   std::wstring tmp = statusPath + L".tmp";
 
   FILE* f = nullptr;
@@ -1631,10 +1650,18 @@ int wmain(int argc, wchar_t** argv)
 
   const std::wstring exeDir = GetExeDir();
 
+  // SidecarK mode: paths default to empty — no file I/O in the deployment directory.
+  // Pass --log <path> or --status <path> to opt into explicit file output elsewhere.
   std::wstring statusPath = ArgValue(argc, argv, L"--status");
-  std::wstring logPath = ArgValue(argc, argv, L"--log");
-  if (statusPath.empty()) statusPath = exeDir + L"\\status.json";
-  if (logPath.empty())    logPath = exeDir + L"\\overlay_engine.log";
+  std::wstring logPath    = ArgValue(argc, argv, L"--log");
+  // (removed: default assignments to exeDir\status.json / exeDir\overlay_engine.log)
+
+  // One-time diagnostic ODS: confirms SidecarK mode gates are active.
+  OutputDebugStringA(
+    "SidecarKHost: SidecarK mode active — "
+    "file sinks DISABLED; status.json DISABLED; deployment-dir materialization DISABLED; "
+    "(use --log / --status to opt into explicit file output)"
+  );
 
   AppendLog(logPath, L"starting");
   WriteStatusAtomic(statusPath, L"starting", 0, L"none");

@@ -277,6 +277,14 @@ iSK_Logger::init ( const wchar_t* const wszFileName,
   if (initialized)
     return true;
 
+  // SidecarK mode: no file log sinks in the deployment directory.
+  // Log calls will route to OutputDebugString (via the !initialized path).
+  if (SK_IsSidecarKMode ())
+  {
+    name = wszFileName;
+    return false;
+  }
+
   if (name.empty ())
     lines = 0;
 

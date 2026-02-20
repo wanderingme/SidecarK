@@ -73,6 +73,14 @@ SK_Debug_LoadHelper (void)
   static          HMODULE hModDbgHelp  = nullptr;
   static volatile LONG    __init       = 0;
 
+  // SidecarK mode: no isolated dbghelp; skip Drivers\Dbghelp\ creation.
+  // Set __init=2 so any concurrent spinwait (else-branch) exits immediately.
+  if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__init, 2L);
+    return nullptr;
+  }
+
   // Isolate and load the system DLL as a different module since
   //   dbghelp.dll is not threadsafe and other software may be using
   //     the system DLL.
@@ -4826,6 +4834,14 @@ void
 SK_DbgHlp_Init (void)
 {
   static volatile LONG __init = 0;
+
+  // SidecarK mode: no isolated dbghelp; all Sym*_Imp stay null.
+  // Set __init=2 so any concurrent spinwait (else-branch) exits immediately.
+  if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__init, 2L);
+    return;
+  }
 
   if (! InterlockedCompareExchangeAcquire (&__init, 1, 0))
   {

@@ -589,7 +589,10 @@ extern void BasicInit (void);
             BasicInit (    );
 #endif
 
-  SK_FetchBuiltinSounds ();
+  // SidecarK mode: do not create Assets\Shared\Sounds\ or download WAV files
+  //                into the deployment directory.
+  if (! SK_IsSidecarKMode ())
+    SK_FetchBuiltinSounds ();
 
   for (auto& init_fn : plugin_mgr->init_fns)
              init_fn ();
@@ -1580,6 +1583,63 @@ SK_HasGlobalInjector (void)
   return (last_test != -1);
 }
 
+// Audit Notes (Phase 7 + 7.1):
+//
+//  overlay_engine.log  — SidecarKHost.cpp: AppendLog() defaulting to exeDir\overlay_engine.log
+//  status.json         — SidecarKHost.cpp: WriteStatusAtomic() defaulting to exeDir\status.json
+//  Profiles/           — core.cpp SK_StartupCore: SK_CreateDirectoriesEx(SK_GetConfigPath(),false)
+//                        log.cpp  iSK_Logger::init: SK_CreateDirectories(configPath+"logs\")
+//  Global/             — config.cpp SK_LoadConfig: SK_CreateDirectories(osd_config) → Global\
+//                        Global\osd.ini / input.ini / platform.ini / macros.ini / notifications.ini
+//                        written when SK_SaveConfig() is called with an empty config (first run)
+//  Assets/             — core.cpp SK_InitCore: SK_FetchBuiltinSounds() → Assets\Shared\Sounds\
+//  Fonts/              — include/imgui/imgui_user.inl SK_ImGui_LoadFonts():
+//                        sk_fs::create_directories(SK_GetInstallPath()/L"Fonts") + _UnpackFontIfNeeded
+//                        (unpacks fa-solid-900.ttf and fa-brands-400.ttf for FontAwesome icons)
+//                        gated with SK_IsSidecarKMode(); missing files tolerated (LoadFont → nullptr,
+//                        all callers null-check: SK_ImGui_AutoFont, text.cpp, Fonts[1]=AddFontDefault)
+//
+//  Drivers\Dbghelp\    — debug_utils.cpp: SK_Debug_LoadHelper() copies %System32%\dbghelp.dll there;
+//                        gate: return nullptr in SidecarK mode (all callers check for null).
+//                        SK_DbgHlp_Init(): gate → all Sym*_Imp stay null; callers check before use.
+//  Drivers\HID\        — hid.cpp: SK_Input_PreHookHID() copies system hid.dll there.
+//  Drivers\Kernel32\   — hid.cpp: SK_Input_PreHookHID() copies system kernel32.dll there.
+//  Drivers\SetupAPI\   — hid.cpp: SK_Input_PreHookHID() copies system SetupAPI.dll there.
+//                        gates: SK_Input_PreHookHID() and SK_Input_HookHID() both return early.
+//                        CRASH CHAIN: SK_Input_HookHID() installs CreateFileW_Detour which
+//                        constructs SK_HID_DeviceFile → calls SK_HidD_GetPreparsedData (null) → CRASH.
+//                        Both gates are required: PreHook (Drivers\) + Hook (detour install).
+//  Drivers\XInput\     — xinput_core.cpp: SK_Input_PreHookXInput() copies system XInput*.dll there.
+//                        gates: SK_Input_PreHookXInput() + all SK_Input_HookXInput*() return early.
+//                        CRASH CHAIN: HookXInput detours call SK_GetProcAddress(null XInput_SK.hMod)
+//                        → null function pointer if steam.disabled_to_game → CRASH.
+//
+//  Root gates added (prevent all Drivers\ creation + dependent detour crashes):
+//    SK_Input_PreInit()   — load_library.cpp:395 triggers this for early frames
+//    SK_Input_Init()      — core.cpp main init
+//    SK_Input_PreHookHID()  + SK_Input_HookHID()
+//    SK_Input_PreHookXInput() + SK_Input_HookXInput1_4/1_3/1_2/1_1/Uap/9_1_0()
+//    SK_Input_HookDI8()   — calls SK_Input_HookHID() internally
+//    SK_Input_HookDI7()   — calls SK_Input_HookHID() internally
+//    SK_Input_HookScePad() + SK_Input_HookGameInput() + SK_Input_HookWinMM()
+//    SK_Debug_LoadHelper() + SK_DbgHlp_Init()
+//
+//  No packaging changes needed: all Drivers\ creation is runtime-only (no post-build copy steps).
+bool
+SK_IsSidecarKMode (void)
+{
+  // Cache result: once determined it never changes for this DLL load.
+  static int s_mode = -1;
+  if (s_mode == -1)
+  {
+    auto modname = SK_GetModuleName (SK_GetDLL ());
+    s_mode = modname._Equal (
+               SK_RunLHIfBitness (64, L"SidecarK64.dll",
+                                      L"SidecarK32.dll") ) ? 1 : 0;
+  }
+  return (s_mode == 1);
+}
+
 extern std::pair <std::queue <DWORD>, BOOL> __stdcall SK_BypassInject (void);
 
 const wchar_t*
@@ -1596,9 +1656,13 @@ SK_GetDebugSymbolPath (void)
   {
     if (! crash_log->initialized)
     {
-      crash_log->flush_freq = 0;
-      crash_log->lockless   = true;
-      crash_log->init       (L"logs/crash.log", L"wt+,ccs=UTF-8");
+      // SidecarK mode: skip crash log file creation in the deployment directory.
+      if (! SK_IsSidecarKMode ())
+      {
+        crash_log->flush_freq = 0;
+        crash_log->lockless   = true;
+        crash_log->init       (L"logs/crash.log", L"wt+,ccs=UTF-8");
+      }
     }
 
 
@@ -2014,7 +2078,9 @@ SK_StartupCore (const wchar_t* backend, void* callback)
   }
 
   SK_EstablishRootPath   ();
-  SK_CreateDirectoriesEx (SK_GetConfigPath (), false);
+  // SidecarK mode: do not create the Profiles/ tree in the deployment directory.
+  if (! SK_IsSidecarKMode ())
+    SK_CreateDirectoriesEx (SK_GetConfigPath (), false);
 
   ///SK_Config_CreateSymLinks ();
 
@@ -2070,24 +2136,32 @@ SK_StartupCore (const wchar_t* backend, void* callback)
       //  we want to know immediately if anything else does this (dll as exe).
       SK_ReleaseAssert (StrStrIW (SK_GetHostApp (), L".dll") == nullptr);
 
-      wchar_t                log_fname [MAX_PATH + 2] = { };
-      SK_PathCombineW      ( log_fname, L"logs",
-                                SK_IsInjected () ?
-                                        L"SpecialK" : backend);
-      PathAddExtensionW ( log_fname,    L".log" );
+      // SidecarK mode: skip all file log sinks; no log files in the deployment directory.
+      if (! SK_IsSidecarKMode ())
+      {
+        wchar_t                log_fname [MAX_PATH + 2] = { };
+        SK_PathCombineW      ( log_fname, L"logs",
+                                  SK_IsInjected () ?
+                                          L"SpecialK" : backend);
+        PathAddExtensionW ( log_fname,    L".log" );
 
-      dll_log->init (log_fname, L"wS+,ccs=UTF-8");
-      dll_log->Log  ( L"%s.log created\t\t(Special K  %s,  %hs)",
-                        SK_IsInjected () ?
-                             L"SpecialK" : backend,
-                          SK_GetVersionStrW (),
-                            __DATE__ );
+        dll_log->init (log_fname, L"wS+,ccs=UTF-8");
+        dll_log->Log  ( L"%s.log created\t\t(Special K  %s,  %hs)",
+                          SK_IsInjected () ?
+                               L"SpecialK" : backend,
+                            SK_GetVersionStrW (),
+                              __DATE__ );
 
-      init_.start_time =
-        SK_QueryPerf ();
+        init_.start_time =
+          SK_QueryPerf ();
 
-      game_debug->init (L"logs/game_output.log", L"w");
-      game_debug->lockless = true;
+        game_debug->init (L"logs/game_output.log", L"w");
+        game_debug->lockless = true;
+      }
+      else
+      {
+        init_.start_time = SK_QueryPerf ();
+      }
 
       SK_Display_HookModeChangeAPIs ();
 
@@ -2107,8 +2181,23 @@ SK_StartupCore (const wchar_t* backend, void* callback)
     return true;
   }
 
+  // SidecarK mode: one-time diagnostic ODS, then skip all deployment-dir disk I/O.
+  SK_RunOnce (
+    if (SK_IsSidecarKMode ())
+      OutputDebugStringA (
+        "SidecarK mode: file sinks DISABLED; status.json DISABLED; "
+        "deployment-dir materialization DISABLED; "
+        "input hooks DISABLED (HID/XInput/DI8/DI7/ScePad/GameInput/WinMM); "
+        "debug helper DISABLED (Drivers\\DbgHelp skipped); "
+        "init-complete sentinels SET (no spinwait hang); "
+        "(logging skipped, Profiles/ skipped, Global/ skipped, Assets/ skipped, "
+        "Fonts/ skipped, Drivers\\HID+Kernel32+SetupAPI+XInput+DbgHelp skipped)"
+      )
+  );
 
-  budget_log->init ( LR"(logs\dxgi_budget.log)", L"wc+,ccs=UTF-8" );
+  // SidecarK mode: no budget log file in the deployment directory.
+  if (! SK_IsSidecarKMode ())
+    budget_log->init ( LR"(logs\dxgi_budget.log)", L"wc+,ccs=UTF-8" );
 
   dll_log->LogEx (false,
     L"------------------------------------------------------------------------"
@@ -2181,17 +2270,21 @@ SK_StartupCore (const wchar_t* backend, void* callback)
     }
 
     // If no INI file exists, write one immediately.
-    dll_log->LogEx (true,  L"  >> Writing base INI file, because none existed... ");
+    // SidecarK mode: skip default INI write; tolerate missing config silently.
+    if (! SK_IsSidecarKMode ())
+    {
+      dll_log->LogEx (true,  L"  >> Writing base INI file, because none existed... ");
 
-    // Fake a frame so that the config file writes
-    WriteULong64Release
-                   (&SK_RenderBackend::frames_drawn, 1);
-    SK_SaveConfig  (config_name);
-    SK_LoadConfig  (config_name);
-    WriteULong64Release
-                   (&SK_RenderBackend::frames_drawn, 0);
+      // Fake a frame so that the config file writes
+      WriteULong64Release
+                     (&SK_RenderBackend::frames_drawn, 1);
+      SK_SaveConfig  (config_name);
+      SK_LoadConfig  (config_name);
+      WriteULong64Release
+                     (&SK_RenderBackend::frames_drawn, 0);
 
-    dll_log->LogEx (false, L"done!\n");
+      dll_log->LogEx (false, L"done!\n");
+    }
   }
 
   SK_ReShadeAddOn_Init ();
