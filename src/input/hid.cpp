@@ -3065,16 +3065,18 @@ SetupDiGetDevicePropertyW_Detour (
 void
 SK_Input_HookHID (void)
 {
+  static volatile LONG hooked = FALSE;
+
   // SidecarK mode: SK_HidD_*/SK_SetupDi* are null (PreHookHID skipped).
-  // Installing HID detours would cause CreateFileW_Detour → SK_HID_DeviceFile
-  // constructor → SK_HidD_GetPreparsedData (null) → crash.
+  // Set hooked=2 so any concurrent spinwait (else-branch) exits immediately.
   if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&hooked, 2L);
     return;
+  }
 
   if (! config.input.gamepad.hook_hid)
     return;
-
-  static volatile LONG hooked = FALSE;
 
   if (! InterlockedCompareExchange (&hooked, TRUE, FALSE))
   {
@@ -3209,16 +3211,20 @@ SK_Input_HookHID (void)
 bool
 SK_Input_PreHookHID (void)
 {
-  // SidecarK mode: do not create Drivers\HID\, Drivers\Kernel32\, Drivers\SetupAPI\.
-  // SK_Input_HookHID() is also gated, so no detours use the null SK_HidD_* pointers.
-  if (SK_IsSidecarKMode ())
-    return false;
-
-  bool ret = true;
-
   // Only do this once, and make all other threads trying to do it wait
   //
   static volatile LONG             _init  =  0;
+
+  // SidecarK mode: do not create Drivers\HID\, Drivers\Kernel32\, Drivers\SetupAPI\.
+  // Set _init=2 so any concurrent spinwait (else-branch) exits immediately.
+  if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&_init, 2L);
+    return false;
+  }
+
+  bool ret = true;
+
   if (InterlockedCompareExchange (&_init, 1, 0) == 0)
   {
     SK_PROFILE_FIRST_CALL

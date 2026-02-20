@@ -236,14 +236,18 @@ joyGetPos_Detour (_In_  UINT      uJoyID,
 void
 SK_Input_HookWinMM (void)
 {
+  static volatile LONG hooked = FALSE;
+
   // SidecarK mode: calls SK_Input_HookHID() internally and uses Drivers\WinMM\.
+  // Set hooked=2 so any concurrent spinwait exits immediately.
   if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&hooked, 2L);
     return;
+  }
 
   if (! config.input.gamepad.hook_winmm)
     return;
-
-  static volatile LONG hooked = FALSE;
 
   if (! InterlockedCompareExchange (&hooked, TRUE, FALSE))
   {

@@ -2146,8 +2146,12 @@ void
 SK_Input_HookDI8 (void)
 {
   // SidecarK mode: calls SK_Input_HookHID() internally; HID is disabled.
+  // Also set __di8_ready=TRUE so WaitForInit_DI8() callers don't spin.
   if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__di8_ready, TRUE);
     return;
+  }
 
   if (! config.input.gamepad.hook_dinput8)
     return;

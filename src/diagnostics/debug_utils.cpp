@@ -70,13 +70,16 @@ bool SK_SEH_CompatibleCallerName (LPCVOID lpAddr, wchar_t* wszDllFullName);\
 HMODULE
 SK_Debug_LoadHelper (void)
 {
-  // SidecarK mode: no isolated dbghelp; skip Drivers\Dbghelp\ creation.
-  // All callers check for null (SK_GetProcAddress(null,...) returns null safely).
-  if (SK_IsSidecarKMode ())
-    return nullptr;
-
   static          HMODULE hModDbgHelp  = nullptr;
   static volatile LONG    __init       = 0;
+
+  // SidecarK mode: no isolated dbghelp; skip Drivers\Dbghelp\ creation.
+  // Set __init=2 so any concurrent spinwait (else-branch) exits immediately.
+  if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__init, 2L);
+    return nullptr;
+  }
 
   // Isolate and load the system DLL as a different module since
   //   dbghelp.dll is not threadsafe and other software may be using
@@ -4830,12 +4833,15 @@ SymGetSearchPathW (
 void
 SK_DbgHlp_Init (void)
 {
-  // SidecarK mode: no isolated dbghelp; all Sym*_Imp stay null.
-  // Callers (SymCleanup, SymInitialize, etc.) check _Imp != nullptr before calling.
-  if (SK_IsSidecarKMode ())
-    return;
-
   static volatile LONG __init = 0;
+
+  // SidecarK mode: no isolated dbghelp; all Sym*_Imp stay null.
+  // Set __init=2 so any concurrent spinwait (else-branch) exits immediately.
+  if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__init, 2L);
+    return;
+  }
 
   if (! InterlockedCompareExchangeAcquire (&__init, 1, 0))
   {

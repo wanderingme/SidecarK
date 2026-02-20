@@ -688,8 +688,16 @@ void
 SK_Input_Init (void)
 {
   // SidecarK mode: overlay/IPC only — skip all input subsystem init (no Drivers\ creation).
+  // Emit one-time diagnostic confirming all subsystems are DISABLED+READY.
   if (SK_IsSidecarKMode ())
+  {
+    SK_RunOnce (
+      OutputDebugStringA (
+        "SidecarK: input=DISABLED+READY; dbghelp=DISABLED+READY; drivers payload=OFF"
+      )
+    );
     return;
+  }
 
   // -- Async Init = OFF option may invoke this twice
   //SK_ReleaseAssert (std::exchange (once, true) == false);

@@ -765,8 +765,12 @@ SK_Input_HookScePadContext (SK_SceInputContext::instance_s *pCtx)
 void
 SK_Input_HookScePad (void)
 {
+  // SidecarK mode: no ScePad hooks; set __hooked_scePad=2 so no spinwait blocks.
   if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__hooked_scePad, 2L);
     return;
+  }
 
   if (! config.input.gamepad.hook_scepad)
     return;

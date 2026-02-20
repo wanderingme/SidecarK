@@ -2238,8 +2238,12 @@ SK_Input_HookXInput1_4 (void)
 {
   // SidecarK mode: XInput_SK.hMod is null (PreHookXInput skipped); detours would
   // call through null function pointer if steam.disabled_to_game is set.
+  // Set __hooked_xi_1_4=2 so any concurrent spinwait exits immediately.
   if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__hooked_xi_1_4, 2L);
     return;
+  }
 
   if (! config.input.gamepad.hook_xinput)
     return;
@@ -2307,7 +2311,10 @@ void
 SK_Input_HookXInputUap (void)
 {
   if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__hooked_xi_uap, 2L);
     return;
+  }
 
   if (! config.input.gamepad.hook_xinput)
     return;
@@ -2372,7 +2379,10 @@ void
 SK_Input_HookXInput1_3 (void)
 {
   if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__hooked_xi_1_3, 2L);
     return;
+  }
 
   if (! config.input.gamepad.hook_xinput)
     return;
@@ -2443,7 +2453,10 @@ void
 SK_Input_HookXInput1_2 (void)
 {
   if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__hooked_xi_1_2, 2L);
     return;
+  }
 
   if (! config.input.gamepad.hook_xinput)
     return;
@@ -2509,7 +2522,10 @@ void
 SK_Input_HookXInput1_1 (void)
 {
   if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__hooked_xi_1_1, 2L);
     return;
+  }
 
   if (! config.input.gamepad.hook_xinput)
     return;
@@ -2575,7 +2591,10 @@ void
 SK_Input_HookXInput9_1_0 (void)
 {
   if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&__hooked_xi_9_1_0, 2L);
     return;
+  }
 
   if (! config.input.gamepad.hook_xinput)
     return;

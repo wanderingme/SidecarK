@@ -2189,6 +2189,7 @@ SK_StartupCore (const wchar_t* backend, void* callback)
         "deployment-dir materialization DISABLED; "
         "input hooks DISABLED (HID/XInput/DI8/DI7/ScePad/GameInput/WinMM); "
         "debug helper DISABLED (Drivers\\DbgHelp skipped); "
+        "init-complete sentinels SET (no spinwait hang); "
         "(logging skipped, Profiles/ skipped, Global/ skipped, Assets/ skipped, "
         "Fonts/ skipped, Drivers\\HID+Kernel32+SetupAPI+XInput+DbgHelp skipped)"
       )
