@@ -589,7 +589,10 @@ extern void BasicInit (void);
             BasicInit (    );
 #endif
 
-  SK_FetchBuiltinSounds ();
+  // SidecarK mode: do not create Assets\Shared\Sounds\ or download WAV files
+  //                into the deployment directory.
+  if (! SK_IsSidecarKMode ())
+    SK_FetchBuiltinSounds ();
 
   for (auto& init_fn : plugin_mgr->init_fns)
              init_fn ();
@@ -1580,6 +1583,31 @@ SK_HasGlobalInjector (void)
   return (last_test != -1);
 }
 
+// Audit Notes (Phase 7):
+//   overlay_engine.log  — SidecarKHost.cpp: AppendLog() defaulting to exeDir\overlay_engine.log
+//   status.json         — SidecarKHost.cpp: WriteStatusAtomic() defaulting to exeDir\status.json
+//   Profiles/           — core.cpp SK_StartupCore: SK_CreateDirectoriesEx(SK_GetConfigPath(),false)
+//                         log.cpp  iSK_Logger::init: SK_CreateDirectories(configPath+"logs\")
+//   Global/             — config.cpp SK_LoadConfig: SK_CreateDirectories(osd_config) → Global\
+//                         Global\osd.ini / input.ini / platform.ini / macros.ini / notifications.ini
+//                         written when SK_SaveConfig() is called with an empty config (first run)
+//   Assets/             — core.cpp SK_InitCore: SK_FetchBuiltinSounds() → Assets\Shared\Sounds\
+//   Fonts/              — no active creation path found in current codebase
+bool
+SK_IsSidecarKMode (void)
+{
+  // Cache result: once determined it never changes for this DLL load.
+  static int s_mode = -1;
+  if (s_mode == -1)
+  {
+    auto modname = SK_GetModuleName (SK_GetDLL ());
+    s_mode = modname._Equal (
+               SK_RunLHIfBitness (64, L"SidecarK64.dll",
+                                      L"SidecarK32.dll") ) ? 1 : 0;
+  }
+  return (s_mode == 1);
+}
+
 extern std::pair <std::queue <DWORD>, BOOL> __stdcall SK_BypassInject (void);
 
 const wchar_t*
@@ -1596,9 +1624,13 @@ SK_GetDebugSymbolPath (void)
   {
     if (! crash_log->initialized)
     {
-      crash_log->flush_freq = 0;
-      crash_log->lockless   = true;
-      crash_log->init       (L"logs/crash.log", L"wt+,ccs=UTF-8");
+      // SidecarK mode: skip crash log file creation in the deployment directory.
+      if (! SK_IsSidecarKMode ())
+      {
+        crash_log->flush_freq = 0;
+        crash_log->lockless   = true;
+        crash_log->init       (L"logs/crash.log", L"wt+,ccs=UTF-8");
+      }
     }
 
 
@@ -2014,7 +2046,9 @@ SK_StartupCore (const wchar_t* backend, void* callback)
   }
 
   SK_EstablishRootPath   ();
-  SK_CreateDirectoriesEx (SK_GetConfigPath (), false);
+  // SidecarK mode: do not create the Profiles/ tree in the deployment directory.
+  if (! SK_IsSidecarKMode ())
+    SK_CreateDirectoriesEx (SK_GetConfigPath (), false);
 
   ///SK_Config_CreateSymLinks ();
 
@@ -2070,24 +2104,32 @@ SK_StartupCore (const wchar_t* backend, void* callback)
       //  we want to know immediately if anything else does this (dll as exe).
       SK_ReleaseAssert (StrStrIW (SK_GetHostApp (), L".dll") == nullptr);
 
-      wchar_t                log_fname [MAX_PATH + 2] = { };
-      SK_PathCombineW      ( log_fname, L"logs",
-                                SK_IsInjected () ?
-                                        L"SpecialK" : backend);
-      PathAddExtensionW ( log_fname,    L".log" );
+      // SidecarK mode: skip all file log sinks; no log files in the deployment directory.
+      if (! SK_IsSidecarKMode ())
+      {
+        wchar_t                log_fname [MAX_PATH + 2] = { };
+        SK_PathCombineW      ( log_fname, L"logs",
+                                  SK_IsInjected () ?
+                                          L"SpecialK" : backend);
+        PathAddExtensionW ( log_fname,    L".log" );
 
-      dll_log->init (log_fname, L"wS+,ccs=UTF-8");
-      dll_log->Log  ( L"%s.log created\t\t(Special K  %s,  %hs)",
-                        SK_IsInjected () ?
-                             L"SpecialK" : backend,
-                          SK_GetVersionStrW (),
-                            __DATE__ );
+        dll_log->init (log_fname, L"wS+,ccs=UTF-8");
+        dll_log->Log  ( L"%s.log created\t\t(Special K  %s,  %hs)",
+                          SK_IsInjected () ?
+                               L"SpecialK" : backend,
+                            SK_GetVersionStrW (),
+                              __DATE__ );
 
-      init_.start_time =
-        SK_QueryPerf ();
+        init_.start_time =
+          SK_QueryPerf ();
 
-      game_debug->init (L"logs/game_output.log", L"w");
-      game_debug->lockless = true;
+        game_debug->init (L"logs/game_output.log", L"w");
+        game_debug->lockless = true;
+      }
+      else
+      {
+        init_.start_time = SK_QueryPerf ();
+      }
 
       SK_Display_HookModeChangeAPIs ();
 
@@ -2107,8 +2149,19 @@ SK_StartupCore (const wchar_t* backend, void* callback)
     return true;
   }
 
+  // SidecarK mode: one-time diagnostic ODS, then skip all deployment-dir disk I/O.
+  SK_RunOnce (
+    if (SK_IsSidecarKMode ())
+      OutputDebugStringA (
+        "SidecarK mode: file sinks DISABLED; status.json DISABLED; "
+        "deployment-dir materialization DISABLED; "
+        "(logging skipped, Profiles/ skipped, Global/ skipped, Assets/ skipped, default INI skipped)"
+      )
+  );
 
-  budget_log->init ( LR"(logs\dxgi_budget.log)", L"wc+,ccs=UTF-8" );
+  // SidecarK mode: no budget log file in the deployment directory.
+  if (! SK_IsSidecarKMode ())
+    budget_log->init ( LR"(logs\dxgi_budget.log)", L"wc+,ccs=UTF-8" );
 
   dll_log->LogEx (false,
     L"------------------------------------------------------------------------"
@@ -2181,17 +2234,21 @@ SK_StartupCore (const wchar_t* backend, void* callback)
     }
 
     // If no INI file exists, write one immediately.
-    dll_log->LogEx (true,  L"  >> Writing base INI file, because none existed... ");
+    // SidecarK mode: skip default INI write; tolerate missing config silently.
+    if (! SK_IsSidecarKMode ())
+    {
+      dll_log->LogEx (true,  L"  >> Writing base INI file, because none existed... ");
 
-    // Fake a frame so that the config file writes
-    WriteULong64Release
-                   (&SK_RenderBackend::frames_drawn, 1);
-    SK_SaveConfig  (config_name);
-    SK_LoadConfig  (config_name);
-    WriteULong64Release
-                   (&SK_RenderBackend::frames_drawn, 0);
+      // Fake a frame so that the config file writes
+      WriteULong64Release
+                     (&SK_RenderBackend::frames_drawn, 1);
+      SK_SaveConfig  (config_name);
+      SK_LoadConfig  (config_name);
+      WriteULong64Release
+                     (&SK_RenderBackend::frames_drawn, 0);
 
-    dll_log->LogEx (false, L"done!\n");
+      dll_log->LogEx (false, L"done!\n");
+    }
   }
 
   SK_ReShadeAddOn_Init ();

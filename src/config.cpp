@@ -1527,6 +1527,11 @@ SK_LoadConfigEx (std::wstring name, bool create)
     return false;
   }
 
+  // SidecarK mode: never create directories when loading config.
+  // Tolerate missing files silently; no deployment-dir materialisation.
+  if (SK_IsSidecarKMode ())
+    create = false;
+
   try
   {
   if (name.empty ())
@@ -1631,7 +1636,9 @@ SK_LoadConfigEx (std::wstring name, bool create)
       dll_ini->get_sections ().empty ();
 
 
-    SK_CreateDirectories (osd_config.c_str ());
+    // SidecarK mode: do not create the Global/ directory in the deployment directory.
+    if (! SK_IsSidecarKMode ())
+      SK_CreateDirectories (osd_config.c_str ());
 
     SK_RunOnce (
     {
@@ -6743,6 +6750,11 @@ SK_SaveConfig ( std::wstring name,
     return;
   }
 
+  // SidecarK mode: no INI writes in the deployment directory.
+  // Config state is held in memory only; no default or game-specific INI files are written.
+  if (SK_IsSidecarKMode ())
+    return;
+
   SK_PROFILE_SCOPED_TASK (SK_SaveConfig)
 
   if (name.empty ())
@@ -8138,7 +8150,8 @@ SK_AppCache_Manager::loadAppCacheForExe (const wchar_t* wszExe)
     bool need_to_create =
       (! std::filesystem::exists (wszAppCache));
 
-    if ( need_to_create )
+    // SidecarK mode: do not create AppCache directory in the deployment directory.
+    if ( need_to_create && (! SK_IsSidecarKMode ()) )
       SK_CreateDirectories (wszAppCache);
 
     if (app_cache_db == nullptr)
@@ -8228,7 +8241,8 @@ SK_AppCache_Manager::loadAppCacheForExe (const wchar_t* wszExe)
                     bool need_to_create =
                       (! std::filesystem::exists (wszAppCache));
 
-                    if ( need_to_create )
+                    // SidecarK mode: do not create AppCache directory in the deployment directory.
+                    if ( need_to_create && (! SK_IsSidecarKMode ()) )
                       SK_CreateDirectories (wszAppCache);
 
                     if (app_cache_db == nullptr)

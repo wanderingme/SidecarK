@@ -1341,6 +1341,10 @@ iSK_INI::write (const wchar_t* fname)
   if (fname == nullptr)
     fname = name.c_str ();
 
+  // SidecarK mode: no INI writes in the deployment directory.
+  if (SK_IsSidecarKMode ())
+    return;
+
   // Do NOT overwrite default files
   if (StrStrIW (fname, LR"(\default_)"))
     return;

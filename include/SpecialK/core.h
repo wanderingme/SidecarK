@@ -187,6 +187,11 @@ bool           __stdcall SK_IsInjected        (bool set = false) noexcept;
 bool           __stdcall SK_HasGlobalInjector (void);
 bool                     SK_CanRestartGame    (void);
 
+// Returns true when the loaded DLL is SidecarK32.dll / SidecarK64.dll.
+// Use this as the single authoritative gate for "SidecarK mode":
+//   no file sinks, no deployment-dir materialisation, no status.json.
+bool                     SK_IsSidecarKMode    (void);
+
 
 extern SK_LazyGlobal <iSK_Logger> dll_log;
 extern SK_LazyGlobal <iSK_Logger> crash_log;
