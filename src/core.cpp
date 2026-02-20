@@ -1592,7 +1592,11 @@ SK_HasGlobalInjector (void)
 //                         Global\osd.ini / input.ini / platform.ini / macros.ini / notifications.ini
 //                         written when SK_SaveConfig() is called with an empty config (first run)
 //   Assets/             — core.cpp SK_InitCore: SK_FetchBuiltinSounds() → Assets\Shared\Sounds\
-//   Fonts/              — no active creation path found in current codebase
+//   Fonts/              — include/imgui/imgui_user.inl SK_ImGui_LoadFonts():
+//                         sk_fs::create_directories(SK_GetInstallPath()/L"Fonts") + _UnpackFontIfNeeded
+//                         (unpacks fa-solid-900.ttf and fa-brands-400.ttf for FontAwesome icons)
+//                         gated with SK_IsSidecarKMode(); missing files tolerated (LoadFont → nullptr,
+//                         all callers null-check: SK_ImGui_AutoFont, text.cpp, Fonts[1]=AddFontDefault)
 bool
 SK_IsSidecarKMode (void)
 {
