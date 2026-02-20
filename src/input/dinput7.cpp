@@ -1260,6 +1260,10 @@ IDirectInput7A_CreateDevice_Detour ( IDirectInput7A        *This,
 void
 SK_Input_HookDI7 (void)
 {
+  // SidecarK mode: calls SK_Input_HookHID() internally; HID is disabled.
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_dinput7)
     return;
 

@@ -236,6 +236,10 @@ joyGetPos_Detour (_In_  UINT      uJoyID,
 void
 SK_Input_HookWinMM (void)
 {
+  // SidecarK mode: calls SK_Input_HookHID() internally and uses Drivers\WinMM\.
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_winmm)
     return;
 

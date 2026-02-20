@@ -535,6 +535,10 @@ SetThreadExecutionState_Detour (EXECUTION_STATE esFlags)
 // Parts of the Win32 API that are safe to hook from DLL Main
 void SK_Input_PreInit (void)
 {
+  // SidecarK mode: overlay/IPC only — no keyboard/mouse/gamepad input hooks.
+  if (SK_IsSidecarKMode ())
+    return;
+
   SK_PROFILE_FIRST_CALL
 
   auto SK_SDL_SetDefaultBehavior = [](const char* szVarName,
@@ -683,6 +687,10 @@ void SK_Input_PreInit (void)
 void
 SK_Input_Init (void)
 {
+  // SidecarK mode: overlay/IPC only — skip all input subsystem init (no Drivers\ creation).
+  if (SK_IsSidecarKMode ())
+    return;
+
   // -- Async Init = OFF option may invoke this twice
   //SK_ReleaseAssert (std::exchange (once, true) == false);
 

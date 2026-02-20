@@ -3065,6 +3065,12 @@ SetupDiGetDevicePropertyW_Detour (
 void
 SK_Input_HookHID (void)
 {
+  // SidecarK mode: SK_HidD_*/SK_SetupDi* are null (PreHookHID skipped).
+  // Installing HID detours would cause CreateFileW_Detour → SK_HID_DeviceFile
+  // constructor → SK_HidD_GetPreparsedData (null) → crash.
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_hid)
     return;
 
@@ -3203,6 +3209,11 @@ SK_Input_HookHID (void)
 bool
 SK_Input_PreHookHID (void)
 {
+  // SidecarK mode: do not create Drivers\HID\, Drivers\Kernel32\, Drivers\SetupAPI\.
+  // SK_Input_HookHID() is also gated, so no detours use the null SK_HidD_* pointers.
+  if (SK_IsSidecarKMode ())
+    return false;
+
   bool ret = true;
 
   // Only do this once, and make all other threads trying to do it wait

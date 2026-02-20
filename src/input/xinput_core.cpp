@@ -2236,6 +2236,11 @@ static volatile LONG __hooked_xi_uap   = FALSE;
 void
 SK_Input_HookXInput1_4 (void)
 {
+  // SidecarK mode: XInput_SK.hMod is null (PreHookXInput skipped); detours would
+  // call through null function pointer if steam.disabled_to_game is set.
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_xinput)
     return;
 
@@ -2301,6 +2306,9 @@ SK_Input_HookXInput1_4 (void)
 void
 SK_Input_HookXInputUap (void)
 {
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_xinput)
     return;
 
@@ -2363,6 +2371,9 @@ SK_Input_HookXInputUap (void)
 void
 SK_Input_HookXInput1_3 (void)
 {
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_xinput)
     return;
 
@@ -2431,6 +2442,9 @@ SK_Input_HookXInput1_3 (void)
 void
 SK_Input_HookXInput1_2 (void)
 {
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_xinput)
     return;
 
@@ -2494,6 +2508,9 @@ SK_Input_HookXInput1_2 (void)
 void
 SK_Input_HookXInput1_1 (void)
 {
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_xinput)
     return;
 
@@ -2557,6 +2574,9 @@ SK_Input_HookXInput1_1 (void)
 void
 SK_Input_HookXInput9_1_0 (void)
 {
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_xinput)
     return;
 
@@ -3541,6 +3561,11 @@ static sk_import_test_s
 void
 SK_Input_PreHookXInput (void)
 {
+  // SidecarK mode: do not create Drivers\XInput\ or spawn extraction thread.
+  // All SK_Input_HookXInput*() are also gated, so no detours use null XInput_SK.hMod.
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_xinput)
     return;
 

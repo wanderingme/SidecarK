@@ -2145,6 +2145,10 @@ IDirectInput8W_EnumDevices_Detour ( IDirectInput8W*          This,
 void
 SK_Input_HookDI8 (void)
 {
+  // SidecarK mode: calls SK_Input_HookHID() internally; HID is disabled.
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_dinput8)
     return;
 

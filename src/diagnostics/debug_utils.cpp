@@ -70,6 +70,11 @@ bool SK_SEH_CompatibleCallerName (LPCVOID lpAddr, wchar_t* wszDllFullName);\
 HMODULE
 SK_Debug_LoadHelper (void)
 {
+  // SidecarK mode: no isolated dbghelp; skip Drivers\Dbghelp\ creation.
+  // All callers check for null (SK_GetProcAddress(null,...) returns null safely).
+  if (SK_IsSidecarKMode ())
+    return nullptr;
+
   static          HMODULE hModDbgHelp  = nullptr;
   static volatile LONG    __init       = 0;
 
@@ -4825,6 +4830,11 @@ SymGetSearchPathW (
 void
 SK_DbgHlp_Init (void)
 {
+  // SidecarK mode: no isolated dbghelp; all Sym*_Imp stay null.
+  // Callers (SymCleanup, SymInitialize, etc.) check _Imp != nullptr before calling.
+  if (SK_IsSidecarKMode ())
+    return;
+
   static volatile LONG __init = 0;
 
   if (! InterlockedCompareExchangeAcquire (&__init, 1, 0))

@@ -1583,6 +1583,9 @@ SK_IWrapGameInputReading::GetUiNavigationState (GameInputUiNavigationState *stat
 void
 SK_Input_HookGameInput (void)
 {
+  if (SK_IsSidecarKMode ())
+    return;
+
   if (! config.input.gamepad.hook_game_input)
     return;
 
