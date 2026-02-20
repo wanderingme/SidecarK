@@ -1077,7 +1077,7 @@ static InjectResult InjectDllByCreateRemoteThread(DWORD pid, const std::wstring&
 
   // Already loaded check (deterministic already_loaded result)
   MODULEENTRY32W me{};
-  if (GetMatchingModuleInfo(pid, L"SidecarK32.dll", me))
+  if (GetMatchingModuleInfo(pid, Basename(dllPath).c_str(), me))
   {
     SetLastError(ERROR_ALREADY_EXISTS);
     return InjectResult::AlreadyLoaded;
@@ -1183,15 +1183,20 @@ static bool TryGetFileMTime(const wchar_t* path, FILETIME& outFt)
   return true;
 }
 
-static void LogModuleCheckSpecialK32(const std::wstring& logPath, DWORD pid)
+static void LogModuleCheck(const std::wstring& logPath, DWORD pid, bool is64)
 {
+  const wchar_t* const modName = is64 ? L"SidecarK64.dll" : L"SidecarK32.dll";
+  const wchar_t* const modNameLegacy = is64 ? L"SpecialK64.dll" : L"SpecialK32.dll";
   MODULEENTRY32W me{};
-  const bool found = GetMatchingModuleInfo(pid, L"SidecarK32.dll", me);
+  const bool found =
+    GetMatchingModuleInfo(pid, modName, me) ||
+    GetMatchingModuleInfo(pid, modNameLegacy, me);
 
   {
     wchar_t msg[256]{};
-    swprintf(msg, _countof(msg), L"module_check pid=%lu found_sidecark32=%d",
+    swprintf(msg, _countof(msg), L"module_check pid=%lu module=%ls found=%d",
       (unsigned long)pid,
+      found ? me.szModule : modName,
       found ? 1 : 0);
     AppendLog(logPath, msg);
     HostLogAppend(msg);
@@ -1199,14 +1204,17 @@ static void LogModuleCheckSpecialK32(const std::wstring& logPath, DWORD pid)
 
   if (!found)
   {
-    AppendLog(logPath, L"ERROR: injected but SidecarK32.dll not present in module list");
-    HostLogAppend(L"ERROR: injected but SidecarK32.dll not present in module list");
+    wchar_t msg[512]{};
+    swprintf(msg, _countof(msg), L"ERROR: injected but neither %ls nor %ls present in module list",
+             modName, modNameLegacy);
+    AppendLog(logPath, msg);
+    HostLogAppend(msg);
     return;
   }
 
   {
     wchar_t msg[1024]{};
-    swprintf(msg, _countof(msg), L"sidecark32_loaded path=%s base=0x%p",
+    swprintf(msg, _countof(msg), L"sidecark_loaded path=%s base=0x%p",
       me.szExePath,
       me.modBaseAddr);
     AppendLog(logPath, msg);
@@ -1217,7 +1225,7 @@ static void LogModuleCheckSpecialK32(const std::wstring& logPath, DWORD pid)
   if (TryGetFileMTime(me.szExePath, ft))
   {
     wchar_t msg[256]{};
-    swprintf(msg, _countof(msg), L"sidecark32_disk_mtime ft=0x%08lX%08lX",
+    swprintf(msg, _countof(msg), L"sidecark_disk_mtime ft=0x%08lX%08lX",
       (unsigned long)ft.dwHighDateTime,
       (unsigned long)ft.dwLowDateTime);
     AppendLog(logPath, msg);
@@ -1225,14 +1233,17 @@ static void LogModuleCheckSpecialK32(const std::wstring& logPath, DWORD pid)
   }
   else
   {
-    AppendLog(logPath, L"sidecark32_disk_mtime ft=unavailable");
-    HostLogAppend(L"sidecark32_disk_mtime ft=unavailable");
+    AppendLog(logPath, L"sidecark_disk_mtime ft=unavailable");
+    HostLogAppend(L"sidecark_disk_mtime ft=unavailable");
   }
 }
 
-static void LogModuleCheckSpecialK32Delayed(const std::wstring& logPath, DWORD pid)
+static void LogModuleCheckDelayed(const std::wstring& logPath, DWORD pid, bool is64)
 {
   Sleep(3000);
+
+  const wchar_t* const modName = is64 ? L"SidecarK64.dll" : L"SidecarK32.dll";
+  const wchar_t* const modNameLegacy = is64 ? L"SpecialK64.dll" : L"SpecialK32.dll";
 
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
   if (snap == INVALID_HANDLE_VALUE)
@@ -1254,7 +1265,7 @@ static void LogModuleCheckSpecialK32Delayed(const std::wstring& logPath, DWORD p
   if (Module32FirstW(snap, &me))
   {
     do {
-      if (_wcsicmp(me.szModule, L"SidecarK32.dll") == 0)
+      if (_wcsicmp(me.szModule, modName) == 0 || _wcsicmp(me.szModule, modNameLegacy) == 0)
       {
         found = true;
         break;
@@ -1278,8 +1289,9 @@ static void LogModuleCheckSpecialK32Delayed(const std::wstring& logPath, DWORD p
 
   {
     wchar_t msg[256]{};
-    swprintf(msg, _countof(msg), L"module_check_delayed pid=%lu found_specialk32=%d",
+    swprintf(msg, _countof(msg), L"module_check_delayed pid=%lu module=%ls found=%d",
       (unsigned long)pid,
+      found ? me.szModule : modName,
       found ? 1 : 0);
     AppendLog(logPath, msg);
     HostLogAppend(msg);
@@ -2062,11 +2074,11 @@ int wmain(int argc, wchar_t** argv)
       HostLogAppend(msg);
     }
 
-    LogModuleCheckSpecialK32(logPath, targetPid);
+    LogModuleCheck(logPath, targetPid, is64);
 
     {
       MODULEENTRY32W me{};
-      const bool found = GetMatchingModuleInfo(targetPid, L"SidecarK32.dll", me);
+      const bool found = GetMatchingModuleInfo(targetPid, moduleBasename, me);
       if (found)
       {
         const std::wstring targetExeFullPath = GetProcessImagePath(targetPid);
@@ -2076,11 +2088,12 @@ int wmain(int argc, wchar_t** argv)
 
     {
       MODULEENTRY32W me{};
-      const bool found = GetMatchingModuleInfo(targetPid, L"SidecarK32.dll", me);
+      const bool found = GetMatchingModuleInfo(targetPid, moduleBasename, me);
 
       wchar_t msg[256]{};
-      swprintf(msg, _countof(msg), L"module_check pid=%lu found_sidecark32=%d",
+      swprintf(msg, _countof(msg), L"module_check pid=%lu module=%ls found=%d",
         (unsigned long)targetPid,
+        moduleBasename,
         found ? 1 : 0);
       AppendLog(logPath, msg);
       HostLogAppend(msg);
@@ -2088,7 +2101,7 @@ int wmain(int argc, wchar_t** argv)
       if (found)
       {
         wchar_t msg2[1024]{};
-        swprintf(msg2, _countof(msg2), L"sidecark32_loaded path=%s base=0x%p",
+        swprintf(msg2, _countof(msg2), L"sidecark_loaded path=%s base=0x%p",
           me.szExePath,
           me.modBaseAddr);
         AppendLog(logPath, msg2);
@@ -2099,9 +2112,9 @@ int wmain(int argc, wchar_t** argv)
     if (remoteOk == 1)
     {
       MODULEENTRY32W me{};
-      const bool found = GetMatchingModuleInfo(targetPid, L"SidecarK32.dll", me);
+      const bool found = GetMatchingModuleInfo(targetPid, moduleBasename, me);
       if (found)
-        LogModuleCheckSpecialK32Delayed(logPath, targetPid);
+        LogModuleCheckDelayed(logPath, targetPid, is64);
     }
   }
 
