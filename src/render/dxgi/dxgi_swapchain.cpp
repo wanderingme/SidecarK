@@ -1040,6 +1040,13 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   // the necessary memory ordering). Matches the pattern of other D3D resources here.
   static IDXGISwapChain* s_target_swapchain = nullptr;
 
+  static HANDLE   g_ctrlMap = nullptr;
+  static uint8_t* g_ctrlBase = nullptr;
+  static volatile LONG* g_overlayEnabled = nullptr;
+  static DWORD    g_ctrlPid = 0;
+  static bool     g_ctrlAttempted = false;
+  static bool     g_ctrlLogged = false;
+
   // D3D12 resources
   static ID3D12CommandAllocator*      s_d3d12_cmd_allocator     = nullptr;
   static ID3D12GraphicsCommandList*   s_d3d12_cmd_list          = nullptr;
@@ -1189,6 +1196,24 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     s_pidCached = 0;  // Force remap on next iteration
     s_pid = pidNow;
     s_skf1.last_pid = pidNow;
+
+    if (g_ctrlBase != nullptr)
+    {
+      UnmapViewOfFile (g_ctrlBase);
+      g_ctrlBase = nullptr;
+    }
+
+    g_overlayEnabled = nullptr;
+
+    if (g_ctrlMap != nullptr)
+    {
+      CloseHandle (g_ctrlMap);
+      g_ctrlMap = nullptr;
+    }
+
+    g_ctrlPid = 0;
+    g_ctrlAttempted = false;
+    g_ctrlLogged = false;
 
     // Reset all transition markers
     s_skf1.logged_enabled_on.store(false);
@@ -1409,6 +1434,64 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   const bool skf1_stage_ef_ready =
     (s_skf1.view_ptr != nullptr && s_skf1.width > 0 && s_skf1.height > 0 &&
      s_skf1.stride > 0 && s_skf1.pixel_format == 1);
+
+  if (g_ctrlPid != pidNow)
+  {
+    g_ctrlPid = pidNow;
+    g_ctrlAttempted = false;
+  }
+
+  if (!g_ctrlAttempted)
+  {
+    g_ctrlAttempted = true;
+
+    wchar_t ctrl_name [64] = { };
+    wsprintfW (ctrl_name, L"Local\\SidecarK_Control_%lu", (unsigned long)pidNow);
+
+    g_ctrlMap = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
+    if (g_ctrlMap != nullptr)
+    {
+      g_ctrlBase = (uint8_t *)MapViewOfFile (g_ctrlMap, FILE_MAP_READ, 0, 0, 0);
+      if (g_ctrlBase != nullptr)
+      {
+        char sig[4] = { };
+        memcpy (sig, g_ctrlBase, sizeof (sig));
+        const uint32_t version = *reinterpret_cast<const uint32_t *> (g_ctrlBase + 0x04);
+
+        const bool sig_ok = (memcmp (sig, "SKC1", sizeof (sig)) == 0);
+        const bool ver_ok = (version == 1u);
+
+        if (sig_ok && ver_ok)
+          g_overlayEnabled = reinterpret_cast<volatile LONG *> (g_ctrlBase + 0x08);
+        else
+          g_overlayEnabled = nullptr;
+
+        if (!g_ctrlLogged)
+        {
+          g_ctrlLogged = true;
+          const LONG initial_value = (g_overlayEnabled != nullptr) ? *g_overlayEnabled : -1;
+          _SidecarLog (L"SKF1 ctrl map: base=%p sig=%c%c%c%c ver=%u overlay=%ld offset=0x08",
+                       g_ctrlBase,
+                       sig[0], sig[1], sig[2], sig[3],
+                       version,
+                       (long)initial_value);
+        }
+      }
+    }
+  }
+
+  bool overlay_enabled = true;
+  static LONG s_overlayEnabledLast = -1;
+  if (g_overlayEnabled != nullptr)
+  {
+    const LONG value = *g_overlayEnabled;
+    overlay_enabled = (value != 0);
+    if (value != s_overlayEnabledLast)
+    {
+      s_overlayEnabledLast = value;
+      _SidecarLog (L"SKF1 ctrl overlayEnabled=%ld", (long)value);
+    }
+  }
 
   if (skf1_stage_ef_ready)
   {
@@ -1765,7 +1848,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             _SidecarLog(msg);
           }
 
-          if (s_skf1.has_frame && s_skf1.tex != nullptr)
+          if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
           {
             if (s_skf1.texFmt == bbDesc.Format)
             {
@@ -2206,7 +2289,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             }
 
             // STAGE F: Blit staging texture to backbuffer (always last-good if available)
-            if (s_skf1.has_frame && s_d3d12_staging_texture != nullptr &&
+            if (overlay_enabled && s_skf1.has_frame && s_d3d12_staging_texture != nullptr &&
                 s_d3d12_cmd_allocator != nullptr && s_d3d12_cmd_list != nullptr)
             {
               bool can_blit = true;
