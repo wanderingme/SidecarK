@@ -740,6 +740,123 @@ static void HostLogAppendf(const wchar_t* fmt, ...)
   HostLogAppend(buf);
 }
 
+static HWND SK_WaitForReadinessGate(DWORD targetPid, DWORD timeoutMs, const std::wstring& logPath, const std::wstring& exeNameForLog)
+{
+  AppendLogf(logPath, L"wait_gate_pid pid=%lu exe=%ls", (unsigned long)targetPid, exeNameForLog.c_str());
+  HostLogAppendf(L"wait_gate_pid pid=%lu exe=%ls", (unsigned long)targetPid, exeNameForLog.c_str());
+
+  static constexpr DWORD POLL_MS = 100;
+  static constexpr DWORD LOG_RATE_MS = 200;
+
+  const ULONGLONG gateStartMs = GetTickCount64();
+  ULONGLONG visibleSinceMs = 0;
+  HWND lastHwnd = nullptr;
+  int lastVis = 0;
+  ULONGLONG lastLogMs = 0;
+
+  HWND gateHwnd = nullptr;
+  DWORD gateVisibleMs = 0;
+  bool gateSeenDxgi = false;
+  bool gateSeenD3d11 = false;
+  bool gateSeenOpenGL = false;
+  bool gateFallbackUsed = false;
+
+  while (true)
+  {
+    HWND hwnd = FindTopLevelWindowForPid(targetPid);
+
+    int vis = 0;
+    if (hwnd != nullptr)
+    {
+      RECT rc{ 0,0,0,0 };
+      if (GetWindowRect(hwnd, &rc))
+      {
+        const LONG ww = rc.right - rc.left;
+        const LONG hh = rc.bottom - rc.top;
+        if (ww >= 100 && hh >= 100 && IsWindowVisible(hwnd))
+          vis = 1;
+      }
+    }
+
+    const bool seenDxgi = HasModule(targetPid, L"dxgi.dll");
+    const bool seenD3d11 = HasModule(targetPid, L"d3d11.dll");
+    const bool seenOpenGL = HasModule(targetPid, L"opengl32.dll");
+
+    gateSeenDxgi |= seenDxgi;
+    gateSeenD3d11 |= seenD3d11;
+    gateSeenOpenGL |= seenOpenGL;
+
+    const bool strongReady = seenDxgi || seenD3d11;
+    const bool weakReadyOnly = (!strongReady) && seenOpenGL;
+
+    const ULONGLONG now = GetTickCount64();
+
+    if (hwnd != lastHwnd || vis != lastVis)
+    {
+      if (now - lastLogMs >= LOG_RATE_MS)
+      {
+        lastLogMs = now;
+        AppendLogf(logPath, L"wait_gate_hwnd pid=%lu hwnd=0x%p vis=%d", (unsigned long)targetPid, hwnd, vis);
+        HostLogAppendf(L"wait_gate_hwnd pid=%lu hwnd=0x%p vis=%d", (unsigned long)targetPid, hwnd, vis);
+      }
+    }
+
+    if (vis == 1)
+    {
+      if (hwnd != lastHwnd)
+        visibleSinceMs = now;
+      else if (visibleSinceMs == 0)
+        visibleSinceMs = now;
+
+      const DWORD visibleMs = (visibleSinceMs != 0) ? (DWORD)(now - visibleSinceMs) : 0u;
+
+      const DWORD requiredMs = strongReady ? 400u : (weakReadyOnly ? 1500u : 0u);
+
+      const bool gfxReady = strongReady || weakReadyOnly;
+      const bool gateReady = (hwnd != nullptr) && (vis == 1) && gfxReady && (requiredMs > 0u) && (visibleMs >= requiredMs);
+
+      if (gateReady)
+      {
+        gateHwnd = hwnd;
+        gateVisibleMs = visibleMs;
+        break;
+      }
+    }
+    else
+    {
+      visibleSinceMs = 0;
+    }
+
+    const ULONGLONG elapsed = now - gateStartMs;
+    if (elapsed >= timeoutMs)
+    {
+      gateFallbackUsed = true;
+      gateHwnd = hwnd;
+      gateVisibleMs = (visibleSinceMs != 0) ? (DWORD)(now - visibleSinceMs) : 0u;
+      AppendLogf(logPath, L"wait_gate_timeout pid=%lu ms=%lu proceeding_best_effort=1", (unsigned long)targetPid, (unsigned long)elapsed);
+      HostLogAppendf(L"wait_gate_timeout pid=%lu ms=%lu proceeding_best_effort=1", (unsigned long)targetPid, (unsigned long)elapsed);
+      break;
+    }
+
+    lastHwnd = hwnd;
+    lastVis = vis;
+    Sleep(POLL_MS);
+  }
+
+  HostLogAppendf(L"wait_gate_preinject pid=%lu hwnd=0x%p window_visible_ms=%lu gfx_modules_seen:dxgi=%d d3d11=%d opengl32=%d fallback=%d",
+    (unsigned long)targetPid,
+    gateHwnd,
+    (unsigned long)gateVisibleMs,
+    gateSeenDxgi ? 1 : 0,
+    gateSeenD3d11 ? 1 : 0,
+    gateSeenOpenGL ? 1 : 0,
+    gateFallbackUsed ? 1 : 0);
+
+  WriteWindowProofOnceForPid(targetPid, gateHwnd);
+
+  return gateHwnd;
+}
+
 static bool ReadBGRAAt(const uint8_t* base_ptr,
   uint32_t width, uint32_t height, uint32_t stride,
   uint32_t x, uint32_t y,
@@ -934,6 +1051,14 @@ static bool HasFlag(int argc, wchar_t** argv, const wchar_t* key)
     if (wcscmp(argv[i], key) == 0)
       return true;
   return false;
+}
+
+static void LogUsage(const std::wstring& logPath)
+{
+  AppendLog(logPath, L"usage: SidecarKHost.exe (--attach-pid <pid> | --attach-exe <exe> | --wait-for-exe <exe>) [--wait-for-ready] [--timeout-ms <ms>] [--inject remote|rundll] [--force-late] [--log <path>] [--status <path>]");
+  HostLogAppend(L"usage: SidecarKHost.exe (--attach-pid <pid> | --attach-exe <exe> | --wait-for-exe <exe>) [--wait-for-ready] [--timeout-ms <ms>] [--inject remote|rundll] [--force-late] [--log <path>] [--status <path>]");
+  AppendLog(logPath, L"  --wait-for-ready: run the readiness gate (window + gfx module checks) before injection; intended for --attach-pid.");
+  HostLogAppend(L"  --wait-for-ready: run the readiness gate (window + gfx module checks) before injection; intended for --attach-pid.");
 }
 
 // SidecarK mode: AppendLog routes to OutputDebugString when logPath is empty
@@ -1684,6 +1809,7 @@ int wmain(int argc, wchar_t** argv)
   const std::wstring attachExe = ArgValue(argc, argv, L"--attach-exe");
   const std::wstring waitExe = ArgValue(argc, argv, L"--wait-for-exe");
   const std::wstring timeoutStr = ArgValue(argc, argv, L"--timeout-ms");
+  const bool waitForReady = HasFlag(argc, argv, L"--wait-for-ready");
   const bool forceLate = HasFlag(argc, argv, L"--force-late");
   std::wstring injectRequested = ArgValue(argc, argv, L"--inject");
   const wchar_t* injectSource = L"argv";
@@ -1694,6 +1820,9 @@ int wmain(int argc, wchar_t** argv)
   }
 
   const bool waitForExeMode = (!waitExe.empty());
+  DWORD timeoutMs = 0;
+  if (!TryParseU32(timeoutStr, timeoutMs) || timeoutMs == 0)
+    timeoutMs = 30000; // default 30s
 
   std::wstring injectMode = injectRequested;
   if (waitForExeMode)
@@ -1769,6 +1898,16 @@ int wmain(int argc, wchar_t** argv)
   {
     AppendLog(logPath, L"error: specify exactly one of --attach-pid, --attach-exe, --wait-for-exe");
     HostLogAppend(L"error: specify exactly one of --attach-pid, --attach-exe, --wait-for-exe");
+    LogUsage(logPath);
+    WriteStatusAtomic(statusPath, L"error", 0, L"attach_failed");
+    return ATTACH_FAILED;
+  }
+
+  if (waitForReady && attachPidStr.empty())
+  {
+    AppendLog(logPath, L"error: --wait-for-ready requires --attach-pid <pid>");
+    HostLogAppend(L"error: --wait-for-ready requires --attach-pid <pid>");
+    LogUsage(logPath);
     WriteStatusAtomic(statusPath, L"error", 0, L"attach_failed");
     return ATTACH_FAILED;
   }
@@ -1799,10 +1938,6 @@ int wmain(int argc, wchar_t** argv)
   }
   else // wait-for-exe
   {
-    DWORD timeoutMs = 0;
-    if (!TryParseU32(timeoutStr, timeoutMs) || timeoutMs == 0)
-      timeoutMs = 30000; // default 30s
-
     const ULONGLONG start = GetTickCount64();
     const std::wstring name = Basename(waitExe);
 
@@ -1822,120 +1957,16 @@ int wmain(int argc, wchar_t** argv)
       Sleep(200);
     }
 
-    AppendLogf(logPath, L"wait_gate_pid pid=%lu exe=%ls", (unsigned long)targetPid, name.c_str());
-    HostLogAppendf(L"wait_gate_pid pid=%lu exe=%ls", (unsigned long)targetPid, name.c_str());
-
-    static constexpr DWORD POLL_MS = 100;
-    static constexpr DWORD LOG_RATE_MS = 200;
-
-    const ULONGLONG gateStartMs = GetTickCount64();
-    ULONGLONG visibleSinceMs = 0;
-    HWND lastHwnd = nullptr;
-    int lastVis = 0;
-    ULONGLONG lastLogMs = 0;
-
-    HWND gateHwnd = nullptr;
-    DWORD gateVisibleMs = 0;
-    bool gateSeenDxgi = false;
-    bool gateSeenD3d11 = false;
-    bool gateSeenOpenGL = false;
-    bool gateFallbackUsed = false;
-
-    while (true)
-    {
-      HWND hwnd = FindTopLevelWindowForPid(targetPid);
-
-      int vis = 0;
-      if (hwnd != nullptr)
-      {
-        RECT rc{ 0,0,0,0 };
-        if (GetWindowRect(hwnd, &rc))
-        {
-          const LONG ww = rc.right - rc.left;
-          const LONG hh = rc.bottom - rc.top;
-          if (ww >= 100 && hh >= 100 && IsWindowVisible(hwnd))
-            vis = 1;
-        }
-      }
-
-      const bool seenDxgi = HasModule(targetPid, L"dxgi.dll");
-      const bool seenD3d11 = HasModule(targetPid, L"d3d11.dll");
-      const bool seenOpenGL = HasModule(targetPid, L"opengl32.dll");
-
-      gateSeenDxgi |= seenDxgi;
-      gateSeenD3d11 |= seenD3d11;
-      gateSeenOpenGL |= seenOpenGL;
-
-      const bool strongReady = seenDxgi || seenD3d11;
-      const bool weakReadyOnly = (!strongReady) && seenOpenGL;
-
-      const ULONGLONG now = GetTickCount64();
-
-      if (hwnd != lastHwnd || vis != lastVis)
-      {
-        if (now - lastLogMs >= LOG_RATE_MS)
-        {
-          lastLogMs = now;
-          AppendLogf(logPath, L"wait_gate_hwnd pid=%lu hwnd=0x%p vis=%d", (unsigned long)targetPid, hwnd, vis);
-          HostLogAppendf(L"wait_gate_hwnd pid=%lu hwnd=0x%p vis=%d", (unsigned long)targetPid, hwnd, vis);
-        }
-      }
-
-      if (vis == 1)
-      {
-        if (hwnd != lastHwnd)
-          visibleSinceMs = now;
-        else if (visibleSinceMs == 0)
-          visibleSinceMs = now;
-
-        const DWORD visibleMs = (visibleSinceMs != 0) ? (DWORD)(now - visibleSinceMs) : 0u;
-
-        const DWORD requiredMs = strongReady ? 400u : (weakReadyOnly ? 1500u : 0u);
-
-        const bool gfxReady = strongReady || weakReadyOnly;
-        const bool gateReady = (hwnd != nullptr) && (vis == 1) && gfxReady && (requiredMs > 0u) && (visibleMs >= requiredMs);
-
-        if (gateReady)
-        {
-          gateHwnd = hwnd;
-          gateVisibleMs = visibleMs;
-          break;
-        }
-      }
-      else
-      {
-        visibleSinceMs = 0;
-      }
-
-      const ULONGLONG elapsed = now - gateStartMs;
-      if (elapsed >= timeoutMs)
-      {
-        gateFallbackUsed = true;
-        gateHwnd = hwnd;
-        gateVisibleMs = (visibleSinceMs != 0) ? (DWORD)(now - visibleSinceMs) : 0u;
-        AppendLogf(logPath, L"wait_gate_timeout pid=%lu ms=%lu proceeding_best_effort=1", (unsigned long)targetPid, (unsigned long)elapsed);
-        HostLogAppendf(L"wait_gate_timeout pid=%lu ms=%lu proceeding_best_effort=1", (unsigned long)targetPid, (unsigned long)elapsed);
-        break;
-      }
-
-      lastHwnd = hwnd;
-      lastVis = vis;
-      Sleep(POLL_MS);
-    }
-
-    HostLogAppendf(L"wait_gate_preinject pid=%lu hwnd=0x%p window_visible_ms=%lu gfx_modules_seen:dxgi=%d d3d11=%d opengl32=%d fallback=%d",
-      (unsigned long)targetPid,
-      gateHwnd,
-      (unsigned long)gateVisibleMs,
-      gateSeenDxgi ? 1 : 0,
-      gateSeenD3d11 ? 1 : 0,
-      gateSeenOpenGL ? 1 : 0,
-      gateFallbackUsed ? 1 : 0);
-
-    WriteWindowProofOnceForPid(targetPid, gateHwnd);
+    SK_WaitForReadinessGate(targetPid, timeoutMs, logPath, name);
 
     // Deterministic selection log (after PID choice)
     LogTargetSelected(logPath, targetPid, Basename(waitExe));
+  }
+
+  if (!attachPidStr.empty() && waitForReady)
+  {
+    const std::wstring exeName = Basename(GetProcessImagePath(targetPid));
+    SK_WaitForReadinessGate(targetPid, timeoutMs, logPath, exeName);
   }
 
   if (!attachPidStr.empty())
