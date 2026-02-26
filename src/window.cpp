@@ -1856,11 +1856,22 @@ SK_Input_RestoreClipRect (void)
   return __SK_BackupClipRectStorage;
 }
 
+// Forward declaration for SKC_IsOverlayEnabledCached defined later in this TU.
+static bool SKC_IsOverlayEnabledCached ();
+
 BOOL
 WINAPI
 ClipCursor_Detour (const RECT *lpRect)
 {
   SK_LOG_FIRST_CALL
+
+  // While overlay is active, always unclip so the cursor can move freely.
+  if (SKC_IsOverlayEnabledCached ())
+  {
+    if (ClipCursor_Original != nullptr)
+      return ClipCursor_Original (nullptr);
+    return ClipCursor (nullptr);
+  }
 
   SK_LOGi4 (L"ClipCursor (...) - Frame=%d", sk::narrow_cast <int> (SK_GetFramesDrawn ()));
 
@@ -5876,6 +5887,7 @@ static constexpr uint16_t SKI1_Type_WinMsgMouse = 1;
 static constexpr uint16_t SKI1_Type_WinMsgKey   = 2;
 static constexpr uint16_t SKI1_Type_RawMouse    = 3;
 static constexpr uint16_t SKI1_Type_RawKey      = 4;
+static constexpr uint16_t SKI1_Type_Focus       = 5;
 
 struct SKI1_WinMsgMouse
 {
@@ -5911,6 +5923,14 @@ struct SKI1_RawKey
   uint32_t flags;
   uint32_t message;
 };
+
+struct SKI1_Focus
+{
+  uint32_t msg;
+  uint32_t active;
+  uint32_t reserved0;
+  uint32_t reserved1;
+};
 #pragma pack(pop)
 
 // Non-blocking overlapped pipe writer state
@@ -5920,6 +5940,11 @@ static bool       s_ski1_write_pending = false;
 // Buffer large enough for any header+payload combination
 static uint8_t    s_ski1_buf [sizeof (SKI1_Header) + 64];
 
+// Stuck-key protection: pending KEYUP that could not be sent while write was busy.
+// Only the last-seen KEYUP per slot is retained; we keep one slot (last-wins).
+static bool     s_ski1_pending_keyup      = false;
+static uint8_t  s_ski1_pending_keyup_buf [sizeof (SKI1_Header) + sizeof (SKI1_WinMsgKey)];
+
 static void SKI1_ResetPipe ()
 {
   if (s_ski1_pipe != INVALID_HANDLE_VALUE)
@@ -5928,8 +5953,31 @@ static void SKI1_ResetPipe ()
     CloseHandle (s_ski1_pipe);
     s_ski1_pipe = INVALID_HANDLE_VALUE;
   }
-  s_ski1_write_pending = false;
+  s_ski1_write_pending  = false;
+  s_ski1_pending_keyup  = false;
 }
+
+// Internal: write a pre-built frame buffer of `total` bytes (already
+// filled into s_ski1_buf).  Returns true if write was started/completed.
+static bool SKI1_WriteBuffer (uint32_t total)
+{
+  ZeroMemory (&s_ski1_ov, sizeof (s_ski1_ov));
+  DWORD bw = 0;
+  if (!WriteFile (s_ski1_pipe, s_ski1_buf, total, &bw, &s_ski1_ov))
+  {
+    const DWORD err = GetLastError ();
+    if (err == ERROR_IO_PENDING)
+    {
+      s_ski1_write_pending = true;
+      return true;
+    }
+    SKI1_ResetPipe ();
+    return false;
+  }
+  return true;
+}
+
+static void SKI1_SendFrame (uint16_t type, const void* payload, uint32_t payloadSize);
 
 static bool SKI1_EnsurePipe ()
 {
@@ -5955,7 +6003,7 @@ static void SKI1_SendFrame (uint16_t type, const void* payload, uint32_t payload
   if (!SKI1_EnsurePipe ())
     return;
 
-  // If a prior overlapped write is still in flight, drop this event.
+  // If a prior overlapped write is still in flight, check if it completed.
   if (s_ski1_write_pending)
   {
     DWORD transferred = 0;
@@ -5963,12 +6011,25 @@ static void SKI1_SendFrame (uint16_t type, const void* payload, uint32_t payload
     if (!done)
     {
       if (GetLastError () == ERROR_IO_INCOMPLETE)
-        return; // still in flight — drop
-      // Any other error: pipe broken
+        return; // still in flight — caller will handle drop/queue
       SKI1_ResetPipe ();
       return;
     }
     s_ski1_write_pending = false;
+
+    // Flush any pending KEYUP that was queued while the prior write was busy.
+    if (s_ski1_pending_keyup)
+    {
+      s_ski1_pending_keyup = false;
+      constexpr uint32_t kKeyUpTotal = (uint32_t)(sizeof (SKI1_Header) + sizeof (SKI1_WinMsgKey));
+      memcpy (s_ski1_buf, s_ski1_pending_keyup_buf, kKeyUpTotal);
+      if (!SKI1_WriteBuffer (kKeyUpTotal))
+        return;
+      // If write went pending, return; current frame will be dropped but
+      // key-up delivery takes priority.
+      if (s_ski1_write_pending)
+        return;
+    }
   }
 
   const uint32_t total = (uint32_t)sizeof (SKI1_Header) + payloadSize;
@@ -5985,32 +6046,40 @@ static void SKI1_SendFrame (uint16_t type, const void* payload, uint32_t payload
   if (payloadSize > 0 && payload != nullptr)
     memcpy (s_ski1_buf + sizeof (hdr), payload, payloadSize);
 
-  ZeroMemory (&s_ski1_ov, sizeof (s_ski1_ov));
-  DWORD bw = 0;
-  if (!WriteFile (s_ski1_pipe, s_ski1_buf, total, &bw, &s_ski1_ov))
-  {
-    const DWORD err = GetLastError ();
-    if (err == ERROR_IO_PENDING)
-    {
-      s_ski1_write_pending = true;
-      return; // in flight
-    }
-    // Broken pipe or other error
-    SKI1_ResetPipe ();
-  }
-  // Synchronous completion — s_ski1_write_pending stays false
+  SKI1_WriteBuffer (total);
 }
 
 static void SKI1_SendWinMsgMouse (UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
   SKI1_WinMsgMouse p{};
-  p.msg         = (uint32_t)uMsg;
-  p.x           = (int32_t)(int)(short)LOWORD (lParam);
-  p.y           = (int32_t)(int)(short)HIWORD (lParam);
-  p.wheel       = (uMsg == WM_MOUSEWHEEL || uMsg == WM_MOUSEHWHEEL)
-                  ? (int32_t)(short)HIWORD (wParam) : 0;
+  p.msg = (uint32_t)uMsg;
+
+  if (uMsg == WM_MOUSEWHEEL || uMsg == WM_MOUSEHWHEEL)
+  {
+    // lParam for wheel messages contains SCREEN coordinates; convert to client.
+    POINT pt = { (int32_t)(int)(short)LOWORD (lParam),
+                 (int32_t)(int)(short)HIWORD (lParam) };
+    ScreenToClient (game_window.hWnd, &pt);
+    p.x     = (int32_t)pt.x;
+    p.y     = (int32_t)pt.y;
+    p.wheel = (int32_t)(short)HIWORD (wParam);
+  }
+  else
+  {
+    // All other mouse messages: lParam already contains client coordinates.
+    p.x     = (int32_t)(int)(short)LOWORD (lParam);
+    p.y     = (int32_t)(int)(short)HIWORD (lParam);
+    p.wheel = 0;
+  }
+
   p.buttonFlags = (uint32_t)LOWORD (wParam);
-  p.keyFlags    = (uint32_t)HIWORD (wParam);
+
+  // Consistent key-modifier state from GetKeyState
+  p.keyFlags = 0;
+  if (GetKeyState (VK_SHIFT)   < 0) p.keyFlags |= 1;
+  if (GetKeyState (VK_CONTROL) < 0) p.keyFlags |= 2;
+  if (GetKeyState (VK_MENU)    < 0) p.keyFlags |= 4;
+
   SKI1_SendFrame (SKI1_Type_WinMsgMouse, &p, (uint32_t)sizeof (p));
 }
 
@@ -6022,6 +6091,30 @@ static void SKI1_SendWinMsgKey (UINT uMsg, WPARAM wParam, LPARAM lParam)
   p.scancode = (uint32_t)((lParam >> 16) & 0xFF);
   p.flags    = (uint32_t)(lParam >> 24);
   p.isDown   = (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN || uMsg == WM_CHAR) ? 1u : 0u;
+
+  const bool isKeyUp = (p.isDown == 0);
+
+  // If a write is already in flight, apply stuck-key priority:
+  //   - KEYDOWN may be dropped.
+  //   - KEYUP must not be lost; queue it (last-wins) for delivery on next flush.
+  if (s_ski1_write_pending)
+  {
+    if (isKeyUp)
+    {
+      // Overwrite the pending slot (last KEYUP wins)
+      SKI1_Header hdr;
+      hdr.magic[0] = 'S'; hdr.magic[1] = 'K'; hdr.magic[2] = 'I'; hdr.magic[3] = '1';
+      hdr.version = 1;
+      hdr.type    = SKI1_Type_WinMsgKey;
+      hdr.size    = (uint32_t)sizeof (SKI1_WinMsgKey);
+      memcpy (s_ski1_pending_keyup_buf, &hdr, sizeof (hdr));
+      memcpy (s_ski1_pending_keyup_buf + sizeof (hdr), &p, sizeof (p));
+      s_ski1_pending_keyup = true;
+    }
+    // KEYDOWN dropped — no action
+    return;
+  }
+
   SKI1_SendFrame (SKI1_Type_WinMsgKey, &p, (uint32_t)sizeof (p));
 }
 
@@ -6064,6 +6157,25 @@ static void SKI1_SendRawInput (LPARAM lParam)
     p.message  = (uint32_t)k.Message;
     SKI1_SendFrame (SKI1_Type_RawKey, &p, (uint32_t)sizeof (p));
   }
+}
+
+static void SKI1_SendFocus (UINT uMsg, WPARAM wParam)
+{
+  SKI1_Focus p{};
+  p.msg       = (uint32_t)uMsg;
+  p.reserved0 = 0;
+  p.reserved1 = 0;
+
+  switch (uMsg)
+  {
+    case WM_SETFOCUS:     p.active = 1u; break;
+    case WM_KILLFOCUS:    p.active = 0u; break;
+    case WM_ACTIVATE:     p.active = (LOWORD (wParam) != WA_INACTIVE) ? 1u : 0u; break;
+    case WM_ACTIVATEAPP:  p.active = (wParam != 0) ? 1u : 0u; break;
+    default:              p.active = 0u; break;
+  }
+
+  SKI1_SendFrame (SKI1_Type_Focus, &p, (uint32_t)sizeof (p));
 }
 
 static bool SKC_IsOverlayEnabledCached ()
@@ -7067,6 +7179,14 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
       // --- Raw input ---
       case WM_INPUT:
         SKI1_SendRawInput (lParam);
+        return 0;
+
+      // --- Focus / activation ---
+      case WM_SETFOCUS:
+      case WM_KILLFOCUS:
+      case WM_ACTIVATE:
+      case WM_ACTIVATEAPP:
+        SKI1_SendFocus (uMsg, wParam);
         return 0;
 
       default:

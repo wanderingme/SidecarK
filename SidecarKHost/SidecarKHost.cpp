@@ -1702,12 +1702,14 @@ struct SKI1_WinMsgMouse { uint32_t msg; int32_t x; int32_t y; int32_t wheel; uin
 struct SKI1_WinMsgKey   { uint32_t msg; uint32_t vk; uint32_t scancode; uint32_t flags; uint32_t isDown; };
 struct SKI1_RawMouse    { int32_t dx; int32_t dy; uint32_t buttonFlags; int32_t wheelDelta; };
 struct SKI1_RawKey      { uint32_t vkey; uint32_t makeCode; uint32_t flags; uint32_t message; };
+struct SKI1_Focus       { uint32_t msg; uint32_t active; uint32_t reserved0; uint32_t reserved1; };
 #pragma pack(pop)
 
 static constexpr uint16_t SKI1_Type_WinMsgMouse = 1;
 static constexpr uint16_t SKI1_Type_WinMsgKey   = 2;
 static constexpr uint16_t SKI1_Type_RawMouse    = 3;
 static constexpr uint16_t SKI1_Type_RawKey      = 4;
+static constexpr uint16_t SKI1_Type_Focus       = 5;
 
 static void RunInputEventPipeServer(const std::wstring& pipeName)
 {
@@ -1854,6 +1856,15 @@ static void RunInputEventPipeServer(const std::wstring& pipeName)
               wprintf(L"raw_key:     vkey=%u make=%u flags=0x%X msg=%u\n",
                       (unsigned)p.vkey, (unsigned)p.makeCode,
                       (unsigned)p.flags, (unsigned)p.message);
+            }
+            break;
+          case SKI1_Type_Focus:
+            if (hdr->size >= sizeof(SKI1_Focus))
+            {
+              SKI1_Focus p;
+              memcpy(&p, payload, sizeof(p));
+              wprintf(L"SKI1 Focus   msg=0x%04X active=%u\n",
+                      (unsigned)p.msg, (unsigned)p.active);
             }
             break;
           default:
