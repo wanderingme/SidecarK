@@ -1686,12 +1686,28 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
 }
 
 // ---------------------------------------------------------------------------
-// Input event pipe server: receives mouse/keyboard events from the injected
-// DLL while the overlay is active and logs them for validation.
+// Input event pipe server: receives SKI1-framed events from the injected DLL
+// while the overlay is active and logs them for end-to-end validation.
 // ---------------------------------------------------------------------------
 #pragma pack(push, 1)
-struct SKC_InputEvent { uint32_t msg; uint64_t wParam; int64_t lParam; };
+struct SKI1_Header
+{
+  char     magic  [4];
+  uint16_t version;
+  uint16_t type;
+  uint32_t size;
+};
+
+struct SKI1_WinMsgMouse { uint32_t msg; int32_t x; int32_t y; int32_t wheel; uint32_t buttonFlags; uint32_t keyFlags; };
+struct SKI1_WinMsgKey   { uint32_t msg; uint32_t vk; uint32_t scancode; uint32_t flags; uint32_t isDown; };
+struct SKI1_RawMouse    { int32_t dx; int32_t dy; uint32_t buttonFlags; int32_t wheelDelta; };
+struct SKI1_RawKey      { uint32_t vkey; uint32_t makeCode; uint32_t flags; uint32_t message; };
 #pragma pack(pop)
+
+static constexpr uint16_t SKI1_Type_WinMsgMouse = 1;
+static constexpr uint16_t SKI1_Type_WinMsgKey   = 2;
+static constexpr uint16_t SKI1_Type_RawMouse    = 3;
+static constexpr uint16_t SKI1_Type_RawKey      = 4;
 
 static void RunInputEventPipeServer(const std::wstring& pipeName)
 {
@@ -1699,8 +1715,8 @@ static void RunInputEventPipeServer(const std::wstring& pipeName)
   {
     HANDLE hPipe = CreateNamedPipeW(
       pipeName.c_str(),
-      PIPE_ACCESS_INBOUND,
-      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+      PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+      PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
       1,
       0,
       65536,
@@ -1710,27 +1726,160 @@ static void RunInputEventPipeServer(const std::wstring& pipeName)
     if (hPipe == INVALID_HANDLE_VALUE)
       return;
 
-    const BOOL connected =
-      ConnectNamedPipe(hPipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+    // Wait for client connection with timeout so we can check g_shutdown
+    OVERLAPPED ovConnect{};
+    ovConnect.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ovConnect.hEvent) { CloseHandle(hPipe); return; }
 
+    BOOL connected = ConnectNamedPipe(hPipe, &ovConnect);
     if (!connected)
+    {
+      const DWORD err = GetLastError();
+      if (err == ERROR_IO_PENDING)
+      {
+        // Wait up to 500ms, then check g_shutdown in a loop
+        while (!g_shutdown.load())
+        {
+          const DWORD wr = WaitForSingleObject(ovConnect.hEvent, 500);
+          if (wr == WAIT_OBJECT_0) { connected = TRUE; break; }
+          // WAIT_TIMEOUT: loop back and re-check g_shutdown
+        }
+      }
+      else if (err == ERROR_PIPE_CONNECTED)
+      {
+        connected = TRUE;
+      }
+    }
+
+    CloseHandle(ovConnect.hEvent);
+
+    if (!connected || g_shutdown.load())
     {
       CloseHandle(hPipe);
       continue;
     }
 
+    // Read loop: accumulate a stream into header+payload
+    uint8_t readBuf[65536];
+    uint32_t accumulated = 0;
+
+    OVERLAPPED ovRead{};
+    ovRead.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ovRead.hEvent) { DisconnectNamedPipe(hPipe); CloseHandle(hPipe); continue; }
+
     while (!g_shutdown.load())
     {
-      SKC_InputEvent ev{};
+      ResetEvent(ovRead.hEvent);
       DWORD br = 0;
-      if (!ReadFile(hPipe, &ev, (DWORD)sizeof(ev), &br, nullptr) || br < (DWORD)sizeof(ev))
-        break;
-      wprintf(L"input_event: msg=%u wParam=%llu lParam=%lld\n",
-              (unsigned)ev.msg,
-              (unsigned long long)ev.wParam,
-              (long long)ev.lParam);
+      const BOOL ok = ReadFile(hPipe, readBuf + accumulated,
+                               (DWORD)(sizeof(readBuf) - accumulated), &br, &ovRead);
+      if (!ok)
+      {
+        const DWORD err = GetLastError();
+        if (err == ERROR_IO_PENDING)
+        {
+          while (!g_shutdown.load())
+          {
+            const DWORD wr = WaitForSingleObject(ovRead.hEvent, 500);
+            if (wr == WAIT_OBJECT_0) break;
+          }
+          if (g_shutdown.load()) break;
+          if (!GetOverlappedResult(hPipe, &ovRead, &br, FALSE))
+            break;
+        }
+        else
+        {
+          break; // client disconnected or error
+        }
+      }
+      if (br == 0) break;
+
+      accumulated += br;
+
+      // Consume all complete frames from the accumulated buffer
+      bool streamCorrupt = false;
+      uint32_t consumed = 0;
+      while (accumulated - consumed >= (uint32_t)sizeof(SKI1_Header))
+      {
+        const SKI1_Header* hdr = reinterpret_cast<const SKI1_Header*>(readBuf + consumed);
+
+        if (memcmp(hdr->magic, "SKI1", 4) != 0 || hdr->version != 1)
+        {
+          streamCorrupt = true;
+          break; // corrupt stream; disconnect
+        }
+
+        const uint32_t frameSize = (uint32_t)sizeof(SKI1_Header) + hdr->size;
+        if (accumulated - consumed < frameSize)
+          break; // incomplete frame; wait for more data
+
+        const uint8_t* payload = readBuf + consumed + sizeof(SKI1_Header);
+
+        switch (hdr->type)
+        {
+          case SKI1_Type_WinMsgMouse:
+            if (hdr->size >= sizeof(SKI1_WinMsgMouse))
+            {
+              SKI1_WinMsgMouse p;
+              memcpy(&p, payload, sizeof(p));
+              wprintf(L"input_mouse: msg=%u x=%d y=%d wheel=%d btns=0x%X keys=0x%X\n",
+                      (unsigned)p.msg, (int)p.x, (int)p.y, (int)p.wheel,
+                      (unsigned)p.buttonFlags, (unsigned)p.keyFlags);
+            }
+            break;
+          case SKI1_Type_WinMsgKey:
+            if (hdr->size >= sizeof(SKI1_WinMsgKey))
+            {
+              SKI1_WinMsgKey p;
+              memcpy(&p, payload, sizeof(p));
+              wprintf(L"input_key:   msg=%u vk=%u scan=%u flags=0x%X down=%u\n",
+                      (unsigned)p.msg, (unsigned)p.vk, (unsigned)p.scancode,
+                      (unsigned)p.flags, (unsigned)p.isDown);
+            }
+            break;
+          case SKI1_Type_RawMouse:
+            if (hdr->size >= sizeof(SKI1_RawMouse))
+            {
+              SKI1_RawMouse p;
+              memcpy(&p, payload, sizeof(p));
+              wprintf(L"raw_mouse:   dx=%d dy=%d btns=0x%X wheel=%d\n",
+                      (int)p.dx, (int)p.dy, (unsigned)p.buttonFlags, (int)p.wheelDelta);
+            }
+            break;
+          case SKI1_Type_RawKey:
+            if (hdr->size >= sizeof(SKI1_RawKey))
+            {
+              SKI1_RawKey p;
+              memcpy(&p, payload, sizeof(p));
+              wprintf(L"raw_key:     vkey=%u make=%u flags=0x%X msg=%u\n",
+                      (unsigned)p.vkey, (unsigned)p.makeCode,
+                      (unsigned)p.flags, (unsigned)p.message);
+            }
+            break;
+          default:
+            break;
+        }
+
+        consumed += frameSize;
+      }
+
+      if (streamCorrupt)
+        break; // disconnect this client and wait for next connection
+
+      if (consumed > 0)
+      {
+        accumulated -= consumed;
+        if (accumulated > 0)
+          memmove(readBuf, readBuf + consumed, accumulated);
+      }
+      else if (accumulated >= (uint32_t)sizeof(readBuf))
+      {
+        // Buffer full with no progress; reset
+        accumulated = 0;
+      }
     }
 
+    CloseHandle(ovRead.hEvent);
     DisconnectNamedPipe(hPipe);
     CloseHandle(hPipe);
   }

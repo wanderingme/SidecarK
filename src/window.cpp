@@ -5857,36 +5857,212 @@ BOOL
 SK_Win32_IgnoreSysCommand (HWND hWnd, WPARAM wParam, LPARAM lParam);
 
 // ---------------------------------------------------------------------------
-// Overlay input capture helpers
+// Overlay input capture helpers (SKI1 versioned protocol)
 // ---------------------------------------------------------------------------
 extern bool SKC_IsOverlayEnabled ();
 
 #pragma pack(push, 1)
-struct SKC_InputEvent { uint32_t msg; uint64_t wParam; int64_t lParam; };
+// Frame header sent before every payload
+struct SKI1_Header
+{
+  char     magic  [4]; // 'S','K','I','1'
+  uint16_t version;    // 1
+  uint16_t type;       // see SKI1_Type_*
+  uint32_t size;       // payload byte count (not including this header)
+};
+
+// type values
+static constexpr uint16_t SKI1_Type_WinMsgMouse = 1;
+static constexpr uint16_t SKI1_Type_WinMsgKey   = 2;
+static constexpr uint16_t SKI1_Type_RawMouse    = 3;
+static constexpr uint16_t SKI1_Type_RawKey      = 4;
+
+struct SKI1_WinMsgMouse
+{
+  uint32_t msg;
+  int32_t  x;
+  int32_t  y;
+  int32_t  wheel;
+  uint32_t buttonFlags;
+  uint32_t keyFlags;
+};
+
+struct SKI1_WinMsgKey
+{
+  uint32_t msg;
+  uint32_t vk;
+  uint32_t scancode;
+  uint32_t flags;
+  uint32_t isDown;
+};
+
+struct SKI1_RawMouse
+{
+  int32_t  dx;
+  int32_t  dy;
+  uint32_t buttonFlags;
+  int32_t  wheelDelta;
+};
+
+struct SKI1_RawKey
+{
+  uint32_t vkey;
+  uint32_t makeCode;
+  uint32_t flags;
+  uint32_t message;
+};
 #pragma pack(pop)
 
-static void SKC_SendInputEvent (UINT uMsg, WPARAM wParam, LPARAM lParam)
-{
-  static HANDLE s_pipe = INVALID_HANDLE_VALUE;
+// Non-blocking overlapped pipe writer state
+static HANDLE    s_ski1_pipe    = INVALID_HANDLE_VALUE;
+static OVERLAPPED s_ski1_ov     = {};
+static bool       s_ski1_write_pending = false;
+// Buffer large enough for any header+payload combination
+static uint8_t    s_ski1_buf [sizeof (SKI1_Header) + 64];
 
-  if (s_pipe == INVALID_HANDLE_VALUE)
+static void SKI1_ResetPipe ()
+{
+  if (s_ski1_pipe != INVALID_HANDLE_VALUE)
   {
-    wchar_t name [128]{};
-    wsprintfW (name, L"\\\\.\\pipe\\SidecarK_Input_%lu",
-               (unsigned long)GetCurrentProcessId ());
-    s_pipe = CreateFileW (name, GENERIC_WRITE, 0, nullptr,
-                          OPEN_EXISTING, 0, nullptr);
-    if (s_pipe == INVALID_HANDLE_VALUE)
+    CancelIo  (s_ski1_pipe);
+    CloseHandle (s_ski1_pipe);
+    s_ski1_pipe = INVALID_HANDLE_VALUE;
+  }
+  s_ski1_write_pending = false;
+}
+
+static bool SKI1_EnsurePipe ()
+{
+  if (s_ski1_pipe != INVALID_HANDLE_VALUE)
+    return true;
+
+  wchar_t name [128]{};
+  wsprintfW (name, L"\\\\.\\pipe\\SidecarK_Input_%lu",
+             (unsigned long)GetCurrentProcessId ());
+
+  s_ski1_pipe = CreateFileW (name, GENERIC_WRITE, 0, nullptr,
+                             OPEN_EXISTING,
+                             FILE_FLAG_OVERLAPPED, nullptr);
+  if (s_ski1_pipe == INVALID_HANDLE_VALUE)
+    return false;
+
+  s_ski1_write_pending = false;
+  return true;
+}
+
+static void SKI1_SendFrame (uint16_t type, const void* payload, uint32_t payloadSize)
+{
+  if (!SKI1_EnsurePipe ())
+    return;
+
+  // If a prior overlapped write is still in flight, drop this event.
+  if (s_ski1_write_pending)
+  {
+    DWORD transferred = 0;
+    BOOL done = GetOverlappedResult (s_ski1_pipe, &s_ski1_ov, &transferred, FALSE);
+    if (!done)
+    {
+      if (GetLastError () == ERROR_IO_INCOMPLETE)
+        return; // still in flight — drop
+      // Any other error: pipe broken
+      SKI1_ResetPipe ();
       return;
+    }
+    s_ski1_write_pending = false;
   }
 
-  SKC_InputEvent ev { (uint32_t)uMsg, (uint64_t)(UINT_PTR)wParam,
-                                      (int64_t) (INT_PTR) lParam };
+  const uint32_t total = (uint32_t)sizeof (SKI1_Header) + payloadSize;
+  if (total > sizeof (s_ski1_buf))
+    return;
+
+  SKI1_Header hdr;
+  hdr.magic[0] = 'S'; hdr.magic[1] = 'K'; hdr.magic[2] = 'I'; hdr.magic[3] = '1';
+  hdr.version = 1;
+  hdr.type    = type;
+  hdr.size    = payloadSize;
+
+  memcpy (s_ski1_buf, &hdr, sizeof (hdr));
+  if (payloadSize > 0 && payload != nullptr)
+    memcpy (s_ski1_buf + sizeof (hdr), payload, payloadSize);
+
+  ZeroMemory (&s_ski1_ov, sizeof (s_ski1_ov));
   DWORD bw = 0;
-  if (!WriteFile (s_pipe, &ev, (DWORD)sizeof (ev), &bw, nullptr))
+  if (!WriteFile (s_ski1_pipe, s_ski1_buf, total, &bw, &s_ski1_ov))
   {
-    CloseHandle (s_pipe);
-    s_pipe = INVALID_HANDLE_VALUE;
+    const DWORD err = GetLastError ();
+    if (err == ERROR_IO_PENDING)
+    {
+      s_ski1_write_pending = true;
+      return; // in flight
+    }
+    // Broken pipe or other error
+    SKI1_ResetPipe ();
+  }
+  // Synchronous completion — s_ski1_write_pending stays false
+}
+
+static void SKI1_SendWinMsgMouse (UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+  SKI1_WinMsgMouse p{};
+  p.msg         = (uint32_t)uMsg;
+  p.x           = (int32_t)(int)(short)LOWORD (lParam);
+  p.y           = (int32_t)(int)(short)HIWORD (lParam);
+  p.wheel       = (uMsg == WM_MOUSEWHEEL || uMsg == WM_MOUSEHWHEEL)
+                  ? (int32_t)(short)HIWORD (wParam) : 0;
+  p.buttonFlags = (uint32_t)LOWORD (wParam);
+  p.keyFlags    = (uint32_t)HIWORD (wParam);
+  SKI1_SendFrame (SKI1_Type_WinMsgMouse, &p, (uint32_t)sizeof (p));
+}
+
+static void SKI1_SendWinMsgKey (UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+  SKI1_WinMsgKey p{};
+  p.msg      = (uint32_t)uMsg;
+  p.vk       = (uint32_t)(UINT_PTR)wParam;
+  p.scancode = (uint32_t)((lParam >> 16) & 0xFF);
+  p.flags    = (uint32_t)(lParam >> 24);
+  p.isDown   = (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN || uMsg == WM_CHAR) ? 1u : 0u;
+  SKI1_SendFrame (SKI1_Type_WinMsgKey, &p, (uint32_t)sizeof (p));
+}
+
+static void SKI1_SendRawInput (LPARAM lParam)
+{
+  UINT cbSize = 0;
+  if (SK_GetRawInputData ((HRAWINPUT)lParam, RID_INPUT,
+                          nullptr, &cbSize, sizeof (RAWINPUTHEADER)) == (UINT)-1)
+    return;
+
+  if (cbSize == 0 || cbSize > 4096)
+    return;
+
+  uint8_t buf [4096];
+  UINT got = SK_GetRawInputData ((HRAWINPUT)lParam, RID_INPUT,
+                                  buf, &cbSize, sizeof (RAWINPUTHEADER));
+  if (got == (UINT)-1 || got < sizeof (RAWINPUTHEADER))
+    return;
+
+  const RAWINPUT* ri = reinterpret_cast<const RAWINPUT*>(buf);
+
+  if (ri->header.dwType == RIM_TYPEMOUSE)
+  {
+    const RAWMOUSE& m = ri->data.mouse;
+    SKI1_RawMouse p{};
+    p.dx          = (int32_t)m.lLastX;
+    p.dy          = (int32_t)m.lLastY;
+    p.buttonFlags = (uint32_t)m.usButtonFlags;
+    p.wheelDelta  = (m.usButtonFlags & (RI_MOUSE_WHEEL | RI_MOUSE_HWHEEL))
+                    ? (int32_t)(short)m.usButtonData : 0;
+    SKI1_SendFrame (SKI1_Type_RawMouse, &p, (uint32_t)sizeof (p));
+  }
+  else if (ri->header.dwType == RIM_TYPEKEYBOARD)
+  {
+    const RAWKEYBOARD& k = ri->data.keyboard;
+    SKI1_RawKey p{};
+    p.vkey     = (uint32_t)k.VKey;
+    p.makeCode = (uint32_t)k.MakeCode;
+    p.flags    = (uint32_t)k.Flags;
+    p.message  = (uint32_t)k.Message;
+    SKI1_SendFrame (SKI1_Type_RawKey, &p, (uint32_t)sizeof (p));
   }
 }
 
@@ -6865,15 +7041,36 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
 
 
 
-  // Overlay input capture: when overlay is active, block game input and
-  //   forward intercepted mouse/keyboard events to the named event pipe.
+  // Overlay input capture: when overlay is active, swallow game input and
+  //   forward intercepted events to the named event pipe.
   if (hWnd == game_window.hWnd && SKC_IsOverlayEnabledCached ())
   {
-    if ( (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST) ||
-         (uMsg >= WM_KEYFIRST   && uMsg <= WM_KEYLAST  ) )
+    switch (uMsg)
     {
-      SKC_SendInputEvent (uMsg, wParam, lParam);
-      return game_window.DefWindowProc (hWnd, uMsg, wParam, lParam);
+      // --- Mouse messages ---
+      case WM_MOUSEMOVE:
+      case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+      case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+      case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+      case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
+      case WM_MOUSEWHEEL:  case WM_MOUSEHWHEEL:
+        SKI1_SendWinMsgMouse (uMsg, wParam, lParam);
+        return 0;
+
+      // --- Keyboard messages ---
+      case WM_KEYDOWN:    case WM_KEYUP:
+      case WM_SYSKEYDOWN: case WM_SYSKEYUP:
+      case WM_CHAR:
+        SKI1_SendWinMsgKey (uMsg, wParam, lParam);
+        return 0;
+
+      // --- Raw input ---
+      case WM_INPUT:
+        SKI1_SendRawInput (lParam);
+        return 0;
+
+      default:
+        break;
     }
   }
 
