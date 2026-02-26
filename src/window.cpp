@@ -5856,6 +5856,54 @@ DWORD dwLastWindowMessageProcessed = INFINITE;
 BOOL
 SK_Win32_IgnoreSysCommand (HWND hWnd, WPARAM wParam, LPARAM lParam);
 
+// ---------------------------------------------------------------------------
+// Overlay input capture helpers
+// ---------------------------------------------------------------------------
+extern bool SKC_IsOverlayEnabled ();
+
+#pragma pack(push, 1)
+struct SKC_InputEvent { uint32_t msg; uint64_t wParam; int64_t lParam; };
+#pragma pack(pop)
+
+static void SKC_SendInputEvent (UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+  static HANDLE s_pipe = INVALID_HANDLE_VALUE;
+
+  if (s_pipe == INVALID_HANDLE_VALUE)
+  {
+    wchar_t name [128]{};
+    wsprintfW (name, L"\\\\.\\pipe\\SidecarK_Input_%lu",
+               (unsigned long)GetCurrentProcessId ());
+    s_pipe = CreateFileW (name, GENERIC_WRITE, 0, nullptr,
+                          OPEN_EXISTING, 0, nullptr);
+    if (s_pipe == INVALID_HANDLE_VALUE)
+      return;
+  }
+
+  SKC_InputEvent ev { (uint32_t)uMsg, (uint64_t)(UINT_PTR)wParam,
+                                      (int64_t) (INT_PTR) lParam };
+  DWORD bw = 0;
+  if (!WriteFile (s_pipe, &ev, (DWORD)sizeof (ev), &bw, nullptr))
+  {
+    CloseHandle (s_pipe);
+    s_pipe = INVALID_HANDLE_VALUE;
+  }
+}
+
+static bool SKC_IsOverlayEnabledCached ()
+{
+  static bool      s_val = false;
+  static ULONGLONG s_ts  = 0;
+  const  ULONGLONG now   = GetTickCount64 ();
+  if (now - s_ts >= 16u)
+  {
+    s_ts  = now;
+    s_val = SKC_IsOverlayEnabled ();
+  }
+  return s_val;
+}
+// ---------------------------------------------------------------------------
+
 __declspec (noinline)
 LRESULT
 CALLBACK
@@ -6816,6 +6864,18 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
 
 
 
+
+  // Overlay input capture: when overlay is active, block game input and
+  //   forward intercepted mouse/keyboard events to the named event pipe.
+  if (hWnd == game_window.hWnd && SKC_IsOverlayEnabledCached ())
+  {
+    if ( (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST) ||
+         (uMsg >= WM_KEYFIRST   && uMsg <= WM_KEYLAST  ) )
+    {
+      SKC_SendInputEvent (uMsg, wParam, lParam);
+      return game_window.DefWindowProc (hWnd, uMsg, wParam, lParam);
+    }
+  }
 
   //
   // Squelch input messages that managed to get into the loop without triggering

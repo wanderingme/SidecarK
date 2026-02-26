@@ -456,6 +456,7 @@ static HANDLE g_control_map = nullptr;
 static void* g_control_view = nullptr;
 static volatile uint32_t* g_control_overlay_enabled = nullptr;
 static HANDLE g_control_pipe_thread = nullptr;
+static HANDLE g_input_pipe_thread   = nullptr;
 
 static HANDLE g_frame_host_map = nullptr;
 static void* g_frame_host_view = nullptr;
@@ -1490,6 +1491,13 @@ static std::wstring ControlPipeNameForTarget(DWORD pid)
   return buf;
 }
 
+static std::wstring InputPipeNameForTarget(DWORD pid)
+{
+  wchar_t buf[128]{};
+  swprintf(buf, _countof(buf), L"\\\\.\\pipe\\SidecarK_Input_%lu", (unsigned long)pid);
+  return buf;
+}
+
 static bool InitSidecarKControlPlaneForPid(DWORD pid)
 {
   if (pid == 0)
@@ -1676,6 +1684,58 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
     CloseHandle(hPipe);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Input event pipe server: receives mouse/keyboard events from the injected
+// DLL while the overlay is active and logs them for validation.
+// ---------------------------------------------------------------------------
+#pragma pack(push, 1)
+struct SKC_InputEvent { uint32_t msg; uint64_t wParam; int64_t lParam; };
+#pragma pack(pop)
+
+static void RunInputEventPipeServer(const std::wstring& pipeName)
+{
+  while (!g_shutdown.load())
+  {
+    HANDLE hPipe = CreateNamedPipeW(
+      pipeName.c_str(),
+      PIPE_ACCESS_INBOUND,
+      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+      1,
+      0,
+      65536,
+      0,
+      nullptr);
+
+    if (hPipe == INVALID_HANDLE_VALUE)
+      return;
+
+    const BOOL connected =
+      ConnectNamedPipe(hPipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+
+    if (!connected)
+    {
+      CloseHandle(hPipe);
+      continue;
+    }
+
+    while (!g_shutdown.load())
+    {
+      SKC_InputEvent ev{};
+      DWORD br = 0;
+      if (!ReadFile(hPipe, &ev, (DWORD)sizeof(ev), &br, nullptr) || br < (DWORD)sizeof(ev))
+        break;
+      wprintf(L"input_event: msg=%u wParam=%llu lParam=%lld\n",
+              (unsigned)ev.msg,
+              (unsigned long long)ev.wParam,
+              (long long)ev.lParam);
+    }
+
+    DisconnectNamedPipe(hPipe);
+    CloseHandle(hPipe);
+  }
+}
+// ---------------------------------------------------------------------------
 
 static bool ReadOnePipeMessage(HANDLE hPipe, std::wstring& out)
 {
@@ -2183,8 +2243,21 @@ int wmain(int argc, wchar_t** argv)
 
   CreateHostFrameMappingForPid(targetPid);
 
-
-
+  // Start input event pipe server: receives intercepted mouse/keyboard events
+  // from the DLL while the overlay is active.
+  {
+    const std::wstring inputPipeName = InputPipeNameForTarget(targetPid);
+    g_input_pipe_thread = CreateThread(
+      nullptr, 0,
+      [](LPVOID p) -> DWORD {
+        auto* name = reinterpret_cast<std::wstring*>(p);
+        RunInputEventPipeServer(*name);
+        delete name;
+        return 0;
+      },
+      new std::wstring(inputPipeName),
+      0, nullptr);
+  }
 
   // Run pipe server on a background thread so the main thread can remain your lifecycle owner
   HANDLE hPipeThread = CreateThread(
@@ -2370,6 +2443,13 @@ int wmain(int argc, wchar_t** argv)
 
   WaitForSingleObject(hPipeThread, 2000);
   CloseHandle(hPipeThread);
+
+  if (g_input_pipe_thread)
+  {
+    WaitForSingleObject(g_input_pipe_thread, 2000);
+    CloseHandle(g_input_pipe_thread);
+    g_input_pipe_thread = nullptr;
+  }
 
   ShutdownSidecarKControlPlane();
 
