@@ -5103,7 +5103,7 @@ PostMessageA_Detour (HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
   SK_LOG_FIRST_CALL
 
-  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture ()))
+  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsOverlayEnabledCached ()))
     return TRUE;
 
   return
@@ -5116,7 +5116,7 @@ PostMessageW_Detour (HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
   SK_LOG_FIRST_CALL
 
-  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture ()))
+  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsOverlayEnabledCached ()))
     return TRUE;
 
   return
@@ -5129,7 +5129,7 @@ SendMessageA_Detour (HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
   SK_LOG_FIRST_CALL
 
-  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture ()))
+  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsOverlayEnabledCached ()))
     return TRUE;
 
   return
@@ -5142,7 +5142,7 @@ SendMessageW_Detour (HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
   SK_LOG_FIRST_CALL
 
-  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture ()))
+  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsOverlayEnabledCached ()))
     return TRUE;
 
   return
@@ -6225,8 +6225,9 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
   if ((uMsg >= WM_KEYFIRST   && uMsg <= WM_KEYLAST) ||
       (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST))
   {
-    const bool bIgnoreKeyboard        = bIgnoreKeyboardAndMouse || SK_ImGui_WantKeyboardCapture ();
-    const bool bIgnoreMouse           = bIgnoreKeyboardAndMouse || SK_ImGui_WantMouseCapture    ();
+    const bool bOverlayActive         = SKC_IsOverlayEnabledCached ();
+    const bool bIgnoreKeyboard        = bIgnoreKeyboardAndMouse || SK_ImGui_WantKeyboardCapture () || bOverlayActive;
+    const bool bIgnoreMouse           = bIgnoreKeyboardAndMouse || SK_ImGui_WantMouseCapture    () || bOverlayActive;
     const bool bIgnoreKeyboardOrMouse = bIgnoreKeyboard         || bIgnoreMouse;
 
     if (bIgnoreKeyboardOrMouse)
