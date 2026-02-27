@@ -1859,6 +1859,9 @@ SK_Input_RestoreClipRect (void)
 // Forward declaration for SKC_IsOverlayEnabledCached defined later in this TU.
 static bool SKC_IsOverlayEnabledCached ();
 
+// Forward declaration for SKI1 input forwarder used in PeekMessage detours.
+static void SKI1_ForwardMsgFromQueue (const MSG& msg);
+
 BOOL
 WINAPI
 ClipCursor_Detour (const RECT *lpRect)
@@ -4971,6 +4974,9 @@ PeekMessageA_Detour (
            (msg.message >= WM_KEYFIRST   && msg.message <= WM_KEYLAST)   ||
             msg.message == WM_INPUT                                        )
       {
+        // Forward to the SKI1 pipe before nulling (PM_REMOVE path only).
+        if ((wRemoveMsg & PM_REMOVE) == PM_REMOVE && msg.hwnd == game_window.hWnd)
+          SKI1_ForwardMsgFromQueue (msg);
         msg.message = WM_NULL;
       }
     }
@@ -5090,6 +5096,9 @@ PeekMessageW_Detour (
            (msg.message >= WM_KEYFIRST   && msg.message <= WM_KEYLAST)   ||
             msg.message == WM_INPUT                                        )
       {
+        // Forward to the SKI1 pipe before nulling (PM_REMOVE path only).
+        if ((wRemoveMsg & PM_REMOVE) == PM_REMOVE && msg.hwnd == game_window.hWnd)
+          SKI1_ForwardMsgFromQueue (msg);
         msg.message = WM_NULL;
       }
     }
@@ -6202,6 +6211,18 @@ static void SKI1_SendFocus (UINT uMsg, WPARAM wParam)
   }
 
   SKI1_SendFrame (SKI1_Type_Focus, &p, (uint32_t)sizeof (p));
+}
+
+// Forward keyboard/mouse/raw-input from the PeekMessage queue to the SKI1 pipe.
+// Called before the message is nulled out so the original type and params are intact.
+static void SKI1_ForwardMsgFromQueue (const MSG& msg)
+{
+  if (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST)
+    SKI1_SendWinMsgMouse (msg.message, msg.wParam, msg.lParam);
+  else if (msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST)
+    SKI1_SendWinMsgKey (msg.message, msg.wParam, msg.lParam);
+  else if (msg.message == WM_INPUT)
+    SKI1_SendRawInput (msg.lParam);
 }
 
 static bool SKC_IsOverlayEnabledCached ()
