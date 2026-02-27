@@ -1529,7 +1529,7 @@ static bool InitSidecarKControlPlaneForPid(DWORD pid)
   {
     memcpy(base + 0x00, "SKC1", 4);
     *ver = 1u;
-    *overlay_enabled = 1u;
+    *overlay_enabled = 0u;
   }
 
   g_control_overlay_enabled = reinterpret_cast<volatile uint32_t*>(overlay_enabled);
