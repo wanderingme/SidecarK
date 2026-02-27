@@ -6185,8 +6185,16 @@ static bool SKC_IsOverlayEnabledCached ()
   const  ULONGLONG now   = GetTickCount64 ();
   if (now - s_ts >= 16u)
   {
-    s_ts  = now;
-    s_val = SKC_IsOverlayEnabled ();
+    s_ts       = now;
+    bool s_new = SKC_IsOverlayEnabled ();
+    if (s_val && !s_new)
+    {
+      // Overlay just turned OFF: restore the cursor clip the game had set.
+      SK_ClipCursor ( SK_IsClipRectFinite (&game_window.cursor_clip)
+                        ? &game_window.cursor_clip
+                        : nullptr );
+    }
+    s_val = s_new;
   }
   return s_val;
 }
