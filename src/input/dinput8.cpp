@@ -52,6 +52,9 @@ using finish_pfn = void (WINAPI *)(void);
     dll_log->LogEx (false, L"(ret=S_OK)\n");                             \
 }
 
+// Overlay-active check: when true, all keyboard/mouse input must be suppressed.
+extern bool SKC_IsOverlayEnabled ();
+
 ///////////////////////////////////////////////////////////////////////////////
 //
 // DirectInput 8
@@ -68,6 +71,17 @@ IDirectInput8W_EnumDevices_pfn
 
 IDirectInputDevice8W_GetDeviceState_pfn
         IDirectInputDevice8W_GetDeviceState_Original       = nullptr;
+
+// GetDeviceData (vtable index 10) – used for buffered input
+using IDirectInputDevice8W_GetDeviceData_pfn =
+  HRESULT (WINAPI *)(LPDIRECTINPUTDEVICE8W, DWORD, LPDIDEVICEOBJECTDATA, LPDWORD, DWORD);
+using IDirectInputDevice8A_GetDeviceData_pfn =
+  HRESULT (WINAPI *)(LPDIRECTINPUTDEVICE8A, DWORD, LPDIDEVICEOBJECTDATA, LPDWORD, DWORD);
+
+static IDirectInputDevice8W_GetDeviceData_pfn
+        IDirectInputDevice8W_GetDeviceData_Original        = nullptr;
+static IDirectInputDevice8A_GetDeviceData_pfn
+        IDirectInputDevice8A_GetDeviceData_Original        = nullptr;
 
 IDirectInputDevice8W_SetCooperativeLevel_pfn
         IDirectInputDevice8W_SetCooperativeLevel_Original  = nullptr;
@@ -1110,6 +1124,19 @@ IDirectInputDevice8_GetDeviceState_Detour ( LPDIRECTINPUTDEVICE8 This,
   HRESULT hr =
     pTLS->dinput8->hr_GetDevicestate;
 
+  // While overlay is active, neutralize keyboard and mouse state so the
+  // game cannot react to movement or key input via DirectInput polling.
+  if (lpvData != nullptr && SKC_IsOverlayEnabled ())
+  {
+    if ( cbData == 256                   ||   // keyboard scan-code array
+         cbData == sizeof (DIMOUSESTATE) ||
+         cbData == sizeof (DIMOUSESTATE2) )
+    {
+      RtlZeroMemory (lpvData, cbData);
+      return DI_OK;
+    }
+  }
+
   if (lpvData != nullptr)
   {
     auto
@@ -1503,6 +1530,52 @@ IDirectInputDevice8W_GetDeviceState_Detour ( LPDIRECTINPUTDEVICE8W      This,
     IDirectInputDevice8_GetDeviceState_Detour ( (LPDIRECTINPUTDEVICE8)This, cbData, lpvData );
 }
 
+// GetDeviceData detours: while overlay is active, return no buffered events
+// for keyboard and mouse devices only. Gamepads/other devices pass through.
+HRESULT
+WINAPI
+IDirectInputDevice8W_GetDeviceData_Detour ( LPDIRECTINPUTDEVICE8W  This,
+                                            DWORD                  cbObjectData,
+                                            LPDIDEVICEOBJECTDATA   rgdod,
+                                            LPDWORD                pdwInOut,
+                                            DWORD                  dwFlags )
+{
+  const bool isKbOrMouse = ( (LPDIRECTINPUTDEVICE8W)This == _dik8->pDev ||
+                              (LPDIRECTINPUTDEVICE8W)This == _dim8->pDev );
+
+  if (isKbOrMouse && SKC_IsOverlayEnabled ())
+  {
+    if (pdwInOut != nullptr)
+      *pdwInOut = 0;
+    return DI_OK;
+  }
+
+  return
+    IDirectInputDevice8W_GetDeviceData_Original ( This, cbObjectData, rgdod, pdwInOut, dwFlags );
+}
+
+HRESULT
+WINAPI
+IDirectInputDevice8A_GetDeviceData_Detour ( LPDIRECTINPUTDEVICE8A  This,
+                                            DWORD                  cbObjectData,
+                                            LPDIDEVICEOBJECTDATA   rgdod,
+                                            LPDWORD                pdwInOut,
+                                            DWORD                  dwFlags )
+{
+  const bool isKbOrMouse = ( (LPDIRECTINPUTDEVICE8W)This == _dik8->pDev ||
+                              (LPDIRECTINPUTDEVICE8W)This == _dim8->pDev );
+
+  if (isKbOrMouse && SKC_IsOverlayEnabled ())
+  {
+    if (pdwInOut != nullptr)
+      *pdwInOut = 0;
+    return DI_OK;
+  }
+
+  return
+    IDirectInputDevice8A_GetDeviceData_Original ( This, cbObjectData, rgdod, pdwInOut, dwFlags );
+}
+
 
 
 HRESULT
@@ -1740,6 +1813,16 @@ IDirectInput8W_CreateDevice_Detour ( IDirectInput8W        *This,
               fns_to_hook.push_back (vftable [9]);
       }
 
+      if (IDirectInputDevice8W_GetDeviceData_Original == nullptr)
+      {
+        if ( MH_OK ==
+          SK_CreateFuncHook (      L"IDirectInputDevice8W::GetDeviceData",
+                                     vftable [10],
+                                     IDirectInputDevice8W_GetDeviceData_Detour,
+            static_cast_p2p <void> (&IDirectInputDevice8W_GetDeviceData_Original) ) )
+              fns_to_hook.push_back (vftable [10]);
+      }
+
       if (! IDirectInputDevice8W_SetCooperativeLevel_Original)
       {
         if ( MH_OK ==
@@ -1883,6 +1966,16 @@ IDirectInput8A_CreateDevice_Detour ( IDirectInput8A        *This,
                                      IDirectInputDevice8A_GetDeviceState_Detour,
             static_cast_p2p <void> (&IDirectInputDevice8A_GetDeviceState_Original) ) )
               fns_to_hook.push_back (vftable [9]);
+      }
+
+      if (IDirectInputDevice8A_GetDeviceData_Original == nullptr)
+      {
+        if ( MH_OK ==
+          SK_CreateFuncHook (      L"IDirectInputDevice8A::GetDeviceData",
+                                     vftable [10],
+                                     IDirectInputDevice8A_GetDeviceData_Detour,
+            static_cast_p2p <void> (&IDirectInputDevice8A_GetDeviceData_Original) ) )
+              fns_to_hook.push_back (vftable [10]);
       }
 
       if (! IDirectInputDevice8A_SetCooperativeLevel_Original)

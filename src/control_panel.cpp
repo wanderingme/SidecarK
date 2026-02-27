@@ -34,13 +34,13 @@ bool SKC_IsOverlayEnabled()
 
   HANDLE hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
   if (!hMap)
-    return true;
+    return false;
 
   void* view = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 4096);
   if (!view)
   {
     CloseHandle(hMap);
-    return true;
+    return false;
   }
 
   BYTE* base = reinterpret_cast<BYTE*>(view);
@@ -50,7 +50,7 @@ bool SKC_IsOverlayEnabled()
   {
     UnmapViewOfFile(view);
     CloseHandle(hMap);
-    return true;
+    return false;
   }
 
   const volatile uint32_t* enabled = reinterpret_cast<volatile uint32_t*>(base + 0x08);

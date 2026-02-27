@@ -31,6 +31,9 @@
 #endif
 #define __SK_SUBSYSTEM__ L"Input Mgr."
 
+// Overlay-active query: when true, cursor re-centering must be suppressed.
+extern bool SKC_IsOverlayEnabled ();
+
 bool
 SK_InputUtil_IsHWCursorVisible (void)
 {
@@ -1355,6 +1358,11 @@ SetCursorPos_Detour (_In_ int x, _In_ int y)
 
   s_GameSetCursorPos     = { x, y };
   s_GameSetCursorPosTime = SK_timeGetTime ();
+
+  // While overlay is active, block cursor re-centering so the game cannot
+  // pin/lock the cursor to a position.
+  if (SKC_IsOverlayEnabled ())
+    return TRUE;
 
   // Don't let the game continue moving the cursor while
   //   Alt+Tabbed out
