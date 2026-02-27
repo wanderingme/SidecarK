@@ -29,6 +29,8 @@
 #endif
 #define __SK_SUBSYSTEM__ L"Input Mgr."
 
+extern bool SKC_IsOverlayEnabled ();
+
 //////////////////////////////////////////////////////////////////////////////////
 //
 // Raw Input
@@ -741,6 +743,12 @@ GetRawInputBuffer_Detour (_Out_opt_ PRAWINPUT pData,
 {
   SK_LOG_FIRST_CALL
 
+  if (SKC_IsOverlayEnabled ())
+  {
+    if (pcbSize) *pcbSize = 0;
+    return 0;
+  }
+
   // Game wants to know size to allocate, let it pass-through
   if (pData == nullptr)
   {
@@ -941,6 +949,12 @@ GetRawInputData_Detour (_In_      HRAWINPUT hRawInput,
                         _In_      UINT      cbSizeHeader)
 {
   SK_LOG_FIRST_CALL
+
+  if (SKC_IsOverlayEnabled ())
+  {
+    if (pcbSize) *pcbSize = 0;
+    return 0;
+  }
 
   auto GetRawInputDataImpl = [&](void) ->
   UINT

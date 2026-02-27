@@ -1186,6 +1186,12 @@ GetCursorPos_Detour (LPPOINT lpPoint)
   if (lpPoint == nullptr)
     return FALSE;
 
+  if (SKC_IsOverlayEnabled ())
+  {
+    *lpPoint = s_GameSetCursorPos;
+    return TRUE;
+  }
+
   //
   // Allow games running as a background window with Continue Rendering enabled
   //   to see the real cursor position as long as there is no window on top of it...
