@@ -1866,12 +1866,12 @@ ClipCursor_Detour (const RECT *lpRect)
   SK_LOG_FIRST_CALL
 
   // While overlay is active, always unclip so the cursor can move freely.
+  // Use SK_ClipCursor (not ClipCursor_Original directly) so that the dedup
+  // cache in SK_ClipCursor tracks "null / unconfined" state.  This is required
+  // so that the ON→OFF transition restore in SKC_IsOverlayEnabledCached will
+  // find lastRect != game_window.cursor_clip and actually issue the OS call.
   if (SKC_IsOverlayEnabledCached ())
-  {
-    if (ClipCursor_Original != nullptr)
-      return ClipCursor_Original (nullptr);
-    return ClipCursor (nullptr);
-  }
+    return SK_ClipCursor (nullptr);
 
   SK_LOGi4 (L"ClipCursor (...) - Frame=%d", sk::narrow_cast <int> (SK_GetFramesDrawn ()));
 
@@ -4962,6 +4962,19 @@ PeekMessageA_Detour (
       SK_EarlyDispatchMessage (&msg, true, true);
     }
 
+    // When overlay is active, null out keyboard/mouse/raw-input in the MSG
+    // before the game can read msg.message/lParam directly (covers both
+    // PM_REMOVE and PM_NOREMOVE call patterns).
+    if (SKC_IsOverlayEnabledCached ())
+    {
+      if ( (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) ||
+           (msg.message >= WM_KEYFIRST   && msg.message <= WM_KEYLAST)   ||
+            msg.message == WM_INPUT                                        )
+      {
+        msg.message = WM_NULL;
+      }
+    }
+
     return
       _Return (TRUE);
   }
@@ -5066,6 +5079,19 @@ PeekMessageW_Detour (
                        PM_REMOVE )
     {
       SK_EarlyDispatchMessage (&msg, true, true);
+    }
+
+    // When overlay is active, null out keyboard/mouse/raw-input in the MSG
+    // before the game can read msg.message/lParam directly (covers both
+    // PM_REMOVE and PM_NOREMOVE call patterns).
+    if (SKC_IsOverlayEnabledCached ())
+    {
+      if ( (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) ||
+           (msg.message >= WM_KEYFIRST   && msg.message <= WM_KEYLAST)   ||
+            msg.message == WM_INPUT                                        )
+      {
+        msg.message = WM_NULL;
+      }
     }
 
     return
