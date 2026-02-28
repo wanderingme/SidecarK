@@ -35,6 +35,8 @@ SetWindowsHookEx_pfn    SetWindowsHookExW_Original   = nullptr;
 SetWindowsHookExAW_pfn  SetWindowsHookExAW_Original  = nullptr;
 UnhookWindowsHookEx_pfn UnhookWindowsHookEx_Original = nullptr;
 
+extern bool SKC_IsOverlayEnabled ();
+
 
 class SK_Win32_WindowHookManager {
 public:
@@ -206,7 +208,7 @@ SK_Proxy_MouseProc   (
     else
     {
       // Game uses a mouse hook for input that the Steam overlay cannot block
-      if (SK_GetStoreOverlayState (true))
+      if (SK_GetStoreOverlayState (true) || SKC_IsOverlayEnabled ())
       {
         SK_WinHook_Backend->markHidden (sk_input_dev_type::Mouse);
 
@@ -341,7 +343,7 @@ SK_Proxy_LLMouseProc   (
     }
 
     // Game uses a mouse hook for input that the Steam overlay cannot block
-    if (SK_GetStoreOverlayState (true))
+    if (SK_GetStoreOverlayState (true) || SKC_IsOverlayEnabled ())
     {
       SK_WinHook_Backend->markHidden (sk_input_dev_type::Mouse);
 
@@ -417,7 +419,7 @@ SK_Proxy_KeyboardProc (
     }
 
     // Game uses a keyboard hook for input that the Steam overlay cannot block
-    if (SK_Console::getInstance ()->isVisible () || SK_GetStoreOverlayState (true))
+    if (SK_Console::getInstance ()->isVisible () || SK_GetStoreOverlayState (true) || SKC_IsOverlayEnabled ())
     {
       SK_WinHook_Backend->markHidden (sk_input_dev_type::Keyboard);
 
@@ -545,7 +547,7 @@ SK_Proxy_LLKeyboardProc (
     }
 
     // Game uses a keyboard hook for input that the Steam overlay cannot block
-    if (SK_Console::getInstance ()->isVisible () || SK_GetStoreOverlayState (true))
+    if (SK_Console::getInstance ()->isVisible () || SK_GetStoreOverlayState (true) || SKC_IsOverlayEnabled ())
     {
       SK_WinHook_Backend->markHidden (sk_input_dev_type::Keyboard);
 
