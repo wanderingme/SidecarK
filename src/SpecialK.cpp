@@ -232,6 +232,7 @@ static HMODULE        g_hModule           = nullptr;
 static HANDLE         g_initThread        = nullptr;
 static volatile LONG  g_initState         = 0; // 0=not started, 1=starting, 2=ready, 3=failed
 static volatile LONG  g_shutdownRequested = 0;
+static bool           g_sidecarMode       = false;
 
 
 class SK_DLL_Bootstrapper
@@ -686,9 +687,44 @@ DeferredInitThreadProc (LPVOID)
 
   // ------------------------------------------------------------------------
 
+  auto DeferredEarlyOut =
+  [](void)
+  {
+    if (! _HasLocalDll)
+      SK_Inject_SuppressExitNotify (       );
+    SK_DLL_SetAttached             ( false );
+    SK_CreateTeardownEvent         (       );
+    InterlockedExchange            (&g_initState, 3);
+  };
+
+  // Sidecar mode: skip expensive backend detection / module enumeration and
+  //   go straight to attach with a forced DXGI role.
+  if (g_sidecarMode)
+  {
+    if (InterlockedCompareExchange (&g_shutdownRequested, 0, 0) != 0)
+      return 0;
+
+    SK_SetDLLRole (DLL_ROLE::DXGI);
+
+    SK_StageTraceW (L"SK_sidecar_min_before_attach");
+
+    if (! SK_Attach (SK_GetDLLRole ()))
+    {
+      DeferredEarlyOut ();
+      return 0;
+    }
+
+    SK_Inject_AcquireProcess ();
+    InterlockedExchange (&g_initState, 2);
+    SK_StageTraceW (L"SK_sidecar_min_after_attach");
+    return 0;
+  }
+
   // Social distancing like a boss! (module enumeration -- heavy, off DllMain thread)
+  SK_StageTraceW (L"SK_sidecar_before_keepaway");
   INT dll_isolation_lvl =
     SK_KeepAway ();
+  SK_StageTraceW (L"SK_sidecar_after_keepaway");
 
   // Will be implicitly set in call to SK_KeepAway
   if (SK_GetHostAppUtil ()->isBlacklisted ())
@@ -731,23 +767,15 @@ DeferredInitThreadProc (LPVOID)
     }
   }
 
-  auto DeferredEarlyOut =
-  [](void)
-  {
-    if (! _HasLocalDll)
-      SK_Inject_SuppressExitNotify (       );
-    SK_DLL_SetAttached             ( false );
-    SK_CreateTeardownEvent         (       );
-    InterlockedExchange            (&g_initState, 3);
-  };
-
   // We reserve the right to deny attaching the DLL, this will
   //   generally happen if a game has opted-out of global injection.
+  SK_StageTraceW (L"SK_sidecar_before_role");
   if (! SK_EstablishDllRole (g_hModule))
   {
     DeferredEarlyOut ();
     return 0;
   }
+  SK_StageTraceW (L"SK_sidecar_after_role");
 
   // We don't want to initialize the DLL, but we also don't want it to
   //   re-inject itself constantly; just return here.
@@ -760,11 +788,13 @@ DeferredInitThreadProc (LPVOID)
   if (InterlockedCompareExchange (&g_shutdownRequested, 0, 0) != 0)
     return 0;
 
+  SK_StageTraceW (L"SK_sidecar_before_attach");
   if (! SK_Attach (SK_GetDLLRole ()))
   {
     DeferredEarlyOut ();
     return 0;
   }
+  SK_StageTraceW (L"SK_sidecar_after_attach");
 
   InterlockedIncrementRelease (
     &__SK_DLL_Refs
@@ -803,6 +833,8 @@ DllMain ( HMODULE hModule,
     case DLL_PROCESS_ATTACH:
     {
       GetModuleFileNameW (hModule, __sk_attach_module_path, MAX_PATH);
+
+      g_sidecarMode = (StrStrIW (__sk_attach_module_path, L"SidecarK") != nullptr);
 
       g_hModule = hModule;
       DisableThreadLibraryCalls (hModule);
