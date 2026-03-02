@@ -228,6 +228,11 @@ extern volatile  DWORD __SK_TLS_INDEX;
         volatile LONG  lLastThreadCreate      = 0;
           static bool  _HasLocalDll           = false;
 
+static HMODULE        g_hModule           = nullptr;
+static HANDLE         g_initThread        = nullptr;
+static volatile LONG  g_initState         = 0; // 0=not started, 1=starting, 2=ready, 3=failed
+static volatile LONG  g_shutdownRequested = 0;
+
 
 class SK_DLL_Bootstrapper
 {
@@ -636,6 +641,105 @@ SK_NT_GetProcessProtection (void)
   return 0;
 }
 
+static DWORD WINAPI
+DeferredInitThreadProc (LPVOID)
+{
+  SetThreadPriority (GetCurrentThread (), THREAD_PRIORITY_BELOW_NORMAL);
+
+  // Social distancing like a boss! (module enumeration -- heavy, off DllMain thread)
+  INT dll_isolation_lvl =
+    SK_KeepAway ();
+
+  // Will be implicitly set in call to SK_KeepAway
+  if (SK_GetHostAppUtil ()->isBlacklisted ())
+  {
+#ifdef DEBUG
+    OutputDebugStringW (L"Special K Disabled For Blacklisted App");
+#endif
+    InterlockedExchange (&g_initState, 3);
+    return 0;
+  }
+
+  if (dll_isolation_lvl > 0)
+  {
+    InterlockedExchange (&g_initState, 3);
+    return 0;
+  }
+
+  if (InterlockedCompareExchange (&g_shutdownRequested, 0, 0) != 0)
+    return 0;
+
+  SK_TLS_Acquire         ();
+  SK_EstablishRootPath   ();
+  SK_CreateTeardownEvent ();
+
+  {
+    static bool __overlay_logged = false;
+    if (! __overlay_logged)
+    {
+      __overlay_logged = true;
+      const int dxgi  = GetModuleHandleW (L"dxgi.dll")       ? 1 : 0;
+      const int d3d11 = GetModuleHandleW (L"d3d11.dll")      ? 1 : 0;
+      const int d3d9  = GetModuleHandleW (L"d3d9.dll")       ? 1 : 0;
+      const int d3d12 = GetModuleHandleW (L"d3d12.dll")      ? 1 : 0;
+      const int gl    = GetModuleHandleW (L"opengl32.dll")   ? 1 : 0;
+      const int vk    = GetModuleHandleW (L"vulkan-1.dll")   ? 1 : 0;
+      char buf[128] = {};
+      sprintf_s (buf, "overlay: modules dxgi=%d d3d11=%d d3d9=%d d3d12=%d gl=%d vk=%d\n",
+                 dxgi, d3d11, d3d9, d3d12, gl, vk);
+      OutputDebugStringA (buf);
+    }
+  }
+
+  auto DeferredEarlyOut =
+  [](void)
+  {
+    if (! _HasLocalDll)
+      SK_Inject_SuppressExitNotify (       );
+    SK_DLL_SetAttached             ( false );
+    SK_CreateTeardownEvent         (       );
+    InterlockedExchange            (&g_initState, 3);
+  };
+
+  // We reserve the right to deny attaching the DLL, this will
+  //   generally happen if a game has opted-out of global injection.
+  if (! SK_EstablishDllRole (g_hModule))
+  {
+    DeferredEarlyOut ();
+    return 0;
+  }
+
+  // We don't want to initialize the DLL, but we also don't want it to
+  //   re-inject itself constantly; just return here.
+  if (DLL_ROLE::INVALID == SK_GetDLLRole ())
+  {
+    DeferredEarlyOut ();
+    return 0;
+  }
+
+  if (InterlockedCompareExchange (&g_shutdownRequested, 0, 0) != 0)
+    return 0;
+
+  if (! SK_Attach (SK_GetDLLRole ()))
+  {
+    DeferredEarlyOut ();
+    return 0;
+  }
+
+  InterlockedIncrementRelease (
+    &__SK_DLL_Refs
+  );
+
+  // If we got this far, it's because this is an injection target
+  //
+  //   Must hold a reference to this DLL so that removing the global
+  //     hook does not crash the game.
+  SK_Inject_AcquireProcess ();
+
+  InterlockedExchange (&g_initState, 2);
+  return 0;
+}
+
 //=========================================================================
 BOOL
 APIENTRY
@@ -659,6 +763,9 @@ DllMain ( HMODULE hModule,
     case DLL_PROCESS_ATTACH:
     {
       GetModuleFileNameW (hModule, __sk_attach_module_path, MAX_PATH);
+
+      g_hModule = hModule;
+      DisableThreadLibraryCalls (hModule);
 
       CreateThread (
         nullptr, 0,
@@ -776,21 +883,6 @@ DllMain ( HMODULE hModule,
       skModuleRegistry::Self (hModule);
 
 
-      auto EarlyOut =
-      [&](BOOL bRet = TRUE)
-      {
-        if (bRet)
-        {
-          // This is not the process SKIF is looking for :)
-          if (! _HasLocalDll)
-          SK_Inject_SuppressExitNotify (       );
-          SK_DLL_SetAttached           ( false );
-          SK_CreateTeardownEvent       (       );
-        }
-
-        return bRet;
-      };
-
       // We use SKIM for injection and rundll32 for various tricks
       //   involving restarting the currently running game; neither
       //     needs or even wants this DLL fully initialized!
@@ -800,77 +892,28 @@ DllMain ( HMODULE hModule,
         SK_TLS_Acquire       ();
         SK_EstablishRootPath ();
 
-        BOOL bRet = EarlyOut (TRUE);
-        if ( bRet )
-          SK_DLL_SetAttached (true);
+        if (! _HasLocalDll)
+          SK_Inject_SuppressExitNotify (       );
+        SK_DLL_SetAttached             ( false );
+        SK_CreateTeardownEvent         (       );
+
+        SK_DLL_SetAttached (true);
 
         config.system.log_level = -1;
 
-        return bRet;
+        return TRUE;
       }
 
-      // Social distancing like a boss!
-      INT dll_isolation_lvl =
-        SK_KeepAway ();
-
-      // Will be implicitly set in call to SK_KeepAway
-      if (SK_GetHostAppUtil ()->isBlacklisted ())
+      // Heavy init (module enumeration, hook installation, GPU API probing)
+      //   is deferred to a worker thread to avoid hitching at injection time.
+      if (InterlockedCompareExchange (&g_initState, 1, 0) == 0)
       {
-#ifdef DEBUG
-        OutputDebugStringW (L"Special K Disabled For Blacklisted App");
-#endif
-        return EarlyOut (TRUE);
+        g_initThread = CreateThread (nullptr, 0, DeferredInitThreadProc, nullptr, 0, nullptr);
+        if (g_initThread == nullptr)
+          InterlockedExchange (&g_initState, 3);
       }
 
-      if (dll_isolation_lvl >  0)                  return EarlyOut (TRUE);
-
-      SK_TLS_Acquire         ();
-      SK_EstablishRootPath   ();
-      SK_CreateTeardownEvent ();
-
-      {
-        static bool __overlay_logged = false;
-        if (! __overlay_logged)
-        {
-          __overlay_logged = true;
-          const int dxgi  = GetModuleHandleW (L"dxgi.dll")       ? 1 : 0;
-          const int d3d11 = GetModuleHandleW (L"d3d11.dll")      ? 1 : 0;
-          const int d3d9  = GetModuleHandleW (L"d3d9.dll")       ? 1 : 0;
-          const int d3d12 = GetModuleHandleW (L"d3d12.dll")      ? 1 : 0;
-          const int gl    = GetModuleHandleW (L"opengl32.dll")   ? 1 : 0;
-          const int vk    = GetModuleHandleW (L"vulkan-1.dll")   ? 1 : 0;
-          char buf[128] = {};
-          sprintf_s (buf, "overlay: modules dxgi=%d d3d11=%d d3d9=%d d3d12=%d gl=%d vk=%d\n",
-                     dxgi, d3d11, d3d9, d3d12, gl, vk);
-          OutputDebugStringA (buf);
-        }
-      }
-
-      SK_TLS_Bottom ()->debug.in_DllMain = true;
-
-      // -> Nothing below this can return FALSE until TLS is tidied up (!!)
-
-      // We reserve the right to deny attaching the DLL, this will
-      //   generally happen if a game has opted-out of global injection.
-      if (! SK_EstablishDllRole (hModule))         return EarlyOut (TRUE);
-
-      // We don't want to initialize the DLL, but we also don't want it to
-      //   re-inject itself constantly; just return TRUE here.
-      if (DLL_ROLE::INVALID == SK_GetDLLRole ())   return EarlyOut (TRUE);
-      if (! SK_Attach         (SK_GetDLLRole ()))  return EarlyOut (TRUE);
-
-      InterlockedIncrementRelease (
-        &__SK_DLL_Refs
-      );
-
-      // If we got this far, it's because this is an injection target
-      //
-      //   Must hold a reference to this DLL so that removing the global
-      //     hook does not crash the game.
-      SK_Inject_AcquireProcess ();
-
-      return
-        ( __SK_DLL_TeardownEvent != nullptr );
+      return TRUE;
     } break;
 
 
@@ -884,6 +927,14 @@ DllMain ( HMODULE hModule,
     //
     case DLL_PROCESS_DETACH:
     {
+      InterlockedExchange (&g_shutdownRequested, 1);
+
+      if (g_initThread != nullptr)
+      {
+        CloseHandle (g_initThread);
+        g_initThread = nullptr;
+      }
+
       if (SidecarK_DiagnosticsEnabled ())
       {
         const DWORD pid = GetCurrentProcessId ();
