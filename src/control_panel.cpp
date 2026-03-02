@@ -27,8 +27,42 @@
  
 bool SKC_IsOverlayEnabled()
 {
+  // Offset of the overlay-enabled DWORD within the SKC1 control mapping.
+  static constexpr uintptr_t kEnabledFieldOffset = 0x08u;
+
+  // Persistent cached view: open the control mapping once and keep it open.
+  // Subsequent calls only perform a single atomic read (no system calls).
+  // On PID change the cached handles are released and re-opened on the next call.
+  static DWORD                  s_pid         = 0;
+  static HANDLE                 s_hMap        = nullptr;
+  static volatile uint32_t*     s_enabledPtr  = nullptr;
+
   const DWORD pid = GetCurrentProcessId();
 
+  // Detect PID change (e.g. fork/re-injection): release stale handles.
+  // s_hMap and s_enabledPtr are always set/cleared together, so when
+  // s_hMap != nullptr, s_enabledPtr is guaranteed non-null.
+  if (pid != s_pid)
+  {
+    if (s_hMap != nullptr)
+    {
+      // Recover the view base (s_enabledPtr points kEnabledFieldOffset bytes in).
+      void* base = reinterpret_cast<void*>(
+        reinterpret_cast<uintptr_t>(s_enabledPtr) - kEnabledFieldOffset);
+      UnmapViewOfFile(base);
+      CloseHandle(s_hMap);
+    }
+    s_hMap       = nullptr;
+    s_enabledPtr = nullptr;
+    s_pid        = pid;
+  }
+
+  // Fast path: mapping already open — single read, no system calls.
+  if (s_enabledPtr != nullptr)
+    return (*s_enabledPtr) != 0u;
+
+  // Slow path (first call for this PID, or prior open attempt failed):
+  // one non-blocking attempt to open; return false immediately if unavailable.
   wchar_t name[128] = {};
   wsprintfW(name, L"Local\\SidecarK_Control_%lu", (unsigned long)pid);
 
@@ -44,7 +78,7 @@ bool SKC_IsOverlayEnabled()
   }
 
   BYTE* base = reinterpret_cast<BYTE*>(view);
-  const uint32_t ver = *reinterpret_cast<uint32_t*>(base + 0x04);
+  const uint32_t ver = *reinterpret_cast<const uint32_t*>(base + 0x04);
 
   if (memcmp(base + 0x00, "SKC1", 4) != 0 || ver != 1u)
   {
@@ -53,12 +87,11 @@ bool SKC_IsOverlayEnabled()
     return false;
   }
 
-  const volatile uint32_t* enabled = reinterpret_cast<volatile uint32_t*>(base + 0x08);
-  const bool ret = ((*enabled) != 0u);
+  // Cache the mapping and the pointer into the enabled field.
+  s_hMap       = hMap;
+  s_enabledPtr = reinterpret_cast<volatile uint32_t*>(base + kEnabledFieldOffset);
 
-  UnmapViewOfFile(view);
-  CloseHandle(hMap);
-  return ret;
+  return (*s_enabledPtr) != 0u;
 }
 
 

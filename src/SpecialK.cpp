@@ -660,49 +660,10 @@ DllMain ( HMODULE hModule,
     {
       GetModuleFileNameW (hModule, __sk_attach_module_path, MAX_PATH);
 
-      CreateThread (
-        nullptr, 0,
-        [](LPVOID) -> DWORD
-        {
-          Sleep (5000);
-
-          const DWORD pid = GetCurrentProcessId ();
-
-           if (SidecarK_DiagnosticsEnabled ())
-           {
-             wchar_t wszTempPath [MAX_PATH] = { };
-             wchar_t wszFilePath [MAX_PATH] = { };
-
-             const DWORD cchTemp =
-               GetTempPathW ((DWORD)(sizeof (wszTempPath) / sizeof (wszTempPath[0])), wszTempPath);
-
-             if (cchTemp != 0 && cchTemp < (DWORD)(sizeof (wszTempPath) / sizeof (wszTempPath[0])))
-             {
-               wsprintfW (wszFilePath, L"%ssk_alive.txt", wszTempPath);
-
-               HANDLE hFile =
-                 CreateFileW ( wszFilePath, FILE_APPEND_DATA,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr );
-
-               if (hFile != INVALID_HANDLE_VALUE)
-               {
-                 wchar_t wszLine [MAX_PATH * 2] = { };
-                 wsprintfW ( wszLine, L"alive pid=%lu module=%s\n",
-                             (unsigned long)pid, __sk_attach_module_path );
-
-                 DWORD cbWritten = 0;
-                 const DWORD cch = (DWORD)lstrlenW (wszLine);
-                 WriteFile (hFile, wszLine, cch * sizeof (wchar_t), &cbWritten, nullptr);
-                 CloseHandle (hFile);
-               }
-             }
-           }
-
-          return 0;
-        },
-        nullptr, 0, nullptr
-      );
+      // NOTE: sk_alive.txt diagnostic write intentionally removed from DllMain.
+      // Creating threads or performing disk I/O inside DllMain (DLL_PROCESS_ATTACH)
+      // is unsafe: it can deadlock on the loader lock and cause game stutter.
+      // Diagnostics that need deferred writes must be done outside DllMain.
 
       {
         static LONG once = 0;

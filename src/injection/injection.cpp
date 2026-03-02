@@ -1555,8 +1555,6 @@ void
 __stdcall
 SKX_InstallCBTHook (void)
 {
-  SK_SleepEx (15UL, FALSE);
-
   // Nothing to do here, move along.
   if (SKX_GetCBTHook () != nullptr)
     return;
