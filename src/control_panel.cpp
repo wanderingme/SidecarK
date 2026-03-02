@@ -28,18 +28,28 @@
 bool SKC_IsOverlayEnabled()
 {
   // Offset of the overlay-enabled DWORD within the SKC1 control mapping.
-  static constexpr uintptr_t kEnabledFieldOffset = 0x08u;
+  static constexpr uintptr_t kEnabledFieldOffset   = 0x08u;
+  // How long to back off after a failed open/map/validate attempt (ms).
+  static constexpr ULONGLONG kRetryBackoffMs        = 1000ull;
 
   // Persistent cached view: open the control mapping once and keep it open.
-  // Subsequent calls only perform a single atomic read (no system calls).
+  // Subsequent calls only perform a single volatile read (no system calls).
   // On PID change the cached handles are released and re-opened on the next call.
-  static DWORD                  s_pid         = 0;
-  static HANDLE                 s_hMap        = nullptr;
-  static volatile uint32_t*     s_enabledPtr  = nullptr;
+  static DWORD                  s_pid              = 0;
+  static HANDLE                 s_hMap             = nullptr;
+  static volatile uint32_t*     s_enabledPtr       = nullptr;
+  // Tick count of the last failed slow-path attempt.  Zero means no failure
+  // has occurred yet.  The backoff check uses unsigned elapsed time so it is
+  // safe across any GetTickCount64 wraparound.
+  // Prevents hundreds of OpenFileMappingW syscalls per second when the
+  // producer (SidecarKHost) is absent — the function is called directly from
+  // every low-level keyboard, mouse, raw-input, and DInput8 hook.
+  static ULONGLONG              s_last_fail_ms     = 0;
 
   const DWORD pid = GetCurrentProcessId();
 
-  // Detect PID change (e.g. fork/re-injection): release stale handles.
+  // Detect PID change (e.g. fork/re-injection): release stale handles and
+  // reset the backoff so a new producer is discovered on the very next call.
   // s_hMap and s_enabledPtr are always set/cleared together, so when
   // s_hMap != nullptr, s_enabledPtr is guaranteed non-null.
   if (pid != s_pid)
@@ -52,28 +62,41 @@ bool SKC_IsOverlayEnabled()
       UnmapViewOfFile(base);
       CloseHandle(s_hMap);
     }
-    s_hMap       = nullptr;
-    s_enabledPtr = nullptr;
-    s_pid        = pid;
+    s_hMap         = nullptr;
+    s_enabledPtr   = nullptr;
+    s_last_fail_ms = 0;
+    s_pid          = pid;
   }
 
-  // Fast path: mapping already open — single read, no system calls.
+  // Fast path: mapping already open — single volatile read, zero system calls.
   if (s_enabledPtr != nullptr)
     return (*s_enabledPtr) != 0u;
 
-  // Slow path (first call for this PID, or prior open attempt failed):
-  // one non-blocking attempt to open; return false immediately if unavailable.
+  // Backoff gate: if the last open attempt failed recently, do not retry yet.
+  // Uses unsigned elapsed time (now - last_fail) so it is wraparound-safe.
+  // This is the critical guard that prevents the slow path from executing on
+  // every input event when the producer is absent.
+  const ULONGLONG now_ms = GetTickCount64();
+  if (s_last_fail_ms != 0 && (now_ms - s_last_fail_ms) < kRetryBackoffMs)
+    return false;
+
+  // Slow path: one non-blocking attempt to open the mapping.
+  // On any failure, record the timestamp and return false immediately.
   wchar_t name[128] = {};
   wsprintfW(name, L"Local\\SidecarK_Control_%lu", (unsigned long)pid);
 
   HANDLE hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
   if (!hMap)
+  {
+    s_last_fail_ms = now_ms;
     return false;
+  }
 
   void* view = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 4096);
   if (!view)
   {
     CloseHandle(hMap);
+    s_last_fail_ms = now_ms;
     return false;
   }
 
@@ -84,12 +107,15 @@ bool SKC_IsOverlayEnabled()
   {
     UnmapViewOfFile(view);
     CloseHandle(hMap);
+    s_last_fail_ms = now_ms;
     return false;
   }
 
-  // Cache the mapping and the pointer into the enabled field.
-  s_hMap       = hMap;
-  s_enabledPtr = reinterpret_cast<volatile uint32_t*>(base + kEnabledFieldOffset);
+  // Success: cache the mapping and its enabled-field pointer.
+  // Clear the failure timestamp so that future PID resets start fresh.
+  s_last_fail_ms = 0;
+  s_hMap         = hMap;
+  s_enabledPtr   = reinterpret_cast<volatile uint32_t*>(base + kEnabledFieldOffset);
 
   return (*s_enabledPtr) != 0u;
 }
