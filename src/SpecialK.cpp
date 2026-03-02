@@ -644,7 +644,47 @@ SK_NT_GetProcessProtection (void)
 static DWORD WINAPI
 DeferredInitThreadProc (LPVOID)
 {
-  SetThreadPriority (GetCurrentThread (), THREAD_PRIORITY_BELOW_NORMAL);
+  // Small delay so DllMain returns and the loader lock is released before
+  // we start touching anything.
+  Sleep (50);
+
+  // Run at background/lowest priority so the host process is not impacted.
+  SetThreadPriority (GetCurrentThread (), THREAD_MODE_BACKGROUND_BEGIN);
+  SetThreadPriority (GetCurrentThread (), THREAD_PRIORITY_LOWEST);
+
+  // --- Heavy init moved out of DllMain ------------------------------------
+
+  AuxUlibInitialize ();
+
+  skModuleRegistry::Self (g_hModule);
+
+  game_window = sk_window_s {};
+  config      = sk_config_t::sk_config_t ();
+
+#ifdef _SK_CONSISTENCY_CHECK
+  std::atexit (SK_LazyCleanup);
+#endif
+
+  // Injection tools (SKIM / rundll32) only need minimal init.
+  if (SK_GetHostAppUtil ()->isInjectionTool ())
+  {
+    SK_TLS_Acquire       ();
+    SK_EstablishRootPath ();
+
+    if (! _HasLocalDll)
+      SK_Inject_SuppressExitNotify ();
+    SK_DLL_SetAttached ( false );
+    SK_CreateTeardownEvent ();
+
+    SK_DLL_SetAttached (true);
+
+    config.system.log_level = -1;
+
+    InterlockedExchange (&g_initState, 2);
+    return 0;
+  }
+
+  // ------------------------------------------------------------------------
 
   // Social distancing like a boss! (module enumeration -- heavy, off DllMain thread)
   INT dll_isolation_lvl =
@@ -869,43 +909,9 @@ DllMain ( HMODULE hModule,
       if (process_protection == ProcessUserShadowStackPolicy)
         return FALSE;
 
-      AuxUlibInitialize ();
-
-#ifdef _SK_CONSISTENCY_CHECK
-      std::atexit (SK_LazyCleanup);
-#endif
-
-      game_window =  sk_window_s {};
-      config      =
-        sk_config_t::sk_config_t ();
-
-
-      skModuleRegistry::Self (hModule);
-
-
-      // We use SKIM for injection and rundll32 for various tricks
-      //   involving restarting the currently running game; neither
-      //     needs or even wants this DLL fully initialized!
-      if (SK_GetHostAppUtil ()->isInjectionTool ())
-      {
-        // Minimal Initialization (reserve TLS & determine config paths)
-        SK_TLS_Acquire       ();
-        SK_EstablishRootPath ();
-
-        if (! _HasLocalDll)
-          SK_Inject_SuppressExitNotify (       );
-        SK_DLL_SetAttached             ( false );
-        SK_CreateTeardownEvent         (       );
-
-        SK_DLL_SetAttached (true);
-
-        config.system.log_level = -1;
-
-        return TRUE;
-      }
-
-      // Heavy init (module enumeration, hook installation, GPU API probing)
-      //   is deferred to a worker thread to avoid hitching at injection time.
+      // Heavy init (AuxUlib, config, module enumeration, hook installation,
+      //   GPU API probing) is deferred to a worker thread to avoid hitching
+      //   at injection time.
       if (InterlockedCompareExchange (&g_initState, 1, 0) == 0)
       {
         g_initThread = CreateThread (nullptr, 0, DeferredInitThreadProc, nullptr, 0, nullptr);
