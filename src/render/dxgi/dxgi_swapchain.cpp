@@ -1044,8 +1044,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static uint8_t* g_ctrlBase = nullptr;
   static volatile LONG* g_overlayEnabled = nullptr;
   static DWORD    g_ctrlPid = 0;
-  static bool     g_ctrlAttempted = false;
-  static bool     g_ctrlLogged = false;
+  static ULONGLONG g_ctrlLastAttemptMs = 0;
+  static bool      g_ctrlLogged = false;
 
   // D3D12 resources
   static ID3D12CommandAllocator*      s_d3d12_cmd_allocator     = nullptr;
@@ -1212,7 +1212,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     }
 
     g_ctrlPid = 0;
-    g_ctrlAttempted = false;
+    g_ctrlLastAttemptMs = 0;
     g_ctrlLogged = false;
 
     // Reset all transition markers
@@ -1263,55 +1263,73 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   }
 
   // --------------------------------------------------------------------------
-  // Control channel: open once per PID, read overlay_enabled flag.
+  // Control channel: retry until established (rate-limited to once/sec).
+  // Fail-closed: g_overlayEnabled stays null until map is valid → overlay off.
   // This must happen BEFORE any SKF1 mapping work so we can early-out cheaply.
   // --------------------------------------------------------------------------
   if (g_ctrlPid != pidNow)
   {
     g_ctrlPid = pidNow;
-    g_ctrlAttempted = false;
+    g_ctrlLastAttemptMs = 0;  // force retry for new PID
   }
 
-  if (!g_ctrlAttempted)
+  if (g_overlayEnabled == nullptr)
   {
-    g_ctrlAttempted = true;
-
-    wchar_t ctrl_name [64] = { };
-    wsprintfW (ctrl_name, L"Local\\SidecarK_Control_%lu", (unsigned long)pidNow);
-
-    g_ctrlMap = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
-    if (g_ctrlMap != nullptr)
+    const ULONGLONG nowCtrl = GetTickCount64 ();
+    if (nowCtrl - g_ctrlLastAttemptMs >= 1000ull)
     {
-      g_ctrlBase = (uint8_t *)MapViewOfFile (g_ctrlMap, FILE_MAP_READ, 0, 0, 0);
-      if (g_ctrlBase != nullptr)
+      g_ctrlLastAttemptMs = nowCtrl;
+
+      wchar_t ctrl_name [64] = { };
+      wsprintfW (ctrl_name, L"Local\\SidecarK_Control_%lu", (unsigned long)pidNow);
+
+      HANDLE hMap = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
+      if (hMap != nullptr)
       {
-        char sig[4] = { };
-        memcpy (sig, g_ctrlBase, sizeof (sig));
-        const uint32_t version = *reinterpret_cast<const uint32_t *> (g_ctrlBase + 0x04);
-
-        const bool sig_ok = (memcmp (sig, "SKC1", sizeof (sig)) == 0);
-        const bool ver_ok = (version == 1u);
-
-        if (sig_ok && ver_ok)
-          g_overlayEnabled = reinterpret_cast<volatile LONG *> (g_ctrlBase + 0x08);
-        else
-          g_overlayEnabled = nullptr;
-
-        if (!g_ctrlLogged)
+        uint8_t* base = (uint8_t *)MapViewOfFile (hMap, FILE_MAP_READ, 0, 0, 0);
+        if (base != nullptr)
         {
-          g_ctrlLogged = true;
-          const LONG initial_value = (g_overlayEnabled != nullptr) ? *g_overlayEnabled : -1;
-          _SidecarLog (L"SKF1 ctrl map: base=%p sig=%c%c%c%c ver=%u overlay=%ld offset=0x08",
-                       g_ctrlBase,
-                       sig[0], sig[1], sig[2], sig[3],
-                       version,
-                       (long)initial_value);
+          char sig[4] = { };
+          memcpy (sig, base, sizeof (sig));
+          const uint32_t version = *reinterpret_cast<const uint32_t *> (base + 0x04);
+
+          const bool sig_ok = (memcmp (sig, "SKC1", sizeof (sig)) == 0);
+          const bool ver_ok = (version == 1u);
+
+          if (sig_ok && ver_ok)
+          {
+            g_ctrlMap  = hMap;
+            g_ctrlBase = base;
+            g_overlayEnabled = reinterpret_cast<volatile LONG *> (base + 0x08);
+
+            if (!g_ctrlLogged)
+            {
+              g_ctrlLogged = true;
+              const LONG initial_value = *g_overlayEnabled;
+              _SidecarLog (L"SKF1 ctrl map: base=%p sig=%c%c%c%c ver=%u overlay=%ld offset=0x08",
+                           g_ctrlBase,
+                           sig[0], sig[1], sig[2], sig[3],
+                           version,
+                           (long)initial_value);
+            }
+          }
+          else
+          {
+            // Bad sig/ver: release and retry next interval
+            UnmapViewOfFile (base);
+            CloseHandle (hMap);
+          }
+        }
+        else
+        {
+          // MapViewOfFile failed: release and retry next interval
+          CloseHandle (hMap);
         }
       }
     }
   }
 
-  bool overlay_enabled = true;
+  bool overlay_enabled = false;
   static LONG s_overlayEnabledLast = -1;
   if (g_overlayEnabled != nullptr)
   {
