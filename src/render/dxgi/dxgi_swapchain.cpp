@@ -1493,6 +1493,15 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     }
   }
 
+  // Early-out: skip all Stage E/F composite work when overlay is disabled.
+  // Reuses the same dispatch path used when overlay is unavailable/not composited.
+  if (!overlay_enabled)
+  {
+    return
+      SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                  nullptr, SK_DXGI_PresentSource::Wrapper );
+  }
+
   if (skf1_stage_ef_ready)
   {
     static std::atomic<bool> s_logged_ef_entered = false;
