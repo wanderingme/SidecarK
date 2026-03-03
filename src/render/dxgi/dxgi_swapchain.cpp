@@ -1262,6 +1262,77 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     }
   }
 
+  // --------------------------------------------------------------------------
+  // Control channel: open once per PID, read overlay_enabled flag.
+  // This must happen BEFORE any SKF1 mapping work so we can early-out cheaply.
+  // --------------------------------------------------------------------------
+  if (g_ctrlPid != pidNow)
+  {
+    g_ctrlPid = pidNow;
+    g_ctrlAttempted = false;
+  }
+
+  if (!g_ctrlAttempted)
+  {
+    g_ctrlAttempted = true;
+
+    wchar_t ctrl_name [64] = { };
+    wsprintfW (ctrl_name, L"Local\\SidecarK_Control_%lu", (unsigned long)pidNow);
+
+    g_ctrlMap = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
+    if (g_ctrlMap != nullptr)
+    {
+      g_ctrlBase = (uint8_t *)MapViewOfFile (g_ctrlMap, FILE_MAP_READ, 0, 0, 0);
+      if (g_ctrlBase != nullptr)
+      {
+        char sig[4] = { };
+        memcpy (sig, g_ctrlBase, sizeof (sig));
+        const uint32_t version = *reinterpret_cast<const uint32_t *> (g_ctrlBase + 0x04);
+
+        const bool sig_ok = (memcmp (sig, "SKC1", sizeof (sig)) == 0);
+        const bool ver_ok = (version == 1u);
+
+        if (sig_ok && ver_ok)
+          g_overlayEnabled = reinterpret_cast<volatile LONG *> (g_ctrlBase + 0x08);
+        else
+          g_overlayEnabled = nullptr;
+
+        if (!g_ctrlLogged)
+        {
+          g_ctrlLogged = true;
+          const LONG initial_value = (g_overlayEnabled != nullptr) ? *g_overlayEnabled : -1;
+          _SidecarLog (L"SKF1 ctrl map: base=%p sig=%c%c%c%c ver=%u overlay=%ld offset=0x08",
+                       g_ctrlBase,
+                       sig[0], sig[1], sig[2], sig[3],
+                       version,
+                       (long)initial_value);
+        }
+      }
+    }
+  }
+
+  bool overlay_enabled = true;
+  static LONG s_overlayEnabledLast = -1;
+  if (g_overlayEnabled != nullptr)
+  {
+    const LONG value = *g_overlayEnabled;
+    overlay_enabled = (value != 0);
+    if (value != s_overlayEnabledLast)
+    {
+      s_overlayEnabledLast = value;
+      _SidecarLog (L"SKF1 ctrl overlayEnabled=%ld", (long)value);
+    }
+  }
+
+  // Early-out: when overlay is disabled skip ALL Stage A-F work (no mapping,
+  // no memcpy, no texture ops). Reuses the same dispatch path used everywhere.
+  if (!overlay_enabled)
+  {
+    return
+      SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                  nullptr, SK_DXGI_PresentSource::Wrapper );
+  }
+
   // ============================================================================
   // SKF1 SELF-AUDITING PIPELINE
   // Every stage has explicit OK/FAIL markers with GetLastError() capture
@@ -1434,73 +1505,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   const bool skf1_stage_ef_ready =
     (s_skf1.view_ptr != nullptr && s_skf1.width > 0 && s_skf1.height > 0 &&
      s_skf1.stride > 0 && s_skf1.pixel_format == 1);
-
-  if (g_ctrlPid != pidNow)
-  {
-    g_ctrlPid = pidNow;
-    g_ctrlAttempted = false;
-  }
-
-  if (!g_ctrlAttempted)
-  {
-    g_ctrlAttempted = true;
-
-    wchar_t ctrl_name [64] = { };
-    wsprintfW (ctrl_name, L"Local\\SidecarK_Control_%lu", (unsigned long)pidNow);
-
-    g_ctrlMap = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
-    if (g_ctrlMap != nullptr)
-    {
-      g_ctrlBase = (uint8_t *)MapViewOfFile (g_ctrlMap, FILE_MAP_READ, 0, 0, 0);
-      if (g_ctrlBase != nullptr)
-      {
-        char sig[4] = { };
-        memcpy (sig, g_ctrlBase, sizeof (sig));
-        const uint32_t version = *reinterpret_cast<const uint32_t *> (g_ctrlBase + 0x04);
-
-        const bool sig_ok = (memcmp (sig, "SKC1", sizeof (sig)) == 0);
-        const bool ver_ok = (version == 1u);
-
-        if (sig_ok && ver_ok)
-          g_overlayEnabled = reinterpret_cast<volatile LONG *> (g_ctrlBase + 0x08);
-        else
-          g_overlayEnabled = nullptr;
-
-        if (!g_ctrlLogged)
-        {
-          g_ctrlLogged = true;
-          const LONG initial_value = (g_overlayEnabled != nullptr) ? *g_overlayEnabled : -1;
-          _SidecarLog (L"SKF1 ctrl map: base=%p sig=%c%c%c%c ver=%u overlay=%ld offset=0x08",
-                       g_ctrlBase,
-                       sig[0], sig[1], sig[2], sig[3],
-                       version,
-                       (long)initial_value);
-        }
-      }
-    }
-  }
-
-  bool overlay_enabled = true;
-  static LONG s_overlayEnabledLast = -1;
-  if (g_overlayEnabled != nullptr)
-  {
-    const LONG value = *g_overlayEnabled;
-    overlay_enabled = (value != 0);
-    if (value != s_overlayEnabledLast)
-    {
-      s_overlayEnabledLast = value;
-      _SidecarLog (L"SKF1 ctrl overlayEnabled=%ld", (long)value);
-    }
-  }
-
-  // Early-out: skip all Stage E/F composite work when overlay is disabled.
-  // Reuses the same dispatch path used when overlay is unavailable/not composited.
-  if (!overlay_enabled)
-  {
-    return
-      SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
-                                  nullptr, SK_DXGI_PresentSource::Wrapper );
-  }
 
   if (skf1_stage_ef_ready)
   {
