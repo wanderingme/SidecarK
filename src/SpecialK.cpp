@@ -39,8 +39,60 @@ const wchar_t* SK_VersionStrW = _L(SK_VERSION_STR_A);
 
 extern bool SidecarK_DiagnosticsEnabled ();
 
+static void
+_SidecarK_WriteDiagHeader (const char* szMsg)
+{
+  wchar_t wszTempPath [MAX_PATH] = { };
+  wchar_t wszFilePath [MAX_PATH] = { };
+
+  DWORD cchTemp =
+    GetTempPathW (_countof (wszTempPath), wszTempPath);
+
+  if (cchTemp == 0 || cchTemp >= _countof (wszTempPath))
+    return;
+
+  if (wszTempPath [cchTemp - 1] != L'\\')
+  {
+    if (cchTemp + 1 >= _countof (wszTempPath))
+      return;
+
+    wszTempPath [cchTemp]     = L'\\';
+    wszTempPath [cchTemp + 1] = L'\0';
+  }
+
+  swprintf_s (wszFilePath, _countof (wszFilePath), L"%sSidecarK_Overlay.log", wszTempPath);
+
+  HANDLE hFile =
+    CreateFileW ( wszFilePath, GENERIC_WRITE,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                  nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr );
+
+  if (hFile != INVALID_HANDLE_VALUE)
+  {
+    SetFilePointer (hFile, 0, nullptr, FILE_END);
+
+    char   szLine [256] = { };
+    sprintf_s (szLine, _countof (szLine), "%s\r\n", szMsg);
+
+    DWORD cbWritten = 0;
+    WriteFile (hFile, szLine, (DWORD)lstrlenA (szLine), &cbWritten, nullptr);
+    CloseHandle (hFile);
+  }
+}
+
 bool SidecarK_DiagnosticsEnabled ()
 {
+#if defined(SIDECARK_DIAGNOSTICS_ALWAYS_ON)
+  static std::atomic_bool s_header_written { false };
+  if (! s_header_written.exchange (true))
+    _SidecarK_WriteDiagHeader ("Diagnostics enabled via build flag SIDECARK_DIAGNOSTICS_ALWAYS_ON");
+  return true;
+#endif
+
+#if defined(SIDECARK_DIAGNOSTICS_ALWAYS_OFF)
+  return false;
+#endif
+
   static std::atomic_bool s_enabled { false };
   if (s_enabled.load ())
     return true;
@@ -65,7 +117,18 @@ bool SidecarK_DiagnosticsEnabled ()
   CloseHandle (hMap);
 
   if (ok)
+  {
+    static std::atomic_bool s_header_written { false };
+    if (! s_header_written.exchange (true))
+    {
+      char szHeader [192] = { };
+      sprintf_s (szHeader, _countof (szHeader),
+                 "Diagnostics enabled via mapping Local\\SidecarK_Diagnostics_Enable_%lu",
+                 (unsigned long)pid);
+      _SidecarK_WriteDiagHeader (szHeader);
+    }
     s_enabled.store (true);
+  }
 
   return ok;
 }
