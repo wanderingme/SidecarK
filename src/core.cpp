@@ -2593,29 +2593,85 @@ SK_StartupCore (const wchar_t* backend, void* callback)
   //gl    |=  SK_IsModuleLoaded (L"gdi32.dll");
   //gl    |=  SK_IsModuleLoaded (L"gdi32full.dll");
 
-    if ( ( dxgi || d3d11 || d3d12 ||
-           d3d8 || ddraw ) && ( config.apis.dxgi.d3d11.hook
-                             || config.apis.dxgi.d3d12.hook ) )
+    if (SK_IsSidecarKMode ())
     {
-      SK_DXGI_QuickHook ();
-    }
-
-    if (d3d9 && (config.apis.d3d9.hook || config.apis.d3d9ex.hook))
-    {
-      SK_D3D9_QuickHook ();
-    }
-
-    void SK_Streamline_InitBypass (void);
-         SK_Streamline_InitBypass ();
-
-    if (int32_t hooks_queued = (int32_t)ReadULongAcquire (&SK_MinHook_HooksQueuedButNotApplied);
-                hooks_queued > 0)
-    {
-      bool bEnable = SK_EnableApplyQueuedHooks ();
+      // SidecarK mode: defer hook installation to reduce injection hitch.
+      // A background thread runs the QuickHook + ApplyQueuedHooks after a
+      // brief delay so the game can initialize without competing with
+      // trampoline writes on the loader-lock path.
+      static constexpr DWORD kSidecarK_HookDeferMs = 1500UL;
+      SK_Thread_CreateEx ([] (LPVOID) -> DWORD
       {
-        SK_ApplyQueuedHooks ();
+        Sleep (kSidecarK_HookDeferMs);
+
+        bool gl = false, vulkan = false, d3d9 = false, d3d11 = false, d3d12 = false,
+           dxgi = false, d3d8   = false, ddraw = false, glide = false;
+
+        SK_TestRenderImports (
+          SK_GetModuleHandle (nullptr),
+            &gl, &vulkan,
+              &d3d9, &dxgi, &d3d11, &d3d12,
+                &d3d8, &ddraw, &glide );
+
+        dxgi  |= SK_IsModuleLoaded (L"dxgi.dll");
+        d3d11 |= SK_IsModuleLoaded (L"d3d11.dll");
+        d3d12 |= SK_IsModuleLoaded (L"d3d12.dll");
+        d3d9  |= SK_IsModuleLoaded (L"d3d9.dll");
+
+        if ( ( dxgi || d3d11 || d3d12 ||
+               d3d8 || ddraw ) && ( config.apis.dxgi.d3d11.hook
+                                 || config.apis.dxgi.d3d12.hook ) )
+        {
+          SK_DXGI_QuickHook ();
+        }
+
+        if (d3d9 && (config.apis.d3d9.hook || config.apis.d3d9ex.hook))
+        {
+          SK_D3D9_QuickHook ();
+        }
+
+        void SK_Streamline_InitBypass (void);
+             SK_Streamline_InitBypass ();
+
+        if (int32_t hooks_queued = (int32_t)ReadULongAcquire (&SK_MinHook_HooksQueuedButNotApplied);
+                    hooks_queued > 0)
+        {
+          bool bEnable = SK_EnableApplyQueuedHooks ();
+          {
+            SK_ApplyQueuedHooks ();
+          }
+          if (! bEnable) SK_DisableApplyQueuedHooks ();
+        }
+
+        return 0;
+      }, nullptr, nullptr);
+    }
+    else
+    {
+      if ( ( dxgi || d3d11 || d3d12 ||
+             d3d8 || ddraw ) && ( config.apis.dxgi.d3d11.hook
+                               || config.apis.dxgi.d3d12.hook ) )
+      {
+        SK_DXGI_QuickHook ();
       }
-      if (! bEnable) SK_DisableApplyQueuedHooks ();
+
+      if (d3d9 && (config.apis.d3d9.hook || config.apis.d3d9ex.hook))
+      {
+        SK_D3D9_QuickHook ();
+      }
+
+      void SK_Streamline_InitBypass (void);
+           SK_Streamline_InitBypass ();
+
+      if (int32_t hooks_queued = (int32_t)ReadULongAcquire (&SK_MinHook_HooksQueuedButNotApplied);
+                  hooks_queued > 0)
+      {
+        bool bEnable = SK_EnableApplyQueuedHooks ();
+        {
+          SK_ApplyQueuedHooks ();
+        }
+        if (! bEnable) SK_DisableApplyQueuedHooks ();
+      }
     }
 
     InterlockedExchangePointer (
