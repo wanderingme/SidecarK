@@ -2039,6 +2039,44 @@ SK_Attach (DLL_ROLE role)
           if (InterlockedCompareExchange (&once, 1, 0) == 0)
           {
             SK_StageTraceW (L"06_hook_install_end");
+
+            // Notify SidecarKHost: DLL is loaded, hooks installed, idle.
+            // A lightweight background thread connects to the host control
+            // pipe and sends DLL_READY_IDLE once.  No heavy work is done here.
+            HANDLE hReadyThread = CreateThread (nullptr, 0,
+              [] (LPVOID) -> DWORD {
+                const DWORD   pid = GetCurrentProcessId ();
+                wchar_t pipeName [128] = {};
+                wsprintfW (pipeName, L"\\\\.\\pipe\\SidecarK_Control_%lu",
+                           (unsigned long)pid);
+                const ULONGLONG t0 = GetTickCount64 ();
+                for (;;)
+                {
+                  if (WaitNamedPipeW (pipeName, 200))
+                  {
+                    HANDLE h = CreateFileW (pipeName,
+                      GENERIC_READ | GENERIC_WRITE, 0,
+                      nullptr, OPEN_EXISTING, 0, nullptr);
+                    if (h != INVALID_HANDLE_VALUE)
+                    {
+                      const char msg [] = "DLL_READY_IDLE\n";
+                      DWORD bw = 0;
+                      WriteFile (h, msg, (DWORD)(sizeof (msg) - 1), &bw, nullptr);
+                      FlushFileBuffers (h);
+                      char resp [16] = {};
+                      DWORD br = 0;
+                      ReadFile (h, resp, (DWORD)(sizeof (resp) - 1), &br, nullptr);
+                      CloseHandle (h);
+                      break;
+                    }
+                  }
+                  if (GetTickCount64 () - t0 >= 2000ULL)
+                    break;
+                  Sleep (50);
+                }
+                return 0;
+              }, nullptr, 0, nullptr);
+            if (hReadyThread) CloseHandle (hReadyThread);
           }
         }
 

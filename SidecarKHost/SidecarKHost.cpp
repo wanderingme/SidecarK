@@ -448,6 +448,7 @@ static bool WaitForModuleLoaded(DWORD pid, const wchar_t* moduleBasename, DWORD 
 
 static std::atomic_bool g_shutdown{ false };
 static std::atomic_bool g_attach_confirmed{ false };
+static std::atomic_bool g_dll_ready_idle{ false };
 static bool g_frame_source_seen = false;
 
 static DWORD g_host_pid = 0;
@@ -1585,6 +1586,8 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
       continue;
     }
 
+    HostLogAppendf(L"ctrl_pipe_client_connected ts=%llu pid=%lu", (unsigned long long)GetTickCount64(), (unsigned long)targetPid);
+
     char line[65]{};
     DWORD lineLen = 0;
     bool done = false;
@@ -1673,6 +1676,12 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
       {
         resp = "ok\n"; respLen = 3;
         g_shutdown.store(true);
+      }
+      else if (_stricmp(cmd, "DLL_READY_IDLE") == 0)
+      {
+        g_dll_ready_idle.store(true);
+        HostLogAppendf(L"dll_ready_idle_received ts=%llu pid=%lu", (unsigned long long)GetTickCount64(), (unsigned long)targetPid);
+        resp = "ok\n"; respLen = 3;
       }
     }
 
@@ -2333,15 +2342,15 @@ int wmain(int argc, wchar_t** argv)
       LogTargetGraphicsSnapshot(targetPid, targetExeFullPath);
     }
 
-    AppendLogf(logPath, L"remote_inject_start pid=%lu dll=%ls", (unsigned long)targetPid, dllToInject.c_str());
-    HostLogAppendf(L"remote_inject_start pid=%lu dll=%ls", (unsigned long)targetPid, dllToInject.c_str());
+    AppendLogf(logPath, L"remote_inject_start pid=%lu dll=%ls ts=%llu", (unsigned long)targetPid, dllToInject.c_str(), (unsigned long long)GetTickCount64());
+    HostLogAppendf(L"remote_inject_start pid=%lu dll=%ls ts=%llu", (unsigned long)targetPid, dllToInject.c_str(), (unsigned long long)GetTickCount64());
 
     const InjectResult injectResult = InjectDllByCreateRemoteThread(targetPid, dllToInject);
     const DWORD injectLastError = GetLastError();
 
     const int remoteOk = (injectResult == InjectResult::Success || injectResult == InjectResult::AlreadyLoaded) ? 1 : 0;
-    AppendLogf(logPath, L"remote_inject_result pid=%lu ok=%d last_error=%lu", (unsigned long)targetPid, remoteOk, (unsigned long)injectLastError);
-    HostLogAppendf(L"remote_inject_result pid=%lu ok=%d last_error=%lu", (unsigned long)targetPid, remoteOk, (unsigned long)injectLastError);
+    AppendLogf(logPath, L"remote_inject_result pid=%lu ok=%d last_error=%lu ts=%llu", (unsigned long)targetPid, remoteOk, (unsigned long)injectLastError, (unsigned long long)GetTickCount64());
+    HostLogAppendf(L"remote_inject_result pid=%lu ok=%d last_error=%lu ts=%llu", (unsigned long)targetPid, remoteOk, (unsigned long)injectLastError, (unsigned long long)GetTickCount64());
 
     {
       wchar_t msg[256]{};
@@ -2400,6 +2409,39 @@ int wmain(int argc, wchar_t** argv)
   AppendLog(logPath, (L"pipe: " + pipeName).c_str());
   g_attach_confirmed.store(true);
   WriteStatusAtomic(statusPath, L"attached", targetPid, L"none");
+
+  // Wait for DLL_READY_IDLE from injected DLL (up to 10 seconds).
+  // The DLL sends this once it has loaded and essential hooks are installed.
+  // Only applicable when the control pipe server is running.
+  if (g_control_overlay_enabled != nullptr)
+  {
+    AppendLogf(logPath, L"dll_ready_idle_wait_start ts=%llu", (unsigned long long)GetTickCount64());
+    HostLogAppendf(L"dll_ready_idle_wait_start ts=%llu", (unsigned long long)GetTickCount64());
+    const ULONGLONG idleWaitStart = GetTickCount64();
+    bool gotIdle = false;
+    while (!g_shutdown.load())
+    {
+      if (g_dll_ready_idle.load())
+      {
+        gotIdle = true;
+        break;
+      }
+      if (GetTickCount64() - idleWaitStart >= 10000ULL)
+      {
+        AppendLogf(logPath, L"dll_ready_idle_timeout ts=%llu", (unsigned long long)GetTickCount64());
+        HostLogAppendf(L"dll_ready_idle_timeout ts=%llu", (unsigned long long)GetTickCount64());
+        break;
+      }
+      Sleep(50);
+    }
+    if (gotIdle)
+    {
+      AppendLogf(logPath, L"dll_ready_idle_ok ts=%llu", (unsigned long long)GetTickCount64());
+      HostLogAppendf(L"dll_ready_idle_ok ts=%llu", (unsigned long long)GetTickCount64());
+      wprintf(L"SIDECARK_IDLE_OK\n");
+      fflush(stdout);
+    }
+  }
 
   CreateHostFrameMappingForPid(targetPid);
 
