@@ -118,8 +118,8 @@ bool SidecarK_DiagnosticsEnabled ()
 
   if (ok)
   {
-    static std::atomic_bool s_header_written { false };
-    if (! s_header_written.exchange (true))
+    static std::atomic_bool s_mapping_header_written { false };
+    if (! s_mapping_header_written.exchange (true))
     {
       char szHeader [192] = { };
       sprintf_s (szHeader, _countof (szHeader),
