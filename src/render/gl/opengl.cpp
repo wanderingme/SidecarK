@@ -3725,12 +3725,19 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                      glGetIntegerv (GL_UNPACK_ALIGNMENT, &prev_unpack);
                      glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
 
-                      if (s_w != width || s_h != height || s_stride != stride)
+                      static uint32_t s_fmt = 0;
+                      if (s_w != width || s_h != height || s_stride != stride || s_fmt != pixel_format)
                       {
+                        wchar_t _gl_dims_msg [128] = { };
+                        _snwprintf_s (_gl_dims_msg, _countof (_gl_dims_msg), _TRUNCATE,
+                                      L"SKF1 GL overlay dims changed: %ux%u -> %ux%u stride=%u fmt=%u\n",
+                                      s_w, s_h, width, height, stride, pixel_format);
+                        OutputDebugStringW (_gl_dims_msg);
                         glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width, (GLsizei)height, 0, GL_BGRA, GL_UNSIGNED_BYTE, s_frame_snapshot.data ());
                         s_w      = width;
                         s_h      = height;
                         s_stride = stride;
+                        s_fmt    = pixel_format;
                       }
                       else
                       {

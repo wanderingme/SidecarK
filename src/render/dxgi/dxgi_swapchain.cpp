@@ -1508,6 +1508,41 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     }
   }  // End of Stage A-D header validation block
 
+  // Re-read live header dims from the mapped view every frame.
+  // Stage A-D above only runs on initial open; this detects producer sentinel→real resize.
+  if (s_skf1.view_ptr != nullptr)
+  {
+    const uint8_t* p  = s_skf1.view_ptr;
+    const uint32_t lw = *(const uint32_t *)(p + 0x14);
+    const uint32_t lh = *(const uint32_t *)(p + 0x18);
+    const uint32_t ls = *(const uint32_t *)(p + 0x1C);
+    const uint32_t lf = *(const uint32_t *)(p + 0x10);
+    const bool dims_changed = (lw != s_skf1.width || lh != s_skf1.height ||
+                               ls != s_skf1.stride || lf != s_skf1.pixel_format);
+    const bool new_dims_ok  = (lw > 0u && lh > 0u && ls == lw * 4u &&
+                               (uint64_t)ls * lh + 0x24ull <= s_skf1.view_bytes);
+    if (dims_changed && new_dims_ok)
+    {
+      _SidecarLog (L"overlay dims changed: %ux%u -> %ux%u stride=%u fmt=%u",
+                   s_skf1.width, s_skf1.height, lw, lh, ls, lf);
+      s_skf1.width        = lw;
+      s_skf1.height       = lh;
+      s_skf1.stride       = ls;
+      s_skf1.pixel_format = lf;
+      if (s_skf1.tex != nullptr)
+      {
+        s_skf1.tex->Release ();
+        s_skf1.tex    = nullptr;
+        s_skf1.texFmt = DXGI_FORMAT_UNKNOWN;
+        s_skf1.texW   = 0;
+        s_skf1.texH   = 0;
+      }
+      s_skf1.has_frame           = false;
+      s_skf1.last_counter        = 0;
+      s_skf1.stale_counter_since = 0;
+    }
+  }
+
   // DEBUG: Log that we're checking Stage E/F entry condition
   static std::atomic<bool> s_logged_ef_check = false;
   if (!s_logged_ef_check.exchange(true))
