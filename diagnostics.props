@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ============================================================
+   SidecarK Diagnostics Logging Toggle
+  ============================================================
+
+  Change the ONE word between the tags below, then rebuild:
+
+    auto   (default) - use the runtime shared-memory toggle
+    on               - always write logs (every build: Release, Debug, etc.)
+    off              - never write logs  (every build: Release, Debug, etc.)
+
+  Example – enable logs on every build:
+    <SidecarK_DiagMode>on</SidecarK_DiagMode>
+
+  Logs are written to: %TEMP%\SidecarK_Overlay.log
+
+  ============================================================
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- ↓↓↓  CHANGE THIS WORD  ↓↓↓ -->
+  <PropertyGroup>
+    <SidecarK_DiagMode>auto</SidecarK_DiagMode>
+  </PropertyGroup>
+  <!-- ↑↑↑  CHANGE THIS WORD  ↑↑↑ -->
+
+  <ItemDefinitionGroup Condition="'$(SidecarK_DiagMode)' == 'on'">
+    <ClCompile>
+      <PreprocessorDefinitions>SIDECARK_DIAGNOSTICS_ALWAYS_ON;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <ItemDefinitionGroup Condition="'$(SidecarK_DiagMode)' == 'off'">
+    <ClCompile>
+      <PreprocessorDefinitions>SIDECARK_DIAGNOSTICS_ALWAYS_OFF;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+</Project>
