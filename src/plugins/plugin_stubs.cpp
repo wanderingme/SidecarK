@@ -8,9 +8,9 @@
  * SK_SIDECAR_MINIMAL is set, so debug builds keep using the real ones.
  **/
 
-#ifdef SK_SIDECAR_MINIMAL
-
 #include <SpecialK/stdafx.h>
+
+#ifdef SK_SIDECAR_MINIMAL
 
 // ---- ReShade headers (needed for reshade::api::effect_runtime*) ----------
 #include <SpecialK/plugin/reshade.h>
