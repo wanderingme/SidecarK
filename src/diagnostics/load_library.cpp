@@ -611,7 +611,9 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
                (StrStrI ( lpFileName, SK_TEXT(".bin")      ) && typeid (_T) == typeid (wchar_t)) )
 
     {
+#ifndef SK_SIDECAR_MINIMAL
       SK_NGX_Init ();
+#endif
 
       const wchar_t* wszFileName =
         static_cast <const wchar_t *> (lpFileName);

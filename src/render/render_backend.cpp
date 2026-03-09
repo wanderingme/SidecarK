@@ -226,6 +226,9 @@ SK_DXVK_CheckForInterop (void)
 void
 SK_BootD3D9 (void)
 {
+  // SidecarK only composites overlay frames; D3D9 hooks are not needed.
+  if (SK_IsSidecarKMode ()) return;
+
   // Need to check for recursion thanks to Ansel
   static DWORD dwInitTid = GetCurrentThreadId ();
 
@@ -320,6 +323,9 @@ SK_BootD3D9 (void)
 void
 SK_BootD3D8 (void)
 {
+  // SidecarK only composites overlay frames; D3D8 hooks are not needed.
+  if (SK_IsSidecarKMode ()) return;
+
   // "Normal" games don't change render APIs mid-game; Talos does, but it's
   //   not normal :)
   if (SK_GetFramesDrawn () > 0)
@@ -366,6 +372,9 @@ SK_BootD3D8 (void)
 void
 SK_BootDDraw (void)
 {
+  // SidecarK only composites overlay frames; DirectDraw hooks are not needed.
+  if (SK_IsSidecarKMode ()) return;
+
   // "Normal" games don't change render APIs mid-game; Talos does, but it's
   //   not normal :)
   if (SK_GetFramesDrawn () > 0)
@@ -1595,6 +1604,9 @@ _SK_HookVulkan (void)
 void
 SK_BootVulkan (void)
 {
+  // SidecarK has no SKF1 consumer for Vulkan; Vulkan hooks are not needed.
+  if (SK_IsSidecarKMode ()) return;
+
   static volatile ULONG __booted = FALSE;
 
   if (InterlockedCompareExchange (&__booted, TRUE, FALSE))

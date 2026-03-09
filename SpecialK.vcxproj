@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -88,6 +88,9 @@
     <VCToolsVersion>14.36.32532</VCToolsVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup Condition="'$(Configuration)'=='Release' Or '$(Configuration)'=='Release (clang)'">
+    <SidecarK_MinimalBuild>true</SidecarK_MinimalBuild>
+  </PropertyGroup>
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
   <ImportGroup Label="Shared">
@@ -431,7 +434,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <WarningLevel>Level4</WarningLevel>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <Optimization>MaxSpeed</Optimization>
-      <PreprocessorDefinitions>NTDDI_VERSION=WDK_NTDDI_VERSION;DIRECTINPUT_VERSION=0x0800;PSAPI_VERSION=1;NOMINMAX;_UNICODE;UNICODE;WIN32;NDEBUG;_LIB;_USRDLL;_WINDOWS;GLEW_STATIC;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;_STL_CONCRT_SUPPORT;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;%(PreprocessorDefinitions);SK_BUILD_DLL=1;SK_EXPORTS;</PreprocessorDefinitions>
+      <PreprocessorDefinitions>SK_SIDECAR_MINIMAL=1;NTDDI_VERSION=WDK_NTDDI_VERSION;DIRECTINPUT_VERSION=0x0800;PSAPI_VERSION=1;NOMINMAX;_UNICODE;UNICODE;WIN32;NDEBUG;_LIB;_USRDLL;_WINDOWS;GLEW_STATIC;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;_STL_CONCRT_SUPPORT;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;%(PreprocessorDefinitions);SK_BUILD_DLL=1;SK_EXPORTS;</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <EnablePREfast>false</EnablePREfast>
@@ -552,7 +555,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <WarningLevel>Level4</WarningLevel>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <Optimization>MaxSpeed</Optimization>
-      <PreprocessorDefinitions>NTDDI_VERSION=NTDDI_WIN11_GE;_WIN32_WINNT=_WIN32_WINNT_WIN10;DIRECTINPUT_VERSION=0x0800;PSAPI_VERSION=1;NOMINMAX;_UNICODE;UNICODE;SK_BUILT_BY_CLANG;WIN32;NDEBUG;_LIB;_USRDLL;_WINDOWS;GLEW_STATIC;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;_STL_CONCRT_SUPPORT;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;%(PreprocessorDefinitions);SK_BUILD_DLL=1;SK_EXPORTS;</PreprocessorDefinitions>
+      <PreprocessorDefinitions>SK_SIDECAR_MINIMAL=1;NTDDI_VERSION=NTDDI_WIN11_GE;_WIN32_WINNT=_WIN32_WINNT_WIN10;DIRECTINPUT_VERSION=0x0800;PSAPI_VERSION=1;NOMINMAX;_UNICODE;UNICODE;SK_BUILT_BY_CLANG;WIN32;NDEBUG;_LIB;_USRDLL;_WINDOWS;GLEW_STATIC;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;_STL_CONCRT_SUPPORT;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;%(PreprocessorDefinitions);SK_BUILD_DLL=1;SK_EXPORTS;</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <EnablePREfast>false</EnablePREfast>
@@ -666,7 +669,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <PrecompiledHeader>Use</PrecompiledHeader>
-      <PreprocessorDefinitions>NTDDI_VERSION=WDK_NTDDI_VERSION;DIRECTINPUT_VERSION=0x0800;PSAPI_VERSION=1;NOMINMAX;_UNICODE;UNICODE;_WIN64;WIN32;NDEBUG;_LIB;_USRDLL;_WINDOWS;GLEW_STATIC;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;_STL_CONCRT_SUPPORT;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;%(PreprocessorDefinitions);SK_BUILD_DLL=1;SK_EXPORTS;</PreprocessorDefinitions>
+      <PreprocessorDefinitions>SK_SIDECAR_MINIMAL=1;NTDDI_VERSION=WDK_NTDDI_VERSION;DIRECTINPUT_VERSION=0x0800;PSAPI_VERSION=1;NOMINMAX;_UNICODE;UNICODE;_WIN64;WIN32;NDEBUG;_LIB;_USRDLL;_WINDOWS;GLEW_STATIC;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;_STL_CONCRT_SUPPORT;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;%(PreprocessorDefinitions);SK_BUILD_DLL=1;SK_EXPORTS;</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
@@ -791,7 +794,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <PrecompiledHeader>Use</PrecompiledHeader>
-      <PreprocessorDefinitions>NTDDI_VERSION=NTDDI_WIN11_GE;_WIN32_WINNT=_WIN32_WINNT_WIN10;DIRECTINPUT_VERSION=0x0800;PSAPI_VERSION=1;NOMINMAX;_UNICODE;UNICODE;SK_BUILT_BY_CLANG;_WIN64;WIN32;NDEBUG;_LIB;_USRDLL;_WINDOWS;GLEW_STATIC;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;_STL_CONCRT_SUPPORT;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;%(PreprocessorDefinitions);SK_BUILD_DLL=1;SK_EXPORTS;</PreprocessorDefinitions>
+      <PreprocessorDefinitions>SK_SIDECAR_MINIMAL=1;NTDDI_VERSION=NTDDI_WIN11_GE;_WIN32_WINNT=_WIN32_WINNT_WIN10;DIRECTINPUT_VERSION=0x0800;PSAPI_VERSION=1;NOMINMAX;_UNICODE;UNICODE;SK_BUILT_BY_CLANG;_WIN64;WIN32;NDEBUG;_LIB;_USRDLL;_WINDOWS;GLEW_STATIC;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;_STL_CONCRT_SUPPORT;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;%(PreprocessorDefinitions);SK_BUILD_DLL=1;SK_EXPORTS;</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
@@ -1916,6 +1919,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="depends\src\implot\implot_items.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
@@ -2005,55 +2009,76 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">false</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="src\plugins\armoredcore6.cpp" />
+    <ClCompile Include="src\plugins\armoredcore6.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\plugins\assassins_creed_shadows.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">stdcpp23</LanguageStandard>
       <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Release|x64'">stdcpp23</LanguageStandard>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="src\plugins\bethesda.cpp" />
+    <ClCompile Include="src\plugins\bethesda.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\plugins\chrono_cross.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\plugins\dragon_quest_xi.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\plugins\elden_ring.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\plugins\ff7_remake.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="src\plugins\ffxvi.cpp" />
-    <ClCompile Include="src\plugins\lords_of_the_fallen2.cpp" />
+    <ClCompile Include="src\plugins\ffxvi.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\plugins\lords_of_the_fallen2.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\plugins\monster_hunter_world.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\plugins\nier_√1.5.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\plugins\ninokuni2.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\plugins\octopath_traveler.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="src\plugins\persona4.cpp" />
-    <ClCompile Include="src\plugins\secret_of_mana.cpp" />
+    <ClCompile Include="src\plugins\persona4.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\plugins\secret_of_mana.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\plugins\sekiro.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">false</ExcludedFromBuild>
@@ -2061,28 +2086,38 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\plugins\tales_of_graces_f.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\plugins\tales_of_vesperia.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="src\plugins\unclassified.cpp" />
-    <ClCompile Include="src\plugins\unity.cpp" />
+    <ClCompile Include="src\plugins\unclassified.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\plugins\unity.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\plugins\watch_dogs.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\plugins\yakuza0.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\plugins\ys8.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\popups\achievement.cpp" />
     <ClCompile Include="src\process.cpp">
@@ -2277,17 +2312,28 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
     <ClCompile Include="src\input\xinput_core.cpp" />
     <ClCompile Include="src\input\xinput_hotplug.cpp" />
     <ClCompile Include="src\osd\popup.cpp" />
-    <ClCompile Include="src\plugins\blue_reflection.cpp" />
-    <ClCompile Include="src\plugins\dothack_gu.cpp" />
-    <ClCompile Include="src\plugins\lego_marvel2.cpp" />
+    <ClCompile Include="src\plugins\blue_reflection.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\plugins\dothack_gu.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\plugins\lego_marvel2.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\plugins\nier.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="src\plugins\okami.cpp" />
+    <ClCompile Include="src\plugins\okami.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\plugins\plugin_mgr.cpp" />
-    <ClCompile Include="src\plugins\reshade.cpp" />
+    <ClCompile Include="src\plugins\reshade.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\render\d3d9\d3d9_device.cpp" />
     <ClCompile Include="src\render\d3d9\d3d9_swapchain.cpp" />
     <ClCompile Include="src\render\dxgi\dxgi_swapchain.cpp" />
@@ -2320,6 +2366,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\steam\client.cpp" />
     <ClCompile Include="src\steam\steam_api.cpp" />

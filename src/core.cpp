@@ -311,7 +311,9 @@ SK_LoadGPUVendorAPIs (void)
 
       if (SK_GetModuleHandleW (L"_nvngx.dll") != nullptr)
       {
+#ifndef SK_SIDECAR_MINIMAL
         SK_NGX_Init ();
+#endif
       }
 
       const int num_sli_gpus =
@@ -408,6 +410,7 @@ SK_LoadGPUVendorAPIs (void)
     // Not NVIDIA, maybe AMD?
     else
     {
+#ifndef SK_SIDECAR_MINIMAL
       dll_log->Log (L"[DisplayLib] Initializing AMD Display Library (ADL)...");
 
       BOOL adl_init =
@@ -424,6 +427,7 @@ SK_LoadGPUVendorAPIs (void)
                          SK_ADL_CountPhysicalGPUs (),
                            SK_ADL_CountActiveGPUs () );
       }
+#endif // !SK_SIDECAR_MINIMAL
     }
 
     const HMODULE hMod =
@@ -557,6 +561,7 @@ void SK_FetchBuiltinSounds (void)
 
 void SK_Unity_PreInit (void)
 {
+#ifndef SK_SIDECAR_MINIMAL
   if (SK_GetModuleHandleW (L"mono.dll")           ||
       SK_GetModuleHandleW (L"mono-2.0-bdwgc.dll") ||
       SK_GetModuleHandleW (L"UnityPlayer.dll")    ||
@@ -565,6 +570,7 @@ void SK_Unity_PreInit (void)
     extern void SK_Unity_InitPlugin (void);
                 SK_Unity_InitPlugin ();
   }
+#endif
 }
 
 void
@@ -594,6 +600,7 @@ extern void BasicInit (void);
   if (! SK_IsSidecarKMode ())
     SK_FetchBuiltinSounds ();
 
+#ifndef SK_SIDECAR_MINIMAL
   for (auto& init_fn : plugin_mgr->init_fns)
              init_fn ();
 
@@ -676,6 +683,7 @@ extern void BasicInit (void);
     } break;
 #endif
   }
+#endif // !SK_SIDECAR_MINIMAL
 
   // Setup the compatibility back end, which monitors loaded libraries,
   //   blacklists bad DLLs and detects render APIs...
@@ -1181,6 +1189,7 @@ void BasicInit (void)
 
    // Games that need plug-in initialization before Steam
    //
+#ifndef SK_SIDECAR_MINIMAL
    switch (SK_GetCurrentGameID ())
    {
 #ifdef _WIN64
@@ -1192,6 +1201,7 @@ void BasicInit (void)
      default:
        break;
    }
+#endif // !SK_SIDECAR_MINIMAL
 
 
   // Steam Overlay and SteamAPI Manipulation
