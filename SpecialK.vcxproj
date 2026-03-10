@@ -1945,18 +1945,34 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">stdcpp20</LanguageStandard>
     </ClCompile>
     <ClCompile Include="src\control_panel\cfg_compatibility.cpp" />
-    <ClCompile Include="src\control_panel\cfg_d3d11.cpp" />
-    <ClCompile Include="src\control_panel\cfg_d3d9.cpp" />
-    <ClCompile Include="src\control_panel\cfg_epic.cpp" />
-    <ClCompile Include="src\control_panel\cfg_galaxy.cpp" />
-    <ClCompile Include="src\control_panel\cfg_input.cpp" />
+    <ClCompile Include="src\control_panel\cfg_d3d11.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\control_panel\cfg_d3d9.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\control_panel\cfg_epic.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\control_panel\cfg_galaxy.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\control_panel\cfg_input.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\control_panel\cfg_notifications.cpp" />
     <ClCompile Include="src\control_panel\cfg_opengl.cpp" />
     <ClCompile Include="src\control_panel\cfg_osd.cpp" />
-    <ClCompile Include="src\control_panel\cfg_platform.cpp" />
+    <ClCompile Include="src\control_panel\cfg_platform.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\control_panel\cfg_plugins.cpp" />
-    <ClCompile Include="src\control_panel\cfg_sound.cpp" />
-    <ClCompile Include="src\control_panel\cfg_steam.cpp" />
+    <ClCompile Include="src\control_panel\cfg_sound.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\control_panel\cfg_steam.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\control_panel\cfg_window.cpp" />
     <ClCompile Include="src\crc32.cpp" />
     <ClCompile Include="src\diagnostics\cpu.cpp">
@@ -2157,7 +2173,9 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">Use</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="src\render\d3d11\d3d11_debug.cpp" />
-    <ClCompile Include="src\render\d3d11\d3d11_screenshot.cpp" />
+    <ClCompile Include="src\render\d3d11\d3d11_screenshot.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\render\d3d11\d3d11_shader.cpp" />
     <ClCompile Include="src\render\d3d11\d3d11_stateblock.cpp" />
     <ClCompile Include="src\render\d3d11\hdr\d3d11_hdr.cpp" />
@@ -2179,7 +2197,9 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
     <ClCompile Include="src\render\d3d12\d3d12_device.cpp" />
     <ClCompile Include="src\render\d3d12\d3d12_pipeline_library.cpp" />
     <ClCompile Include="src\render\d3d12\d3d12_screenshot.cpp" />
-    <ClCompile Include="src\render\d3d12\d3d12_pipeline_stats.cpp" />
+    <ClCompile Include="src\render\d3d12\d3d12_pipeline_stats.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\render\d3d9\d3d9_screenshot.cpp">
       <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
@@ -2369,7 +2389,9 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
     </ClCompile>
     <ClCompile Include="src\hash.cpp" />
     <ClCompile Include="src\hooks.cpp" />
-    <ClCompile Include="src\control_panel.cpp" />
+    <ClCompile Include="src\control_panel.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\imgui\backends\imgui_d3d11.cpp" />
     <ClCompile Include="src\imgui\backends\imgui_d3d9.cpp">
       <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>

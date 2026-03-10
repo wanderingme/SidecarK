@@ -685,4 +685,53 @@ void SK_TriggerHudFreeScreenshot         (void) noexcept { }
 void SK_XInput_Refresh                   (UINT) { }
 
 
+// ==========================================================================
+//  Debug / utility stubs  (from debug_utils.cpp / utility.cpp)
+// ==========================================================================
+
+BOOL  WINAPI SK_IsDebuggerPresent     (void)              { return IsDebuggerPresent (); }
+void  WINAPI SK_OutputDebugStringA    (LPCSTR  msg)       { OutputDebugStringA (msg); }
+void  WINAPI SK_OutputDebugStringW    (LPCWSTR msg)       { OutputDebugStringW (msg); }
+LPVOID WINAPI SK_AddVectoredExceptionHandler (ULONG first, PVECTORED_EXCEPTION_HANDLER handler)
+                                              { return AddVectoredExceptionHandler (first, handler); }
+LPVOID WINAPI SK_LocalAlloc  (UINT uFlags, SIZE_T uBytes) { return LocalAlloc  (uFlags, uBytes); }
+LPVOID WINAPI SK_LocalFree   (HLOCAL hMem)                { return LocalFree   (hMem); }
+
+void SK_RaiseException (DWORD code, DWORD flags, DWORD nArgs, const ULONG_PTR* args)
+{
+  RaiseException (code, flags, nArgs, args);
+}
+
+BOOL WINAPI SK_GetSystemCpuSetInformation (
+  PSYSTEM_CPU_SET_INFORMATION Info, ULONG BufLen, PULONG RetLen,
+  HANDLE Process, ULONG Flags)
+{
+  return GetSystemCpuSetInformation (Info, BufLen, RetLen, Process, Flags);
+}
+
+uint32_t __cdecl safe_crc32c (uint32_t, const void*, size_t) { return 0; }
+
+void SK_Input_PreHookDI8 (void) { }
+
+// ==========================================================================
+//  Reflex / backend globals  (from excluded reflex/streamline TUs)
+// ==========================================================================
+
+volatile ULONG64 SK_Reflex_LastFrameMarked = 0;
+
+// ==========================================================================
+//  Widget registry  (from excluded widget.cpp / control_panel files)
+// ==========================================================================
+
+BOOL SK_ImGui_WidgetRegistry::DispatchKeybinds (BOOL, BOOL, BOOL, UINT) { return FALSE; }
+
+// ==========================================================================
+//  Additional HDR globals  (from excluded widgets/hdr.cpp)
+// ==========================================================================
+
+bool  __SK_HDR_AdaptiveToneMap  = false;
+bool  __SK_HDR_UserForced       = false;
+bool  __SK_HDR_Disallow16BitSwap = false;
+
+
 #endif // SK_SIDECAR_MINIMAL
