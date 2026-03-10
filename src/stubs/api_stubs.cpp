@@ -989,7 +989,7 @@ bool SK_Screenshot_SaveJXL  (DirectX::ScratchImage&, const wchar_t*)
                              { return false; }
 
 bool SK_AVIF_CopyToClipboard  (const wchar_t*)                                    { return false; }
-bool SK_PNG_CopyToClipboard   (const DirectX::Image&, const void*, unsigned int)  { return false; }
+bool SK_PNG_CopyToClipboard   (const DirectX::Image&, const void*, size_t)         { return false; }
 bool SK_HDR_ConvertImageToPNG (const DirectX::Image&, DirectX::ScratchImage&)     { return false; }
 bool SK_HDR_SavePNGToDisk     (const wchar_t*, const DirectX::Image*,
                                 const DirectX::Image*, const char*)               { return false; }
@@ -1365,10 +1365,13 @@ long SK_Decompress7zEx (const wchar_t*, const wchar_t*,
 
 
 // ==========================================================================
-//  dbghelp stubs — SymLoadModule  (x86 stdcall @24)
+//  dbghelp stubs — SymLoadModule / SymLoadModule64
 // ==========================================================================
 
 DWORD IMAGEAPI SymLoadModule (HANDLE, HANDLE, PCSTR, PCSTR, DWORD, DWORD)
+{ return 0; }
+
+DWORD64 IMAGEAPI SymLoadModule64 (HANDLE, HANDLE, PCSTR, PCSTR, DWORD64, DWORD)
 { return 0; }
 
 
