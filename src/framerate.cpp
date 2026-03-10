@@ -2127,6 +2127,13 @@ public:
 };
 
 extern SK_LazyGlobal <SK_ImGui_FrameHistory> SK_ImGui_Frames;
+
+// frame_pacing.cpp owns the SK_ImGui_Frames storage in full builds.
+// In SK_SIDECAR_MINIMAL builds frame_pacing.cpp is excluded, so provide
+// the definition here where the class is already fully defined.
+#ifdef SK_SIDECAR_MINIMAL
+SK_LazyGlobal <SK_ImGui_FrameHistory> SK_ImGui_Frames;
+#endif
 extern bool                                  reset_frame_history;
 
 void

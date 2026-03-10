@@ -44,7 +44,7 @@
 // ---- Vulkan headers (SK_Reflex_SetVulkanSwapchain, SK_VK_SetLatencyMarker)
 #include <vulkan/vulkan.h>
 
-// ---- Widget / frame history (SK_ImGui_FrameHistory, SK_Stat_DataHistory)
+// ---- Widget registry (SK_ImGui_WidgetRegistry, SK_Widget, SK_Stat_DataHistory)
 #include <SpecialK/widgets/widget.h>
 
 
@@ -568,14 +568,8 @@ SK_LazyGlobal <pagefile_perf_t> SK_WMI_PagefileStats;
 //  Framerate stubs  (excluded widgets/cpu_widget.cpp, frame_pacing.cpp)
 // ==========================================================================
 
-// SK_ImGui_FrameHistory is defined locally in framerate.cpp; define SK_ImGui_Frames
-// here so the excluded frame_pacing.cpp doesn't need to be compiled.
-class SK_ImGui_FrameHistory : public SK_Stat_DataHistory <float, 120>
-{
-public:
-  void timeFrame (double seconds) { addValue ((float)(1000.0 * seconds)); }
-};
-SK_LazyGlobal <SK_ImGui_FrameHistory> SK_ImGui_Frames;
+// SK_ImGui_FrameHistory is defined in framerate.cpp (always compiled).
+// SK_ImGui_Frames storage is provided there under #ifdef SK_SIDECAR_MINIMAL.
 
 bool    __SK_DoubleUpOnReflex         = false;
 bool    SK_CPU_IsZen                  (void)    { return false; }
@@ -624,7 +618,7 @@ const wchar_t* SK_Steam_PopupOriginToWStr (int) { return L"TopLeft"; }
 
 void __cdecl SteamAPI_ManualDispatch_Init_Detour (void) { }
 
-int SK_ImGui_WidgetRegistry::SaveConfig (void) { return 0; }
+BOOL SK_ImGui_WidgetRegistry::SaveConfig (void) { return FALSE; }
 
 
 // ==========================================================================
