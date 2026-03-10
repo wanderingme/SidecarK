@@ -438,7 +438,11 @@ SK_BootDXGI (void)
   if (SK_GetFramesDrawn () > 0)
     return;
 
+  // Streamline compatibility probe is noncritical for the SKF1 compositor;
+  //   skip the DLL walk and hook install in minimal SidecarK builds.
+#ifndef SK_SIDECAR_MINIMAL
   SK_COMPAT_CheckStreamlineSupport ();
+#endif
 
   SK_TLS *pTLS =
     SK_TLS_Bottom ();

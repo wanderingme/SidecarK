@@ -387,13 +387,23 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
     return;
   }
 
+  // hLoadedMod is only referenced inside the #ifndef SK_SIDECAR_MINIMAL
+  // block (Streamline interposer detection).  Silence the unreferenced
+  // formal-parameter warning (C4100 → C2220) in minimal builds.
+#ifdef SK_SIDECAR_MINIMAL
+  (void)hLoadedMod;
+#endif
+
   // Catch imports that we missed because they were loaded
   //   as dependencies of another DLL... but stop doing this
   //     check after 15 frames to avoid unnecessary overhead.
+  // In SK_SIDECAR_MINIMAL builds, input hooks are not installed at all.
+#ifndef SK_SIDECAR_MINIMAL
   if (SK_GetFramesDrawn () < 15)
   {
     SK_Input_PreInit ();
   }
+#endif
 
   wchar_t     wszCallingMod [MAX_PATH + 2] = { };
   wcsncpy_s ( wszCallingMod, MAX_PATH,
@@ -513,6 +523,10 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
     {   if (!SK_IsModuleLoaded (L"EOSOVH-Win64-Shipping.dll"))
           SK_RunOnce (SK_BootOpenGL ());
     }
+    // Input, platform, engine-detection and Streamline hooks are noncritical
+    // for the SKF1 overlay compositor.  Compile them out of minimal builds to
+    // keep the LoadLibrary hook body small and reduce per-call overhead.
+#ifndef SK_SIDECAR_MINIMAL
     else if (   StrStrI  (lpFileName, SK_TEXT("GameInput.dll")) ||
                 StrStrIW (wszCallingMod,     L"GameInput.dll")  )
       SK_RunOnce (SK_Input_HookGameInput ());
@@ -590,6 +604,7 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
     {
       SK_COMPAT_CheckStreamlineSupport ();
     }
+#endif /* !SK_SIDECAR_MINIMAL */
     else if (   StrStrI ( lpFileName, SK_TEXT("msmpeg2vdec.dll")) ||
                 StrStrIW (wszCallingMod,     L"msmpeg2vdec.dll"))
     {
