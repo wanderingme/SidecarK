@@ -142,4 +142,115 @@ namespace ImPlot {
   void ShowDemoWindow (bool*) {}
 }
 
+
+// ==========================================================================
+//  x64-only plugin stubs  (symbols only declared under #ifdef _WIN64 in
+//  plugin_mgr.h, or referenced via inline extern from scheduler.cpp /
+//  debug_utils.cpp / widget.cpp)
+// ==========================================================================
+
+#ifdef _WIN64
+
+// -- Dark Souls 3  (defined in dark_souls3.cpp) ----------------------------
+void     SK_DS3_InitPlugin      (void)                    {}
+bool WINAPI SK_DS3_ShutdownPlugin (const wchar_t*)        { return false; }
+HRESULT __stdcall SK_DS3_PresentFirstFrame (IUnknown*, UINT, UINT) { return E_NOTIMPL; }
+
+// -- Tales of Vesperia Fix  (defined in tales_of_vesperia.cpp) -------------
+void SK_TVFix_InitPlugin       (void)                       {}
+bool SK_TVFix_SharpenShadows   (void)                       { return false; }
+void SK_TVFix_CreateTexture2D  (D3D11_TEXTURE2D_DESC*)      {}
+bool SK_TVFix_NoRenderSleep    (void)                       { return false; }
+bool SK_TVFix_ActiveAntiStutter(void)                       { return false; }
+
+// -- Yakuza 0  (defined in yakuza0.cpp) ------------------------------------
+void SK_Yakuza0_PlugInInit (void) {}
+bool SK_Yakuza0_PlugInCfg  (void) { return false; }
+
+bool __SK_Yakuza_TrackRTVs   = false;
+bool __SK_Y0_SafetyLeak       = false;
+bool __SK_Y0_FixAniso         = false;
+bool __SK_Y0_ClampLODBias     = false;
+int  __SK_Y0_ForceAnisoLevel  = 0;
+
+void SK_YS0_TriggerHudFreeScreenshot (void) {}
+
+// -- Monster Hunter World  (defined in monster_hunter_world.cpp) -----------
+void SK_MHW_PlugInInit    (void) {}
+void SK_MHW_PlugIn_Shutdown(void) {}
+
+bool __SK_MHW_JobParity         = false;
+bool __SK_MHW_JobParityPhysical = false;
+bool __SK_MHW_KillAntiDebug     = false;
+
+// -- Shenmue  (defined in unclassified.cpp) --------------------------------
+volatile LONG __SK_SHENMUE_FinishedButNotPresented = 0;
+
+bool SK_Shenmue_IsLimiterBypassed   (void)   { return false; }
+bool SK_Shenmue_InitLimiterOverride (LPVOID) { return false; }
+
+// -- NieR Replicant v1.5  (defined in nier_replicant_v1.5.cpp) ------------
+volatile LONG _SK_NIER_RAD_InputPollingPeriod = 8;
+
+// -- Init/config stubs for remaining x64-only plugins ----------------------
+void SK_DGPU_InitPlugin         (void) {}
+void SK_IT_InitPlugin           (void) {}
+void SK_NNK2_InitPlugin         (void) {}
+void SK_YS8_InitPlugin          (void) {}
+void SK_ER_InitPlugin           (void) {}
+void SK_ELEX2_InitPlugin        (void) {}
+void SK_BGS_InitPlugin          (void) {}
+void SK_LOTF2_InitPlugin        (void) {}
+void SK_OPT_InitPlugin          (void) {}
+void SK_ACV_InitPlugin          (void) {}
+void SK_ACS_InitPlugin          (void) {}
+void SK_ACO_PlugInInit          (void) {}
+void SK_DQXI_PlugInInit         (void) {}
+void SK_SM_PlugInInit           (void) {}
+void SK_NIER_RAD_InitPlugin     (void) {}
+void SK_FF7R_InitPlugin         (void) {}
+void SK_Sekiro_InitPlugin       (void) {}
+void SK_FFXVI_InitPlugin        (void) {}
+void SK_FFXV_InitPlugin         (void) {}
+void SK_FFXV_SetupThreadPriorities (void) {}
+void SK_Metaphor_InitPlugin     (void) {}
+void SK_SO2R_InitPlugin         (void) {}
+void SK_EnderLilies_InitPlugIn  (void) {}
+void SK_SilentHill_f_InitPlugIn (void) {}
+void SK_WatchDogs_InitPlugin    (void) {}
+void SK_Okami_LoadConfig        (void) {}
+void __stdcall SK_HatsuneMiku_BeginFrame (void) {}
+
+bool SK_NIER_RAD_PlugInCfg     (void) { return false; }
+bool SK_Okami_PlugInCfg        (void) { return false; }
+bool SK_LSBTS_PlugInCfg        (void) { return false; }
+bool SK_POE2_PlugInCfg         (void) { return false; }
+bool SK_SO4_PlugInCfg          (void) { return false; }
+bool SK_ACO_PlugInCfg          (void) { return false; }
+bool SK_SM_PlugInCfg           (void) { return false; }
+bool SK_FFXV_PlugInCfg         (void) { return false; }
+bool SK_FarCry6_PlugInCfg      (void) { return false; }
+bool SK_SO2R_PlugInCfg         (void) { return false; }
+bool SK_SilentHill_f_PlugInCfg (void) { return false; }
+
+bool SK_SO2R_DrawHandler (ID3D11DeviceContext*, uint32_t, int) { return false; }
+
+// -- FFXV thread-priority management  (defined in unclassified.cpp) --------
+//    debug_utils.cpp forward-declares this struct and holds extern refs to
+//    the lazy globals; unclassified.cpp provides the definitions.  Provide
+//    no-op stubs here so Release x64 links cleanly.
+struct SK_FFXV_Thread
+{
+           HANDLE           hThread  = nullptr;
+  volatile LONG             dwPrio   = THREAD_PRIORITY_NORMAL;
+  sk::ParameterInt*         prio_cfg = nullptr;
+
+  void setup (HANDLE hNewThread) { (void)hNewThread; }
+};
+
+SK_LazyGlobal <SK_FFXV_Thread> sk_ffxv_vsync,
+                                sk_ffxv_async_run;
+
+#endif // _WIN64
+
 #endif // SK_SIDECAR_MINIMAL
