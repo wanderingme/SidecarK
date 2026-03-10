@@ -831,7 +831,7 @@ namespace SK {
 
 SK_ScreenshotQueue      enqueued_screenshots = { };
 SK_ScreenshotQueue      enqueued_sounds      = { };
-SK_ScreenshotTitleQueue enqueued_titles;
+SK_ScreenshotTitleQueue enqueued_titles { "", "", "", "", "" };
 
 SK_ScreenshotQueue::MemoryTotals    SK_ScreenshotQueue::pooled;
 SK_Screenshot::framebuffer_s::PinnedBuffer SK_Screenshot::framebuffer_s::root_;
@@ -1028,7 +1028,7 @@ SK_Screenshot::SK_Screenshot (bool clipboard_only) :
 
 void SK_Screenshot::sanitizeFilename (bool) { }
 
-void           SK_ScreenshotManager::init         (void)               { }
+void           SK_ScreenshotManager::init         (void)     noexcept  { }
 const wchar_t* SK_ScreenshotManager::getBasePath  (void) const         { return L""; }
 bool SK_ScreenshotManager::checkDiskSpace  (uint64_t)           const  { return true;  }
 bool SK_ScreenshotManager::copyToClipboard (const DirectX::Image&,
@@ -1265,7 +1265,7 @@ SK_NtLdr_UnlockLoaderLock (ULONG, ULONG_PTR) { return 0; }
 //  Process / thread termination stubs  (excluded debug_utils.cpp)
 // ==========================================================================
 
-void __stdcall SK_ExitProcess    (UINT uExitCode)      { ExitProcess (uExitCode); }
+void __stdcall SK_ExitProcess    (UINT uExitCode) noexcept { ExitProcess (uExitCode); }
 void __stdcall SK_SetLastError   (DWORD dwErrCode) noexcept { SetLastError (dwErrCode); }
 
 int __stdcall SK_TerminateProcess (UINT uExitCode)
@@ -1274,16 +1274,16 @@ int __stdcall SK_TerminateProcess (UINT uExitCode)
   return 0;
 }
 
-int __stdcall SK_TerminateProcess (HANDLE hProcess, UINT uExitCode)
+BOOL __stdcall SK_TerminateProcess (HANDLE hProcess, UINT uExitCode) noexcept
 {
   TerminateProcess (hProcess, uExitCode);
-  return 0;
+  return TRUE;
 }
 
-int __stdcall SK_TerminateThread (HANDLE hThread, ULONG dwExitCode)
+BOOL __stdcall SK_TerminateThread (HANDLE hThread, DWORD dwExitCode) noexcept
 {
   TerminateThread (hThread, dwExitCode);
-  return 0;
+  return TRUE;
 }
 
 
@@ -1367,7 +1367,7 @@ long SK_Decompress7zEx (const wchar_t*, const wchar_t*,
 //  dbghelp stubs — SymLoadModule  (x86 stdcall @24)
 // ==========================================================================
 
-DWORD64 IMAGEAPI SymLoadModule (HANDLE, HANDLE, PCSTR, PCSTR, DWORD, DWORD)
+DWORD IMAGEAPI SymLoadModule (HANDLE, HANDLE, PCSTR, PCSTR, DWORD, DWORD)
 { return 0; }
 
 
