@@ -281,7 +281,9 @@ SK_BootD3D9 (void)
 
     if (config.textures.d3d9_mod)
     {
+#ifndef SK_SIDECAR_MINIMAL
       tex_mgr.Init ();
+#endif
     }
 
     dll_log->Log (
@@ -299,7 +301,9 @@ SK_BootD3D9 (void)
     if ( config.textures.d3d9_mod ||
          config.render.d3d9.force_d3d9ex )
     {
+#ifndef SK_SIDECAR_MINIMAL
       tex_mgr.Hook ();
+#endif
     }
 
     SK_HookD3D9    ();

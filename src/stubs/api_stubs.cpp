@@ -44,6 +44,9 @@
 // ---- Vulkan headers (SK_Reflex_SetVulkanSwapchain, SK_VK_SetLatencyMarker)
 #include <vulkan/vulkan.h>
 
+// ---- Widget / frame history (SK_ImGui_FrameHistory, SK_Stat_DataHistory)
+#include <SpecialK/widgets/widget.h>
+
 
 // ==========================================================================
 //  Direct3D 9 factory / passthrough stubs
@@ -489,8 +492,7 @@ SK_RenderBackend_V2::latency_monitor_s SK_RenderBackend_V2::latency;
 void SK_RenderBackend_V2::latency_monitor_s::reset (void) { }
 void SK_RenderBackend_V2::latency_monitor_s::submitQueuedFrame (IDXGISwapChain1*) { }
 
-void SK::D3D9::TextureManager::Init (void) { }
-void SK::D3D9::TextureManager::Hook (void) { }
+// SK::D3D9::TextureManager::Init/Hook — guarded at call site in render_backend.cpp
 
 
 // ==========================================================================
@@ -566,6 +568,15 @@ SK_LazyGlobal <pagefile_perf_t> SK_WMI_PagefileStats;
 //  Framerate stubs  (excluded widgets/cpu_widget.cpp, frame_pacing.cpp)
 // ==========================================================================
 
+// SK_ImGui_FrameHistory is defined locally in framerate.cpp; define SK_ImGui_Frames
+// here so the excluded frame_pacing.cpp doesn't need to be compiled.
+class SK_ImGui_FrameHistory : public SK_Stat_DataHistory <float, 120>
+{
+public:
+  void timeFrame (double seconds) { addValue ((float)(1000.0 * seconds)); }
+};
+SK_LazyGlobal <SK_ImGui_FrameHistory> SK_ImGui_Frames;
+
 bool    __SK_DoubleUpOnReflex         = false;
 bool    SK_CPU_IsZen                  (void)    { return false; }
 float   SK_Framerate_GetPercentileByIdx (int)   { return 0.0f; }
@@ -611,9 +622,9 @@ void __stdcall RtlReleasePebLock_Detour (void) { }
 
 const wchar_t* SK_Steam_PopupOriginToWStr (int) { return L"TopLeft"; }
 
-extern "C" void __stdcall SteamAPI_ManualDispatch_Init_Detour (void) { }
+void __cdecl SteamAPI_ManualDispatch_Init_Detour (void) { }
 
-BOOL __stdcall SK_ImGui_WidgetRegistry::SaveConfig (void) { return FALSE; }
+int SK_ImGui_WidgetRegistry::SaveConfig (void) { return 0; }
 
 
 // ==========================================================================
@@ -643,7 +654,7 @@ DWORD WINAPI SK_MonitorPagefile (LPVOID) { return 0; }
 void SK::Diagnostics::CrashHandler::Reinstall (void) { }
 void SK::Diagnostics::CrashHandler::Shutdown  (void) { }
 void SK::SteamAPI::Shutdown                   (void) { }
-void SK::Xbox::Init                           (void) { }
+// SK::Xbox::Init — guarded at call site in core.cpp
 
 void SK_EndGPUPolling                     (void) { }
 void SK_File_InitHooks                    (void) { }
@@ -694,8 +705,8 @@ void  WINAPI SK_OutputDebugStringA    (LPCSTR  msg)       { OutputDebugStringA (
 void  WINAPI SK_OutputDebugStringW    (LPCWSTR msg)       { OutputDebugStringW (msg); }
 LPVOID WINAPI SK_AddVectoredExceptionHandler (ULONG first, PVECTORED_EXCEPTION_HANDLER handler)
                                               { return AddVectoredExceptionHandler (first, handler); }
-LPVOID WINAPI SK_LocalAlloc  (UINT uFlags, SIZE_T uBytes) { return LocalAlloc  (uFlags, uBytes); }
-LPVOID WINAPI SK_LocalFree   (HLOCAL hMem)                { return LocalFree   (hMem); }
+HLOCAL WINAPI SK_LocalAlloc  (UINT uFlags, SIZE_T uBytes) noexcept { return LocalAlloc  (uFlags, uBytes); }
+HLOCAL WINAPI SK_LocalFree   (HLOCAL hMem)                noexcept { return LocalFree   (hMem); }
 
 void SK_RaiseException (DWORD code, DWORD flags, DWORD nArgs, const ULONG_PTR* args)
 {
@@ -723,7 +734,7 @@ volatile ULONG64 SK_Reflex_LastFrameMarked = 0;
 //  Widget registry  (from excluded widget.cpp / control_panel files)
 // ==========================================================================
 
-BOOL SK_ImGui_WidgetRegistry::DispatchKeybinds (BOOL, BOOL, BOOL, UINT) { return FALSE; }
+BOOL SK_ImGui_WidgetRegistry::DispatchKeybinds (BOOL, BOOL, BOOL, BYTE) { return FALSE; }
 
 // ==========================================================================
 //  Additional HDR globals  (from excluded widgets/hdr.cpp)

@@ -2117,7 +2117,6 @@ void SK_Framerate_SetPowerThrottlingPolicy (bool always_high_res)
   }
 }
 
-#ifndef SK_SIDECAR_MINIMAL
 class SK_ImGui_FrameHistory : public SK_Stat_DataHistory <float, 120>
 {
 public:
@@ -2128,7 +2127,6 @@ public:
 };
 
 extern SK_LazyGlobal <SK_ImGui_FrameHistory> SK_ImGui_Frames;
-#endif // !SK_SIDECAR_MINIMAL
 extern bool                                  reset_frame_history;
 
 void

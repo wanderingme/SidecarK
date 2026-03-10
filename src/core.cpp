@@ -1321,7 +1321,9 @@ DllThread (LPVOID user)
       // This must initialize COM, do it from a separate thread to avoid
       //   ReShade constructing objects that require COM and keeping them
       //     active after this function goes out of scope.
+#ifndef SK_SIDECAR_MINIMAL
       SK::Xbox::Init             ();
+#endif
       SK_D3D_SetupShaderCompiler ();
 
       WritePointerRelease ( (volatile PVOID *)(&hInitThread),
