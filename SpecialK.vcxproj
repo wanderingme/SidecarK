@@ -2444,6 +2444,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
     </ClCompile>
     <ClCompile Include="src\plugins\plugin_mgr.cpp" />
     <ClCompile Include="src\plugins\plugin_stubs.cpp" />
+    <ClCompile Include="src\stubs\api_stubs.cpp" />
     <ClCompile Include="src\plugins\reshade.cpp">
       <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
