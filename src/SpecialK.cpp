@@ -721,6 +721,11 @@ DllMain ( HMODULE hModule,
     //
     case DLL_PROCESS_ATTACH:
     {
+      // Prevent DLL_THREAD_ATTACH / DLL_THREAD_DETACH notifications; they are
+      // unused by SidecarK and eliminating them removes per-thread overhead
+      // that would otherwise compound injection cost.
+      DisableThreadLibraryCalls (hModule);
+
       GetModuleFileNameW (hModule, __sk_attach_module_path, MAX_PATH);
 
       // NOTE: sk_alive.txt diagnostic write intentionally removed from DllMain.

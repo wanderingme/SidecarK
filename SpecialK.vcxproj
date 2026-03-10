@@ -611,7 +611,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <Profile>false</Profile>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <OptimizeReferences>true</OptimizeReferences>
-      <EnableCOMDATFolding>false</EnableCOMDATFolding>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <AdditionalOptions>/GUARD:NO /IGNORE:4099,4286 %(AdditionalOptions)</AdditionalOptions>
       <LinkErrorReporting>NoErrorReport</LinkErrorReporting>
@@ -853,7 +853,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <Profile>false</Profile>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <OptimizeReferences>true</OptimizeReferences>
-      <EnableCOMDATFolding>false</EnableCOMDATFolding>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <AdditionalOptions>/GUARD:NO /IGNORE:4099,4286 %(AdditionalOptions)</AdditionalOptions>
       <LinkErrorReporting>NoErrorReport</LinkErrorReporting>

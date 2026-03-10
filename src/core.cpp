@@ -2605,40 +2605,61 @@ SK_StartupCore (const wchar_t* backend, void* callback)
 
     if (SK_IsSidecarKMode ())
     {
-      // SidecarK mode: defer hook installation to reduce injection hitch.
-      // A background thread runs the QuickHook + ApplyQueuedHooks after a
-      // brief delay so the game can initialize without competing with
-      // trampoline writes on the loader-lock path.
-      static constexpr DWORD kSidecarK_HookDeferMs = 1500UL;
+      // SidecarK mode: lazy API detection — poll every 50 ms until a supported
+      // graphics module appears, then install minimal trampoline hooks for that
+      // backend only.  This replaces the old fixed 1500 ms sleep and ensures
+      // hooks are installed only after the module is actually present, mirroring
+      // the behaviour of Steam overlay / RTSS to minimise injection hitch.
+      //
+      // Supported backends: DX11, DX12 (via DXGI), OpenGL.
+      // Excluded backends:  Vulkan, D3D9, D3D8, DDraw (no SKF1 consumer).
       SK_Thread_CreateEx ([] (LPVOID) -> DWORD
       {
-        Sleep (kSidecarK_HookDeferMs);
+        constexpr DWORD kPollIntervalMs = 50UL;
+        constexpr ULONGLONG kPollTimeoutMs = 30000ULL;
+        const ULONGLONG t0 = GetTickCount64 ();
+        bool dxgi_detected = false;
+        bool gl_detected   = false;
 
-        bool gl = false, vulkan = false, d3d9 = false, d3d11 = false, d3d12 = false,
-           dxgi = false, d3d8   = false, ddraw = false, glide = false;
+        // Wait until d3d11.dll, d3d12.dll, or opengl32.dll is loaded.
+        // Use wall-clock time so the limit is accurate even when GetModuleHandleW
+        // or Sleep are slow under system load.
+        // Only the first match is acted upon; no other API is initialised.
+        while ((GetTickCount64 () - t0) < kPollTimeoutMs)
+        {
+          if ( GetModuleHandleW (L"d3d11.dll") ||
+               GetModuleHandleW (L"d3d12.dll") )
+          {
+            dxgi_detected = true;
+            break;
+          }
 
-        SK_TestRenderImports (
-          SK_GetModuleHandle (nullptr),
-            &gl, &vulkan,
-              &d3d9, &dxgi, &d3d11, &d3d12,
-                &d3d8, &ddraw, &glide );
+          if ( GetModuleHandleW (L"opengl32.dll") )
+          {
+            gl_detected = true;
+            break;
+          }
 
-        dxgi  |= SK_IsModuleLoaded (L"dxgi.dll");
-        d3d11 |= SK_IsModuleLoaded (L"d3d11.dll");
-        d3d12 |= SK_IsModuleLoaded (L"d3d12.dll");
-        d3d9  |= SK_IsModuleLoaded (L"d3d9.dll");
+          Sleep (kPollIntervalMs);
+        }
 
-        if ( ( dxgi || d3d11 || d3d12 ||
-               d3d8 || ddraw ) && ( config.apis.dxgi.d3d11.hook
-                                 || config.apis.dxgi.d3d12.hook ) )
+        OutputDebugStringA (
+          dxgi_detected ? "SidecarK: DXGI/D3D11/D3D12 detected; installing DXGI QuickHook\n" :
+          gl_detected   ? "SidecarK: OpenGL detected; hooks deferred to SK_BootOpenGL\n"      :
+                          "SidecarK: graphics module poll timed out\n"
+        );
+
+        // Install minimal trampoline hooks for the detected backend only.
+        // D3D9 / D3D8 / DDraw / Vulkan are intentionally excluded here;
+        // their SK_Boot* functions already return early in SidecarK mode.
+        if (dxgi_detected && ( config.apis.dxgi.d3d11.hook ||
+                               config.apis.dxgi.d3d12.hook   ))
         {
           SK_DXGI_QuickHook ();
         }
 
-        if (d3d9 && (config.apis.d3d9.hook || config.apis.d3d9ex.hook))
-        {
-          SK_D3D9_QuickHook ();
-        }
+        // OpenGL hooks are set up through SK_BootOpenGL → SK_HookGL when the
+        // first wglSwapBuffers call arrives; no QuickHook analog is needed here.
 
         void SK_Streamline_InitBypass (void);
              SK_Streamline_InitBypass ();
