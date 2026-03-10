@@ -694,11 +694,13 @@ extern void BasicInit (void);
 
   if (SK_GetDLLRole () != DLL_ROLE::DInput8)
   {
+#ifndef SK_SIDECAR_MINIMAL
     if (SK_GetModuleHandle (L"dinput8.dll"))
       SK_Input_HookDI8  ();
 
     if (SK_GetModuleHandle (L"dinput.dll"))
       SK_Input_HookDI7  ();
+#endif
   }
 
   SK_Input_Init ();
@@ -3224,6 +3226,7 @@ SK_ShutdownCore (const wchar_t* backend)
 
   // Reset haptics
   //
+#ifndef SK_SIDECAR_MINIMAL
   for (auto& ps_controller : SK_HID_PlayStationControllers)
   {
     if (ps_controller._vibration.last_set > SK::ControlPanel::current_time - 500UL)
@@ -3233,6 +3236,7 @@ SK_ShutdownCore (const wchar_t* backend)
       SK_SleepEx (15UL, FALSE);
     }
   }
+#endif
 
 
 
@@ -3338,7 +3342,9 @@ SK_ShutdownCore (const wchar_t* backend)
   SK_Win32_CleanupDummyWindow ();
 
   // No more exit rumble, please :)
+#ifndef SK_SIDECAR_MINIMAL
   SK_XInput_Enable (FALSE);
+#endif
 
   if (config.window.background_mute)
     SK_SetGameMute (false);
@@ -3871,7 +3877,13 @@ SK_FrameCallback ( SK_RenderBackend& rb,
           }
         }
 
-        SK_RunOnce (SK_Input_HookScePad ());
+        SK_RunOnce (
+#ifndef SK_SIDECAR_MINIMAL
+          SK_Input_HookScePad ()
+#else
+          (void)0
+#endif
+        );
 
         if (rb.api != SK_RenderAPI::D3D12  &&
             rb.api != SK_RenderAPI::D3D11  &&
@@ -4838,7 +4850,9 @@ SK_EndBufferSwap (HRESULT hr, IUnknown* device, SK_TLS* pTLS)
 
   // Always refresh at the beginning of a frame rather than the end,
   //   a failure event may cause a lengthy delay, missing VBLANK.
+#ifndef SK_SIDECAR_MINIMAL
   SK_XInput_DeferredStatusChecks ();
+#endif
 
 
   SK_ScePad_PaceMaker ();

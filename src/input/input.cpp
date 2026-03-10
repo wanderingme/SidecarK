@@ -182,7 +182,12 @@ SK_ImGui_WantGamepadCapture (bool update)
     extern XINPUT_STATE
          SK_ImGui_XInputState;
     if ((SK_ImGui_XInputState.Gamepad.wButtons & XINPUT_GAMEPAD_GUIDE) ||
-                  ((hid_to_xi.Gamepad.wButtons & XINPUT_GAMEPAD_GUIDE) && SK_HID_GetActivePlayStationDevice () != nullptr))
+#ifndef SK_SIDECAR_MINIMAL
+                  ((hid_to_xi.Gamepad.wButtons & XINPUT_GAMEPAD_GUIDE) && SK_HID_GetActivePlayStationDevice () != nullptr)
+#else
+                  false
+#endif
+       )
     {                                                                  // Checking for at least one connected controller fixes the comment above
       imgui_capture = true;
     }
@@ -663,14 +668,18 @@ void SK_Input_PreInit (void)
 
   if (config.input.gamepad.hook_xinput)
   {
+#ifndef SK_SIDECAR_MINIMAL
     SK_XInput_InitHotPlugHooks ();
+#endif
   }
 
   SK_Input_PreHookWinMM ();
 
   if (config.input.gamepad.hook_dinput8)
   {
+#ifndef SK_SIDECAR_MINIMAL
     SK_Input_PreHookDI8 ();
+#endif
   }
 
   if (bEnableHooks)
@@ -732,11 +741,14 @@ SK_Input_Init (void)
   bool bEnable =
     SK_DisableApplyQueuedHooks ();
 
+#ifndef SK_SIDECAR_MINIMAL
   SK_Input_PreHookHID ();
+#endif
 
   if (config.input.gamepad.hook_raw_input)
     SK_Input_HookRawInput ();
 
+#ifndef SK_SIDECAR_MINIMAL
   if (config.input.gamepad.hook_windows_gaming)
     SK_Input_HookWGI ();
 
@@ -747,6 +759,7 @@ SK_Input_Init (void)
   {
     SK_Input_PreHookXInput ();
   }
+#endif
 
   if (config.input.gamepad.hook_scepad)
   {
@@ -756,6 +769,7 @@ SK_Input_Init (void)
     //  SK_Input_HookScePad ();
   }
 
+#ifndef SK_SIDECAR_MINIMAL
   if (SK_GetDLLRole () != DLL_ROLE::DInput8)
   {
     if (SK_GetModuleHandle (L"dinput8.dll"))
@@ -764,6 +778,7 @@ SK_Input_Init (void)
     if (SK_GetModuleHandle (L"dinput.dll"))
       SK_Input_HookDI7  ();
   }
+#endif
 
   SK_Input_InitKeyboard ();
 

@@ -151,6 +151,16 @@ namespace ImPlot {
 
 
 // ==========================================================================
+//  DStorage stub
+//  (defined in dstorage.cpp; SK_DStorage_Init called from load_library.cpp
+//   without SK_SIDECAR_MINIMAL guard for dstorage.dll and dstoragecore.dll
+//   LoadLibrary intercept)
+// ==========================================================================
+
+void SK_DStorage_Init (void) {}
+
+
+// ==========================================================================
 //  Streamline stubs
 //  (defined in streamline.cpp; called from render_backend.cpp, dxgi.cpp,
 //   load_library.cpp, and the SidecarK bootstrap thread)

@@ -515,25 +515,57 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
     }
     else if (   StrStrI  (lpFileName, SK_TEXT("GameInput.dll")) ||
                 StrStrIW (wszCallingMod,     L"GameInput.dll")  )
+#ifndef SK_SIDECAR_MINIMAL
       SK_RunOnce (SK_Input_HookGameInput ());
+#else
+      (void)0;
+#endif
     else if (   StrStrI  (lpFileName, SK_TEXT("GameInputRedist.dll")) ||
                 StrStrIW (wszCallingMod,     L"GameInputRedist.dll")  )
+#ifndef SK_SIDECAR_MINIMAL
       SK_RunOnce (SK_Input_HookGameInput ());
+#else
+      (void)0;
+#endif
     else if (   //SK_XInput_LinkedVersion.empty () &&
                 StrStrI (lpFileName, SK_TEXT("xinput1_3.dll")) )
+#ifndef SK_SIDECAR_MINIMAL
                      SK_RunOnce (SK_Input_HookXInput1_3 ());
+#else
+                     (void)0;
+#endif
     else if (   //SK_XInput_LinkedVersion.empty () &&
                 StrStrI (lpFileName, SK_TEXT("xinput1_4.dll")) )
+#ifndef SK_SIDECAR_MINIMAL
                      SK_RunOnce (SK_Input_HookXInput1_4 ());
+#else
+                     (void)0;
+#endif
     else if (   //SK_XInput_LinkedVersion.empty () &&
                 StrStrI (lpFileName, SK_TEXT("xinput9_1_0.dll")) )
+#ifndef SK_SIDECAR_MINIMAL
                      SK_RunOnce (SK_Input_HookXInput9_1_0 ());
+#else
+                     (void)0;
+#endif
     else if (   StrStrI (lpFileName, SK_TEXT("dinput8.dll")) )
+#ifndef SK_SIDECAR_MINIMAL
       SK_RunOnce (SK_Input_HookDI8 ());
+#else
+      (void)0;
+#endif
     else if (   StrStrI (lpFileName, SK_TEXT("dinput.dll")) )
+#ifndef SK_SIDECAR_MINIMAL
       SK_RunOnce (SK_Input_HookDI7 ());
+#else
+      (void)0;
+#endif
     else if (   StrStrI (lpFileName, SK_TEXT("hid.dll")) )
+#ifndef SK_SIDECAR_MINIMAL
       SK_RunOnce (SK_Input_HookHID ());
+#else
+      (void)0;
+#endif
     else if (   StrStrI ( lpFileName, SK_TEXT("EOSSDK-Win")) ||
                 StrStrIW (wszCallingMod,     L"EOSSDK-Win") )
       SK_RunOnce (SK::EOS::Init (false));
@@ -547,7 +579,11 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
       SK_RunOnce (SK::Galaxy::Init ());
     else if (   StrStrI ( lpFileName, SK_TEXT("libScePad")) ||
                 StrStrIW (wszCallingMod,     L"libScePad") )
+#ifndef SK_SIDECAR_MINIMAL
       SK_RunOnce (SK_Input_HookScePad ());
+#else
+      (void)0;
+#endif
     else if (   StrStrI ( lpFileName, SK_TEXT("mono-2.0-bdwgc.dll")) ||
                 StrStrIW (wszCallingMod,     L"mono-2.0-bdwgc.dll") )
     {
