@@ -1125,6 +1125,7 @@ void BasicInit (void)
   // Cleanup any leftover temporary files from the last launch
   SK_DeleteTemporaryFiles ();
 
+#ifndef SK_SIDECAR_MINIMAL
   // Add a notification that will not go away until a user reads it...
   SK_ImGui_CreateNotification (
     "Notification.HelloWorld", SK_ImGui_Toast::Success,
@@ -1134,6 +1135,7 @@ void BasicInit (void)
              SK_ImGui_Toast::ShowTitle   |
              SK_ImGui_Toast::ShowOnce    |
              SK_ImGui_Toast::UseDuration );
+#endif
 
   // Prewarm the usermode driver so we can do other initialization that
   //   depends on knowing whether nvgf2umx is active in the software or not.
@@ -1143,6 +1145,7 @@ void BasicInit (void)
   // Setup unhooked function pointers
   SK_PreInitLoadLibrary ();
 
+#ifndef SK_SIDECAR_MINIMAL
   if (config.system.handle_crashes)
     SK::Diagnostics::CrashHandler::Init   ();
   SK::Diagnostics::CrashHandler::InitSyms ();
@@ -1159,19 +1162,24 @@ void BasicInit (void)
 
   SK::EOS::Init    (false);
   SK::Galaxy::Init (     );
+#endif
 
   //// Do this from the startup thread [these functions queue, but don't apply]
   if (! config.input.dont_hook_core)
   {
     // TODO: Split this into Keyboard hooks and Mouse hooks
     //         and allow picking them individually
+#ifndef SK_SIDECAR_MINIMAL
     SK_Input_PreInit        (); // Hook only symbols in user32 and kernel32
+#endif
   }
   SK_HookWinAPI             ();
+#ifndef SK_SIDECAR_MINIMAL
   SK_CPU_InstallHooks       ();
   SK_NvAPI_PreInitHDR       ();
   SK_NvAPI_InitializeHDR    ();
   SK_DStorage_Init          ();
+#endif
 
   ////// For the global injector, when not started by SKIM, check its version
   ////if ( (SK_IsInjected () && (! SK_IsSuperSpecialK ())) )
@@ -2380,7 +2388,14 @@ SK_StartupCore (const wchar_t* backend, void* callback)
   if (! __SK_bypass)
   {
     SK_D3D11_InitMutexes ();
+
+    // SidecarK mode: skip ImGui context + font-atlas construction entirely.
+    // The SKF1 overlay blits pixels directly from shared memory — it does not
+    // use ImGui for rendering.  Font loading is the single largest DllMain
+    // synchronous cost; eliminating it removes the visible injection hitch.
+#ifndef SK_SIDECAR_MINIMAL
     SK_ImGui_Init        ();
+#endif
 
 #ifndef _THREADED_BASIC_INIT
     BasicInit ();
@@ -2615,11 +2630,13 @@ SK_StartupCore (const wchar_t* backend, void* callback)
       // Excluded backends:  Vulkan, D3D9, D3D8, DDraw (no SKF1 consumer).
       SK_Thread_CreateEx ([] (LPVOID) -> DWORD
       {
-        constexpr DWORD kPollIntervalMs = 50UL;
-        constexpr ULONGLONG kPollTimeoutMs = 30000ULL;
-        const ULONGLONG t0 = GetTickCount64 ();
+        constexpr DWORD     kPollIntervalMs = 25UL;
+        constexpr ULONGLONG kPollTimeoutMs  = 30000ULL;
+        const ULONGLONG     t0              = GetTickCount64 ();
         bool dxgi_detected = false;
         bool gl_detected   = false;
+
+        OutputDebugStringA ("SidecarK: bootstrap thread started; polling for graphics API\n");
 
         // Wait until d3d11.dll, d3d12.dll, or opengl32.dll is loaded.
         // Use wall-clock time so the limit is accurate even when GetModuleHandleW
@@ -2643,11 +2660,15 @@ SK_StartupCore (const wchar_t* backend, void* callback)
           Sleep (kPollIntervalMs);
         }
 
-        OutputDebugStringA (
-          dxgi_detected ? "SidecarK: DXGI/D3D11/D3D12 detected; installing DXGI QuickHook\n" :
-          gl_detected   ? "SidecarK: OpenGL detected; hooks deferred to SK_BootOpenGL\n"      :
-                          "SidecarK: graphics module poll timed out\n"
-        );
+        {
+          char __t[112] = {};
+          wsprintfA (__t,
+            dxgi_detected ? "SidecarK: DXGI/D3D detected dt_ms=%llu; installing DXGI QuickHook\n"    :
+            gl_detected   ? "SidecarK: OpenGL detected dt_ms=%llu; hooks deferred to SK_BootOpenGL\n" :
+                            "SidecarK: graphics module poll timed out dt_ms=%llu\n",
+            (unsigned long long)(GetTickCount64 () - t0));
+          OutputDebugStringA (__t);
+        }
 
         // Install minimal trampoline hooks for the detected backend only.
         // D3D9 / D3D8 / DDraw / Vulkan are intentionally excluded here;
@@ -2655,7 +2676,14 @@ SK_StartupCore (const wchar_t* backend, void* callback)
         if (dxgi_detected && ( config.apis.dxgi.d3d11.hook ||
                                config.apis.dxgi.d3d12.hook   ))
         {
+          const ULONGLONG tHook0 = GetTickCount64 ();
           SK_DXGI_QuickHook ();
+          {
+            char __t[80] = {};
+            wsprintfA (__t, "SidecarK: DXGI QuickHook installed dt_ms=%llu\n",
+                       (unsigned long long)(GetTickCount64 () - tHook0));
+            OutputDebugStringA (__t);
+          }
         }
 
         // OpenGL hooks are set up through SK_BootOpenGL → SK_HookGL when the
@@ -2673,6 +2701,8 @@ SK_StartupCore (const wchar_t* backend, void* callback)
           }
           if (! bEnable) SK_DisableApplyQueuedHooks ();
         }
+
+        OutputDebugStringA ("SidecarK: bootstrap thread complete; hooks applied\n");
 
         return 0;
       }, nullptr, nullptr);

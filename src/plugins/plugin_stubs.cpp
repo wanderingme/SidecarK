@@ -149,6 +149,85 @@ namespace ImPlot {
 //  debug_utils.cpp / widget.cpp)
 // ==========================================================================
 
+
+// ==========================================================================
+//  Streamline stubs
+//  (defined in streamline.cpp; called from render_backend.cpp, dxgi.cpp,
+//   load_library.cpp, and the SidecarK bootstrap thread)
+// ==========================================================================
+
+bool SK_COMPAT_CheckStreamlineSupport (HMODULE) { return true; }
+
+void SK_Streamline_InitBypass         (void)    {}
+
+
+// ==========================================================================
+//  NV Reflex global stubs
+//  (defined in reflex.cpp; referenced as extern from dxgi.cpp)
+// ==========================================================================
+
+#include <SpecialK/nvapi.h>
+
+bool                     SK_Reflex_AllowPresentEndMarker    = true;
+bool                     SK_Reflex_AllowPresentStartMarker  = true;
+NvU64                    SK_Reflex_LastNativeFramePresented  = 0ULL;
+IUnknown*                SK_Reflex_LastLatencyDevice         = nullptr;
+NV_LATENCY_MARKER_PARAMS SK_Reflex_LastLatencyMarkerParams   = {};
+
+
+// ==========================================================================
+//  PCL stats stubs
+//  (defined in pclstats.cpp; PCLSTATS_SHUTDOWN called from core.cpp teardown)
+// ==========================================================================
+
+// Forward-declare only what is referenced from non-excluded translation units.
+// pclstats.h is NOT included here to avoid pulling in TRACELOGGING_DECLARE_PROVIDER
+// which would require a matching TRACELOGGING_DEFINE_PROVIDER definition.
+// PCLSTATS_MARKER / PCLSTATS_IS_SIGNALED / g_PCLStatsFlags are only used in
+// reflex.cpp which is already excluded from SidecarK builds.
+void PCLSTATS_INIT     (unsigned int) {}
+void PCLSTATS_SHUTDOWN (void)         {}
+
+
+// ==========================================================================
+//  NGX / DLSS stubs
+//  (defined in ngx.cpp; referenced by dxgi.cpp and load_library.cpp)
+// ==========================================================================
+
+bool __SK_IsDLSSGActive = false;
+
+int  SK_NGX_DLSSG_GetMultiFrameCount      (void)                   { return 1; }
+void SK_NGX_EstablishDLSSVersion          (const wchar_t*) noexcept {}
+void SK_NGX_EstablishDLSSGVersion         (const wchar_t*) noexcept {}
+
+
+// ==========================================================================
+//  Screenshot subsystem stubs
+//  (defined in screenshot.cpp; SK_Screenshot_ProcessQueue called from
+//   dxgi.cpp, opengl.cpp, imgui_d3d11.cpp, imgui_d3d12.cpp)
+// ==========================================================================
+
+#include <SpecialK/render/screenshot.h>
+
+void SK_Screenshot_ProcessQueue (SK_ScreenshotStage, SK_RenderBackend&) {}
+
+
+// ==========================================================================
+//  ImGui DX9 backend stubs
+//  (defined in imgui_d3d9.cpp; ImGui_ImplDX9_NewFrame and
+//   ImGui_ImplDX9_RenderDrawData are referenced from control_panel.cpp)
+// ==========================================================================
+
+#include <imgui/backends/imgui_d3d9.h>
+
+bool ImGui_ImplDX9_Init                    (void*, IDirect3DDevice9*, D3DPRESENT_PARAMETERS*) { return false; }
+void ImGui_ImplDX9_Shutdown                (void)                   {}
+void ImGui_ImplDX9_NewFrame                (void)                   {}
+void ImGui_ImplDX9_InvalidateDeviceObjects (D3DPRESENT_PARAMETERS*) {}
+bool ImGui_ImplDX9_CreateDeviceObjects     (void)                   { return false; }
+void ImGui_ImplDX9_RenderDrawData          (ImDrawData*)            {}
+
+
 #ifdef _WIN64
 
 // -- Dark Souls 3  (defined in dark_souls3.cpp) ----------------------------

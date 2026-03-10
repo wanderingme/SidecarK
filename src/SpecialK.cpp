@@ -877,6 +877,19 @@ DllMain ( HMODULE hModule,
 
       SK_TLS_Bottom ()->debug.in_DllMain = true;
 
+      // SidecarK timing: record DllMain attach timestamp for startup hitch
+      // measurement. Uses GetTickCount64 (no file I/O, loader-lock safe).
+#ifdef SK_SIDECAR_MINIMAL
+      static ULONGLONG s_dllmain_t0 = 0;
+      s_dllmain_t0 = GetTickCount64 ();
+      {
+        char __t[80] = {};
+        wsprintfA (__t, "SidecarK: DllMain attach begin t=0 pid=%lu\n",
+                   (unsigned long)GetCurrentProcessId ());
+        OutputDebugStringA (__t);
+      }
+#endif
+
       // -> Nothing below this can return FALSE until TLS is tidied up (!!)
 
       // We reserve the right to deny attaching the DLL, this will
@@ -897,6 +910,15 @@ DllMain ( HMODULE hModule,
       //   Must hold a reference to this DLL so that removing the global
       //     hook does not crash the game.
       SK_Inject_AcquireProcess ();
+
+#ifdef SK_SIDECAR_MINIMAL
+      {
+        char __t[96] = {};
+        wsprintfA (__t, "SidecarK: DllMain attach end dt_ms=%llu\n",
+                   (unsigned long long)(GetTickCount64 () - s_dllmain_t0));
+        OutputDebugStringA (__t);
+      }
+#endif
 
       return
         ( __SK_DLL_TeardownEvent != nullptr );
