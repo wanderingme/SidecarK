@@ -316,6 +316,11 @@ SK_LoadGPUVendorAPIs (void)
 #endif
       }
 
+      // SLI enumeration, driver version logging and framerate-limit
+      // override are noncritical for the SKF1 compositor; skip them in
+      // minimal SidecarK builds to reduce thread-level CPU contention
+      // during the startup window.
+#ifndef SK_SIDECAR_MINIMAL
       const int num_sli_gpus =
         sk::NVAPI::CountSLIGPUs ();
 
@@ -405,6 +410,7 @@ SK_LoadGPUVendorAPIs (void)
                                     SW_SHOWDEFAULT );
         exit (0);
       }
+#endif /* !SK_SIDECAR_MINIMAL */
     }
 
     // Not NVIDIA, maybe AMD?
@@ -692,6 +698,9 @@ extern void BasicInit (void);
 
   SK_InitRenderBackends ();
 
+  // Input hooks are not needed in SidecarK minimal builds: the overlay
+  //   compositor only cares about Present/SwapBuffers, not game input.
+#ifndef SK_SIDECAR_MINIMAL
   if (SK_GetDLLRole () != DLL_ROLE::DInput8)
   {
     if (SK_GetModuleHandle (L"dinput8.dll"))
@@ -702,6 +711,7 @@ extern void BasicInit (void);
   }
 
   SK_Input_Init ();
+#endif
 
   if (sk::NVAPI::nv_hardware)
   {

@@ -438,7 +438,11 @@ SK_BootDXGI (void)
   if (SK_GetFramesDrawn () > 0)
     return;
 
+  // Streamline compatibility probe is noncritical for the SKF1 compositor;
+  //   skip the DLL walk and hook install in minimal SidecarK builds.
+#ifndef SK_SIDECAR_MINIMAL
   SK_COMPAT_CheckStreamlineSupport ();
+#endif
 
   SK_TLS *pTLS =
     SK_TLS_Bottom ();
@@ -561,6 +565,15 @@ SK_BootOpenGL (void)
 
   if (! config.apis.OpenGL.hook)
     return;
+
+#ifdef SK_SIDECAR_MINIMAL
+  // In SidecarK minimal mode: if a DXGI-class API (D3D11 or D3D12) is
+  //   already loaded, this is not an OpenGL game.  Skip the OpenGL hook
+  //   setup entirely — the SKF1 consumer will use the DXGI Present path.
+  if (SK_GetModuleHandleW (L"d3d11.dll") ||
+      SK_GetModuleHandleW (L"d3d12.dll"))
+    return;
+#endif
 
 #ifndef SK_BUILD__INSTALLER
   static volatile LONG __booted = FALSE;
