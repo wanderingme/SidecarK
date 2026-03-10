@@ -1,21 +1,224 @@
-Severity	Code	Description	Project	File	Line	Suppression State	Details
-Error	C2511	'BOOL SK_ImGui_WidgetRegistry::DispatchKeybinds(BOOL,BOOL,BOOL,UINT)': overloaded member function not found in 'SK_ImGui_WidgetRegistry'	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	726		
-Error	C2039	'Hook': is not a member of 'SK::D3D9'	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	493		
-Error	C2039	'Init': is not a member of 'SK'	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	646		
-Error	C2039	'Init': is not a member of 'SK::D3D9'	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	492		
-Error	C2065	'SK_ImGui_Frames': undeclared identifier	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\framerate.cpp	2978		
-Error	C2065	'SK_ImGui_Frames': undeclared identifier	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\framerate.cpp	3230		
-Error	C2065	'SK_ImGui_Frames': undeclared identifier	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\framerate.cpp	4303		
-Error	C2065	'SK_ImGui_Frames': undeclared identifier	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\framerate.cpp	4304		
-Error	C2373	'SK_ImGui_WidgetRegistry::SaveConfig': redefinition; different type modifiers	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	616		
-Error	C2382	'SK_LocalAlloc': redefinition; different exception specifications	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	697		
-Error	C2382	'SK_LocalFree': redefinition; different exception specifications	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	698		
-Error	C2373	'SteamAPI_ManualDispatch_Init_Detour': redefinition; different type modifiers	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	614		
-Error	C3083	'TextureManager': the symbol to the left of a '::' must be a type	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	492		
-Error	C3083	'TextureManager': the symbol to the left of a '::' must be a type	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	493		
-Error	C3531	'val': a symbol whose type contains 'auto' must have an initializer	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\framerate.cpp	2978		
-Error	C2530	'val': references must be initialized	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\framerate.cpp	2978		
-Error	C3083	'Xbox': the symbol to the left of a '::' must be a type	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	646		
-Error	C2084	function 'void Init(void)' already has a body	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\stubs\api_stubs.cpp	646		
-Error	C2143	syntax error: missing ';' before ')'	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\framerate.cpp	2978		
-Error	C2143	syntax error: missing ';' before ':'	SpecialK	D:\Dropbox\Dropbox\development\VIRULE\SidecarK\SidecarK\src\framerate.cpp	2978		
+223 unresolved externals
+unresolved external symbol "bool reset_frame_history" (?reset_frame_history@@3_NA)
+unresolved external symbol "bool SK::ControlPanel::D3D11::show_shader_mod_dlg" (?show_shader_mod_dlg@D3D11@ControlPanel@SK@@3_NA)
+unresolved external symbol "bool SK_ImGuiEx_Visible" (?SK_ImGuiEx_Visible@@3_NA)
+unresolved external symbol "bool SK_ImGui_GamepadComboDialogActive" (?SK_ImGui_GamepadComboDialogActive@@3_NA)
+unresolved external symbol "bool SK_ImGui_Visible" (?SK_ImGui_Visible@@3_NA)
+unresolved external symbol "bool SK_ImGui_WantExit" (?SK_ImGui_WantExit@@3_NA)
+unresolved external symbol "bool __cdecl SK::D3D8::Shutdown(void)" (?Shutdown@D3D8@SK@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK::D3D8::Startup(void)" (?Startup@D3D8@SK@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK::D3D9::Shutdown(void)" (?Shutdown@D3D9@SK@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK::D3D9::Startup(void)" (?Startup@D3D9@SK@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK::DDraw::Shutdown(void)" (?Shutdown@DDraw@SK@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK::DDraw::Startup(void)" (?Startup@DDraw@SK@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK::DI8::Shutdown(void)" (?Shutdown@DI8@SK@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK::DI8::Startup(void)" (?Startup@DI8@SK@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK::Diagnostics::Debugger::Allow(bool)" (?Allow@Debugger@Diagnostics@SK@@YA_N_N@Z)
+unresolved external symbol "bool __cdecl SK::SteamAPI::SetWindowFocusState(bool)" (?SetWindowFocusState@SteamAPI@SK@@YA_N_N@Z)
+unresolved external symbol "bool __cdecl SKC_IsOverlayEnabled(void)" (?SKC_IsOverlayEnabled@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_AVIF_CopyToClipboard(wchar_t const *)" (?SK_AVIF_CopyToClipboard@@YA_NPB_W@Z)
+unresolved external symbol "bool __cdecl SK_CPU_TestForMWAITX(void)" (?SK_CPU_TestForMWAITX@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_D3D11_ShouldSkipHUD(void)" (?SK_D3D11_ShouldSkipHUD@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_D3D11_ShowShaderModDlg(void)" (?SK_D3D11_ShowShaderModDlg@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_Debug_IsCrashing(void)" (?SK_Debug_IsCrashing@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_HDR_ConvertImageToPNG(struct DirectX::Image const &,class DirectX::ScratchImage &)" (?SK_HDR_ConvertImageToPNG@@YA_NABUImage@DirectX@@AAVScratchImage@2@@Z)
+unresolved external symbol "bool __cdecl SK_HDR_SavePNGToDisk(wchar_t const *,struct DirectX::Image const *,struct DirectX::Image const *,char const *)" (?SK_HDR_SavePNGToDisk@@YA_NPB_WPBUImage@DirectX@@1PBD@Z)
+unresolved external symbol "bool __cdecl SK_ImGui_IsItemRightClicked(void)" (?SK_ImGui_IsItemRightClicked@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_ImGui_KeybindSelect(struct SK_Keybind *,char const *)" (?SK_ImGui_KeybindSelect@@YA_NPAUSK_Keybind@@PBD@Z)
+unresolved external symbol "bool __cdecl SK_Input_PreHookWinMM(void)" (?SK_Input_PreHookWinMM@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_IsModuleLoaded(wchar_t const *)" (?SK_IsModuleLoaded@@YA_NPB_W@Z)
+unresolved external symbol "bool __cdecl SK_NGX_IsUsingDLSS(void)" (?SK_NGX_IsUsingDLSS@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_NGX_IsUsingDLSS_G(void)" (?SK_NGX_IsUsingDLSS_G@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_Platform_GetOverlayState(bool)" (?SK_Platform_GetOverlayState@@YA_N_N@Z)
+unresolved external symbol "bool __cdecl SK_Platform_IsOverlayAware(void)" (?SK_Platform_IsOverlayAware@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_Platform_SetOverlayState(bool)" (?SK_Platform_SetOverlayState@@YA_N_N@Z)
+unresolved external symbol "bool __cdecl SK_PNG_CopyToClipboard(struct DirectX::Image const &,void const *,unsigned int)" (?SK_PNG_CopyToClipboard@@YA_NABUImage@DirectX@@PBXI@Z)
+unresolved external symbol "bool __cdecl SK_Screenshot_D3D11_BeginFrame(void)" (?SK_Screenshot_D3D11_BeginFrame@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_Screenshot_IsCapturingHUDless(void)" (?SK_Screenshot_IsCapturingHUDless@@YA_NXZ)
+unresolved external symbol "bool __cdecl SK_Screenshot_SaveAVIF(class DirectX::ScratchImage &,wchar_t const *,unsigned short,unsigned short)" (?SK_Screenshot_SaveAVIF@@YA_NAAVScratchImage@DirectX@@PB_WGG@Z)
+unresolved external symbol "bool __cdecl SK_Screenshot_SaveJXL(class DirectX::ScratchImage &,wchar_t const *)" (?SK_Screenshot_SaveJXL@@YA_NAAVScratchImage@DirectX@@PB_W@Z)
+unresolved external symbol "bool __cdecl SK_Steam_TestImports(struct HINSTANCE__ *)" (?SK_Steam_TestImports@@YA_NPAUHINSTANCE__@@@Z)
+unresolved external symbol "bool __cdecl SK_WR0_Init(void)" (?SK_WR0_Init@@YA_NXZ)
+unresolved external symbol "bool __SK_ForceDLSSGPacing" (?__SK_ForceDLSSGPacing@@3_NA)
+unresolved external symbol "bool __stdcall SK::SteamAPI::TakeScreenshot(enum SK_ScreenshotStage,bool,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >)" (?TakeScreenshot@SteamAPI@SK@@YG_NW4SK_ScreenshotStage@@_NV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z)
+unresolved external symbol "bool __stdcall SK_IsSteamOverlayActive(void)" (?SK_IsSteamOverlayActive@@YG_NXZ)
+unresolved external symbol "bool __stdcall SK_Xbox_GetOverlayState(bool)" (?SK_Xbox_GetOverlayState@@YG_N_N@Z)
+unresolved external symbol "bool __stdcall SK_XInput_PulseController(int,float,float)" (?SK_XInput_PulseController@@YG_NHMM@Z)
+unresolved external symbol "bool __stdcall SK_XInput_WasLastPollSuccessful(int)" (?SK_XInput_WasLastPollSuccessful@@YG_NH@Z)
+unresolved external symbol "char const * __cdecl SK_NGX_DLSS_GetCurrentPerfQualityStr(void)" (?SK_NGX_DLSS_GetCurrentPerfQualityStr@@YAPBDXZ)
+unresolved external symbol "char const * __cdecl SK_NGX_DLSS_GetCurrentPresetStr(void)" (?SK_NGX_DLSS_GetCurrentPresetStr@@YAPBDXZ)
+unresolved external symbol "class Concurrency::concurrent_vector<struct SK_HID_PlayStationDevice,class std::allocator<struct SK_HID_PlayStationDevice> > SK_HID_PlayStationControllers" (?SK_HID_PlayStationControllers@@3V?$concurrent_vector@USK_HID_PlayStationDevice@@V?$allocator@USK_HID_PlayStationDevice@@@std@@@Concurrency@@A)
+unresolved external symbol "class SK_LazyGlobal<class SK_SteamAPIContext> pSteamCtx" (?pSteamCtx@@3V?$SK_LazyGlobal@VSK_SteamAPIContext@@@@A)
+unresolved external symbol "class SK_LazyGlobal<struct SK_D3D11_TexCacheResidency_s> SK_D3D11_TexCacheResidency" (?SK_D3D11_TexCacheResidency@@3V?$SK_LazyGlobal@USK_D3D11_TexCacheResidency_s@@@@A)
+unresolved external symbol "class SK_LazyGlobal<struct SK_HDR_RenderTargetManager> SK_HDR_RenderTargets_10bpc" (?SK_HDR_RenderTargets_10bpc@@3V?$SK_LazyGlobal@USK_HDR_RenderTargetManager@@@@A)
+unresolved external symbol "class SK_LazyGlobal<struct SK_HDR_RenderTargetManager> SK_HDR_RenderTargets_11bpc" (?SK_HDR_RenderTargets_11bpc@@3V?$SK_LazyGlobal@USK_HDR_RenderTargetManager@@@@A)
+unresolved external symbol "class SK_LazyGlobal<struct SK_HDR_RenderTargetManager> SK_HDR_RenderTargets_8bpc" (?SK_HDR_RenderTargets_8bpc@@3V?$SK_LazyGlobal@USK_HDR_RenderTargetManager@@@@A)
+unresolved external symbol "class SK_LazyGlobal<struct SK_HDR_RenderTargetManager> SK_HDR_UnorderedViews_10bpc" (?SK_HDR_UnorderedViews_10bpc@@3V?$SK_LazyGlobal@USK_HDR_RenderTargetManager@@@@A)
+unresolved external symbol "class SK_LazyGlobal<struct SK_HDR_RenderTargetManager> SK_HDR_UnorderedViews_11bpc" (?SK_HDR_UnorderedViews_11bpc@@3V?$SK_LazyGlobal@USK_HDR_RenderTargetManager@@@@A)
+unresolved external symbol "class SK_LazyGlobal<struct SK_HDR_RenderTargetManager> SK_HDR_UnorderedViews_8bpc" (?SK_HDR_UnorderedViews_8bpc@@3V?$SK_LazyGlobal@USK_HDR_RenderTargetManager@@@@A)
+unresolved external symbol "class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > & __cdecl SK::EOS::AppName(void)" (?AppName@EOS@SK@@YAAAV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ)
+unresolved external symbol "class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > __cdecl SK_GetFriendlyAppName(void)" (?SK_GetFriendlyAppName@@YA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ)
+unresolved external symbol "class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > __stdcall SK::D3D9::getPipelineStatsDesc(void)" (?getPipelineStatsDesc@D3D9@SK@@YG?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ)
+unresolved external symbol "class std::basic_string<wchar_t,struct std::char_traits<wchar_t>,class std::allocator<wchar_t> > __cdecl SK_SYS_GetInstallPath(void)" (?SK_SYS_GetInstallPath@@YA?AV?$basic_string@_WU?$char_traits@_W@std@@V?$allocator@_W@2@@std@@XZ)
+unresolved external symbol "class std::vector<unsigned int,class std::allocator<unsigned int> > const & __cdecl SK_CPU_GetLogicalCorePairs(void)" (?SK_CPU_GetLogicalCorePairs@@YAABV?$vector@IV?$allocator@I@std@@@std@@XZ)
+unresolved external symbol "enum SK_RenderAPI SK::ControlPanel::render_api" (?render_api@ControlPanel@SK@@3W4SK_RenderAPI@@A)
+unresolved external symbol "enum sl::Result __cdecl SK_slUpgradeInterface(void * *)" (?SK_slUpgradeInterface@@YA?AW4Result@sl@@PAPAX@Z)
+unresolved external symbol "enum _NvAPI_Status __cdecl NvAPI_D3D_SetLatencyMarker_Detour(struct IUnknown *,struct _NV_LATENCY_MARKER_PARAMS *)" (?NvAPI_D3D_SetLatencyMarker_Detour@@YA?AW4_NvAPI_Status@@PAUIUnknown@@PAU_NV_LATENCY_MARKER_PARAMS@@@Z)
+unresolved external symbol "enum _NvAPI_Status __cdecl NvAPI_D3D_Sleep_Detour(struct IUnknown *)" (?NvAPI_D3D_Sleep_Detour@@YA?AW4_NvAPI_Status@@PAUIUnknown@@@Z)
+unresolved external symbol "float __cdecl LinearToPQY(float)" (?LinearToPQY@@YAMM@Z)
+unresolved external symbol "float __cdecl SK_ImGui::SanitizeFontGlobalScale(float)" (?SanitizeFontGlobalScale@SK_ImGui@@YAMM@Z)
+unresolved external symbol "int SK_ImGui_NewInput" (?SK_ImGui_NewInput@@3HA)
+unresolved external symbol "int __cdecl SK::Diagnostics::Debugger::CloseConsole(void)" (?CloseConsole@Debugger@Diagnostics@SK@@YAHXZ)
+unresolved external symbol "int __cdecl SK_HookSteamAPI(void)" (?SK_HookSteamAPI@@YAHXZ)
+unresolved external symbol "int __cdecl SK_Steam_PreHookCore(wchar_t const *)" (?SK_Steam_PreHookCore@@YAHPB_W@Z)
+unresolved external symbol "int __SK_HDR_Preset" (?__SK_HDR_Preset@@3HA)
+unresolved external symbol "int __stdcall SK_TerminateProcess(unsigned int)" (?SK_TerminateProcess@@YGHI@Z)
+unresolved external symbol "int __stdcall SK_TerminateProcess(void *,unsigned int)" (?SK_TerminateProcess@@YGHPAXI@Z)
+unresolved external symbol "int __stdcall SK_TerminateThread(void *,unsigned long)" (?SK_TerminateThread@@YGHPAXK@Z)
+unresolved external symbol "long volatile SK_SteamAPI_CallbackRateLimit" (?SK_SteamAPI_CallbackRateLimit@@3JC)
+unresolved external symbol "long volatile __SK_ScreenShot_CapturingHUDless" (?__SK_ScreenShot_CapturingHUDless@@3JC)
+unresolved external symbol "long volatile __SK_WR0_Init" (?__SK_WR0_Init@@3JC)
+unresolved external symbol "long __cdecl SK_Decompress7zEx(wchar_t const *,wchar_t const *,int (__stdcall*)(int,int))" (?SK_Decompress7zEx@@YAJPB_W0P6GHHH@Z@Z)
+unresolved external symbol "long __stdcall SK_D3D9_Present_GrandCentral(struct sk_d3d9_swap_dispatch_s *)" (?SK_D3D9_Present_GrandCentral@@YGJPAUsk_d3d9_swap_dispatch_s@@@Z)
+unresolved external symbol "long __stdcall SK_ImGui_KeyboardProc(int,unsigned int,long)" (?SK_ImGui_KeyboardProc@@YGJHIJ@Z)
+unresolved external symbol "long __stdcall SK_ImGui_MouseProc(int,unsigned int,long)" (?SK_ImGui_MouseProc@@YGJHIJ@Z)
+unresolved external symbol "long __stdcall SK_Input_LowLevelKeyboardProc(int,unsigned int,long)" (?SK_Input_LowLevelKeyboardProc@@YGJHIJ@Z)
+unresolved external symbol "public: bool __thiscall SK_HID_PlayStationDevice::write_output_report(bool)" (?write_output_report@SK_HID_PlayStationDevice@@QAE_N_N@Z)
+unresolved external symbol "public: bool __thiscall SK_RenderBackend_V2::isReflexSupported(void)const " (?isReflexSupported@SK_RenderBackend_V2@@QBE_NXZ)
+unresolved external symbol "public: bool __thiscall SK_RenderBackend_V2::setLatencyMarkerNV(enum NV_LATENCY_MARKER_TYPE)const " (?setLatencyMarkerNV@SK_RenderBackend_V2@@QBE_NW4NV_LATENCY_MARKER_TYPE@@@Z)
+unresolved external symbol "public: bool __thiscall SK_ScreenshotManager::checkDiskSpace(unsigned __int64)const " (?checkDiskSpace@SK_ScreenshotManager@@QBE_N_K@Z)
+unresolved external symbol "public: bool __thiscall SK_ScreenshotManager::copyToClipboard(struct DirectX::Image const &,struct DirectX::Image const *,wchar_t const *)const " (?copyToClipboard@SK_ScreenshotManager@@QBE_NABUImage@DirectX@@PBU23@PB_W@Z)
+unresolved external symbol "public: enum SK_ScreenshotManager::SnippingState __thiscall SK_ScreenshotManager::getSnipState(void)const " (?getSnipState@SK_ScreenshotManager@@QBE?AW4SnippingState@1@XZ)
+unresolved external symbol "public: int __thiscall SK_AppCache_Manager::loadDepotCache(unsigned int)" (?loadDepotCache@SK_AppCache_Manager@@QAEHI@Z)
+unresolved external symbol "public: int __thiscall SK_AppCache_Manager::storeDepotCache(unsigned int)" (?storeDepotCache@SK_AppCache_Manager@@QAEHI@Z)
+unresolved external symbol "public: int __thiscall SK_ScreenshotManager::getClipboardFormat(void)" (?getClipboardFormat@SK_ScreenshotManager@@QAEHXZ)
+unresolved external symbol "public: static long volatile SK_RenderBackend_V2::flip_skip" (?flip_skip@SK_RenderBackend_V2@@2JC)
+unresolved external symbol "public: static struct SK_Screenshot::framebuffer_s::PinnedBuffer SK_Screenshot::framebuffer_s::root_" (?root_@framebuffer_s@SK_Screenshot@@2UPinnedBuffer@12@A)
+unresolved external symbol "public: static struct SK_ScreenshotQueue::MemoryTotals SK_ScreenshotQueue::pooled" (?pooled@SK_ScreenshotQueue@@2UMemoryTotals@1@A)
+unresolved external symbol "public: struct SK_ScreenshotManager::screenshot_repository_s & __thiscall SK_ScreenshotManager::getRepoStats(bool)" (?getRepoStats@SK_ScreenshotManager@@QAEAAUscreenshot_repository_s@1@_N@Z)
+unresolved external symbol "public: virtual bool __thiscall SK_SteamAPIContext::OnVarChange(struct SK_IVariable *,void *)" (?OnVarChange@SK_SteamAPIContext@@UAE_NPAUSK_IVariable@@PAX@Z)
+unresolved external symbol "public: virtual long __stdcall SK_WASAPI_EndPointManager::OnDefaultDeviceChanged(enum __MIDL___MIDL_itf_mmdeviceapi_0000_0000_0001,enum __MIDL___MIDL_itf_mmdeviceapi_0000_0000_0002,wchar_t const *)" (?OnDefaultDeviceChanged@SK_WASAPI_EndPointManager@@UAGJW4__MIDL___MIDL_itf_mmdeviceapi_0000_0000_0001@@W4__MIDL___MIDL_itf_mmdeviceapi_0000_0000_0002@@PB_W@Z)
+unresolved external symbol "public: virtual long __stdcall SK_WASAPI_EndPointManager::OnDeviceAdded(wchar_t const *)" (?OnDeviceAdded@SK_WASAPI_EndPointManager@@UAGJPB_W@Z)
+unresolved external symbol "public: virtual long __stdcall SK_WASAPI_EndPointManager::OnDeviceRemoved(wchar_t const *)" (?OnDeviceRemoved@SK_WASAPI_EndPointManager@@UAGJPB_W@Z)
+unresolved external symbol "public: virtual long __stdcall SK_WASAPI_EndPointManager::OnDeviceStateChanged(wchar_t const *,unsigned long)" (?OnDeviceStateChanged@SK_WASAPI_EndPointManager@@UAGJPB_WK@Z)
+unresolved external symbol "public: virtual long __stdcall SK_WASAPI_EndPointManager::OnPropertyValueChanged(wchar_t const *,struct _tagpropertykey)" (?OnPropertyValueChanged@SK_WASAPI_EndPointManager@@UAGJPB_WU_tagpropertykey@@@Z)
+unresolved external symbol "public: void __thiscall SK_Screenshot::sanitizeFilename(bool)" (?sanitizeFilename@SK_Screenshot@@QAEX_N@Z)
+unresolved external symbol "public: void __thiscall SK_ScreenshotManager::init(void)" (?init@SK_ScreenshotManager@@QAEXXZ)
+unresolved external symbol "public: void __thiscall SK_WASAPI_EndPointManager::Activate(void)" (?Activate@SK_WASAPI_EndPointManager@@QAEXXZ)
+unresolved external symbol "public: wchar_t const * __thiscall SK_ScreenshotManager::getBasePath(void)const " (?getBasePath@SK_ScreenshotManager@@QBEPB_WXZ)
+unresolved external symbol "public: __thiscall SK_Screenshot::SK_Screenshot(bool)" (??0SK_Screenshot@@QAE@_N@Z)
+unresolved external symbol "struct gpu_sensors_t * __cdecl SK_GPU_CurrentSensorData(void)" (?SK_GPU_CurrentSensorData@@YAPAUgpu_sensors_t@@XZ)
+unresolved external symbol "struct HINSTANCE__ * __cdecl SK_Debug_LoadHelper(void)" (?SK_Debug_LoadHelper@@YAPAUHINSTANCE__@@XZ)
+unresolved external symbol "struct ParamsPQ const PQ" (?PQ@@3UParamsPQ@@B)
+unresolved external symbol "struct SK::ControlPanel::font_cfg_s SK::ControlPanel::font" (?font@ControlPanel@SK@@3Ufont_cfg_s@12@A)
+unresolved external symbol "struct SK_ScreenshotQueue enqueued_screenshots" (?enqueued_screenshots@@3USK_ScreenshotQueue@@A)
+unresolved external symbol "struct SK_ScreenshotQueue enqueued_sounds" (?enqueued_sounds@@3USK_ScreenshotQueue@@A)
+unresolved external symbol "struct SK_ScreenshotTitleQueue enqueued_titles" (?enqueued_titles@@3USK_ScreenshotTitleQueue@@A)
+unresolved external symbol "struct SK_SEH_PreState __cdecl SK_SEH_ApplyTranslator(void (__cdecl*)(unsigned int,struct _EXCEPTION_POINTERS *))" (?SK_SEH_ApplyTranslator@@YA?AUSK_SEH_PreState@@P6AXIPAU_EXCEPTION_POINTERS@@@Z@Z)
+unresolved external symbol "unsigned int __stdcall SK_SteamAPI_AddScreenshotToLibraryEx(char const *,char const *,int,int,bool)" (?SK_SteamAPI_AddScreenshotToLibraryEx@@YGIPBD0HH_N@Z)
+unresolved external symbol "unsigned int __stdcall SK_Steam_PiratesAhoy(void)" (?SK_Steam_PiratesAhoy@@YGIXZ)
+unresolved external symbol "unsigned long SK::ControlPanel::current_time" (?current_time@ControlPanel@SK@@3KA)
+unresolved external symbol "unsigned long volatile SK_ImGui_LastKeyboardProcMessageTime" (?SK_ImGui_LastKeyboardProcMessageTime@@3KC)
+unresolved external symbol "unsigned long __cdecl SK_GetCurrentMS(void)" (?SK_GetCurrentMS@@YAKXZ)
+unresolved external symbol "unsigned long __cdecl SK_GetSymbolNameFromModuleAddr(struct HINSTANCE__ *,unsigned int,class gsl::span<char,-1>,unsigned long)" (?SK_GetSymbolNameFromModuleAddr@@YAKPAUHINSTANCE__@@IV?$span@D$0?0@gsl@@K@Z)
+unresolved external symbol "unsigned long __stdcall SK_XInput_GetBatteryInformation(unsigned long,unsigned char,struct _XINPUT_BATTERY_INFORMATION *)" (?SK_XInput_GetBatteryInformation@@YGKKEPAU_XINPUT_BATTERY_INFORMATION@@@Z)
+unresolved external symbol "unsigned long __stdcall SK_XInput_PowerOff(unsigned long)" (?SK_XInput_PowerOff@@YGKK@Z)
+unresolved external symbol "unsigned __int64 SK::ControlPanel::current_tick" (?current_tick@ControlPanel@SK@@3_KA)
+unresolved external symbol "unsigned __int64 __cdecl SK::SteamAPI::AppID(void)" (?AppID@SteamAPI@SK@@YA_KXZ)
+unresolved external symbol "unsigned __int64 __cdecl SK_ImGui_GetLastKeybindEditorFrame(void)" (?SK_ImGui_GetLastKeybindEditorFrame@@YA_KXZ)
+unresolved external symbol "void (__cdecl*__cdecl SK_SEH_RemoveTranslator(struct SK_SEH_PreState))(unsigned int,struct _EXCEPTION_POINTERS *)" (?SK_SEH_RemoveTranslator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZUSK_SEH_PreState@@@Z)
+unresolved external symbol "void __cdecl SK::Diagnostics::Debugger::SpawnConsole(void)" (?SpawnConsole@Debugger@Diagnostics@SK@@YAXXZ)
+unresolved external symbol "void __cdecl SK::EOS::Init(bool)" (?Init@EOS@SK@@YAX_N@Z)
+unresolved external symbol "void __cdecl SK::Galaxy::Init(void)" (?Init@Galaxy@SK@@YAXXZ)
+unresolved external symbol "void __cdecl SKIF_ImGui_PopDisableState(void)" (?SKIF_ImGui_PopDisableState@@YAXXZ)
+unresolved external symbol "void __cdecl SKIF_ImGui_PushDisableState(void)" (?SKIF_ImGui_PushDisableState@@YAXXZ)
+unresolved external symbol "void __cdecl SK_CountIO(struct io_perf_t &,double)" (?SK_CountIO@@YAXAAUio_perf_t@@N@Z)
+unresolved external symbol "void __cdecl SK_D3D11_ProcessScreenshotQueueEx(enum SK_ScreenshotStage,bool,bool)" (?SK_D3D11_ProcessScreenshotQueueEx@@YAXW4SK_ScreenshotStage@@_N1@Z)
+unresolved external symbol "void __cdecl SK_D3D9_TriggerReset(bool)" (?SK_D3D9_TriggerReset@@YAX_N@Z)
+unresolved external symbol "void __cdecl SK_Display_ResolutionSelectUI(bool)" (?SK_Display_ResolutionSelectUI@@YAX_N@Z)
+unresolved external symbol "void __cdecl SK_GetSystemInfo(struct _SYSTEM_INFO *)" (?SK_GetSystemInfo@@YAXPAU_SYSTEM_INFO@@@Z)
+unresolved external symbol "void __cdecl SK_HDR_RunWidgetOnce(void)" (?SK_HDR_RunWidgetOnce@@YAXXZ)
+unresolved external symbol "void __cdecl SK_HDR_SetOverridesForGame(bool,bool)" (?SK_HDR_SetOverridesForGame@@YAX_N0@Z)
+unresolved external symbol "void __cdecl SK_Image_DispatchTonemapJobs(class std::vector<struct parallel_tonemap_job_s,class std::allocator<struct parallel_tonemap_job_s> > &)" (?SK_Image_DispatchTonemapJobs@@YAXAAV?$vector@Uparallel_tonemap_job_s@@V?$allocator@Uparallel_tonemap_job_s@@@std@@@std@@@Z)
+unresolved external symbol "void __cdecl SK_Image_EnqueueTonemapTask(class DirectX::ScratchImage &,class std::vector<struct parallel_tonemap_job_s,class std::allocator<struct parallel_tonemap_job_s> > &,class std::vector<union __m128,class std::allocator<union __m128> > &,float,float)" (?SK_Image_EnqueueTonemapTask@@YAXAAVScratchImage@DirectX@@AAV?$vector@Uparallel_tonemap_job_s@@V?$allocator@Uparallel_tonemap_job_s@@@std@@@std@@AAV?$vector@T__m128@@V?$allocator@T__m128@@@std@@@4@MM@Z)
+unresolved external symbol "void __cdecl SK_Image_GetTonemappedPixels(class DirectX::ScratchImage &,class DirectX::ScratchImage &,class std::vector<union __m128,class std::allocator<union __m128> > &,class std::vector<void *,class std::allocator<void *> > &)" (?SK_Image_GetTonemappedPixels@@YAXAAVScratchImage@DirectX@@0AAV?$vector@T__m128@@V?$allocator@T__m128@@@std@@@std@@AAV?$vector@PAXV?$allocator@PAX@std@@@4@@Z)
+unresolved external symbol "void __cdecl SK_Image_InitializeTonemap(class std::vector<struct parallel_tonemap_job_s,class std::allocator<struct parallel_tonemap_job_s> > &,class std::vector<void *,class std::allocator<void *> > &,class std::vector<void *,class std::allocator<void *> > &)" (?SK_Image_InitializeTonemap@@YAXAAV?$vector@Uparallel_tonemap_job_s@@V?$allocator@Uparallel_tonemap_job_s@@@std@@@std@@AAV?$vector@PAXV?$allocator@PAX@std@@@2@1@Z)
+unresolved external symbol "void __cdecl SK_ImGui_AdjustCursor(void)" (?SK_ImGui_AdjustCursor@@YAXXZ)
+unresolved external symbol "void __cdecl SK_ImGui_CenterCursorOnWindow(void)" (?SK_ImGui_CenterCursorOnWindow@@YAXXZ)
+unresolved external symbol "void __cdecl SK_ImGui_CursorBoundaryConfig(bool)" (?SK_ImGui_CursorBoundaryConfig@@YAX_N@Z)
+unresolved external symbol "void __cdecl SK_ImGui_DrawGraph_Latency(bool)" (?SK_ImGui_DrawGraph_Latency@@YAX_N@Z)
+unresolved external symbol "void __cdecl SK_ImGui_ReportModeSwitchFailure(void)" (?SK_ImGui_ReportModeSwitchFailure@@YAXXZ)
+unresolved external symbol "void __cdecl SK_ImGui_Warning(wchar_t const *)" (?SK_ImGui_Warning@@YAXPB_W@Z)
+unresolved external symbol "void __cdecl SK_ImGui_WarningWithTitle(wchar_t const *,wchar_t const *)" (?SK_ImGui_WarningWithTitle@@YAXPB_W0@Z)
+unresolved external symbol "void __cdecl SK_Memory_RemoveHooks(void)" (?SK_Memory_RemoveHooks@@YAXXZ)
+unresolved external symbol "void __cdecl SK_Network_EnqueueDownload(struct sk_download_request_s &&,bool)" (?SK_Network_EnqueueDownload@@YAX$$QAUsk_download_request_s@@_N@Z)
+unresolved external symbol "void __cdecl SK_NGX_DLSS_GetResolution(int &,int &,int &,int &)" (?SK_NGX_DLSS_GetResolution@@YAXAAH000@Z)
+unresolved external symbol "void __cdecl SK_PollGPU(void)" (?SK_PollGPU@@YAXXZ)
+unresolved external symbol "void __cdecl SK_PresentMon::DisableProviders(unsigned __int64)" (?DisableProviders@SK_PresentMon@@YAX_K@Z)
+unresolved external symbol "void __cdecl SK_Screenshot_D3D11_EndFrame(void)" (?SK_Screenshot_D3D11_EndFrame@@YAXXZ)
+unresolved external symbol "void __cdecl SK_Screenshot_D3D11_RestoreHUD(void)" (?SK_Screenshot_D3D11_RestoreHUD@@YAXXZ)
+unresolved external symbol "void __cdecl SK_Screenshot_PlaySound(void)" (?SK_Screenshot_PlaySound@@YAXXZ)
+unresolved external symbol "void __cdecl SK_SEH_LogException(unsigned int,struct _EXCEPTION_POINTERS *,void *)" (?SK_SEH_LogException@@YAXIPAU_EXCEPTION_POINTERS@@PAX@Z)
+unresolved external symbol "void __cdecl SK_SpawnPresentMonWorker(void)" (?SK_SpawnPresentMonWorker@@YAXXZ)
+unresolved external symbol "void __cdecl SK_SteamAPI_InitManagers(void)" (?SK_SteamAPI_InitManagers@@YAXXZ)
+unresolved external symbol "void __cdecl SK_SteamInput_Unfux0r(void)" (?SK_SteamInput_Unfux0r@@YAXXZ)
+unresolved external symbol "void __cdecl SK_Steam_CatastropicScreenshotFail(void)" (?SK_Steam_CatastropicScreenshotFail@@YAXXZ)
+unresolved external symbol "void __cdecl SK_Steam_ForceInputAppId(unsigned __int64)" (?SK_Steam_ForceInputAppId@@YAX_K@Z)
+unresolved external symbol "void __cdecl SK_Steam_ProcessWindowActivation(bool)" (?SK_Steam_ProcessWindowActivation@@YAX_N@Z)
+unresolved external symbol "void __cdecl SK_VK_HookReflex(void)" (?SK_VK_HookReflex@@YAXXZ)
+unresolved external symbol "void __cdecl SK_VRR_UpdateCachedTimings(class SK::Framerate::Limiter *)" (?SK_VRR_UpdateCachedTimings@@YAXPAVLimiter@Framerate@SK@@@Z)
+unresolved external symbol "void __cdecl SK_WIC_SetLossyQuality(struct IPropertyBag2 *)" (?SK_WIC_SetLossyQuality@@YAXPAUIPropertyBag2@@@Z)
+unresolved external symbol "void __cdecl SK_WIC_SetMaximumQuality(struct IPropertyBag2 *)" (?SK_WIC_SetMaximumQuality@@YAXPAUIPropertyBag2@@@Z)
+unresolved external symbol "void __cdecl SK_WIC_SetMetadataTitle(struct IWICMetadataQueryWriter *,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > &)" (?SK_WIC_SetMetadataTitle@@YAXPAUIWICMetadataQueryWriter@@AAV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z)
+unresolved external symbol "void __cdecl SK_Widget_InvokeThreadProfiler(void)" (?SK_Widget_InvokeThreadProfiler@@YAXXZ)
+unresolved external symbol "void __cdecl SK_WinRing0_Unpack(void)" (?SK_WinRing0_Unpack@@YAXXZ)
+unresolved external symbol "void __cdecl SK_WR0_Deinit(void)" (?SK_WR0_Deinit@@YAXXZ)
+unresolved external symbol "void __stdcall SK_ExitProcess(unsigned int)" (?SK_ExitProcess@@YGXI@Z)
+unresolved external symbol "void __stdcall SK_ImGui_KeybindDialog(struct SK_Keybind *)" (?SK_ImGui_KeybindDialog@@YGXPAUSK_Keybind@@@Z)
+unresolved external symbol "void __stdcall SK_SetLastError(unsigned long)" (?SK_SetLastError@@YGXK@Z)
+unresolved external symbol "void __stdcall SK_XInput_ZeroHaptics(int)" (?SK_XInput_ZeroHaptics@@YGXH@Z)
+unresolved external symbol "__int64 volatile SK_SteamAPI_CallbackRunCount" (?SK_SteamAPI_CallbackRunCount@@3_JC)
+unresolved external symbol _D3DKMTCloseAdapter
+unresolved external symbol _D3DKMTCreateAllocation
+unresolved external symbol _D3DKMTCreateContext
+unresolved external symbol _D3DKMTCreateDevice
+unresolved external symbol _D3DKMTCreateSynchronizationObject
+unresolved external symbol _D3DKMTDestroyAllocation
+unresolved external symbol _D3DKMTDestroyContext
+unresolved external symbol _D3DKMTDestroyDevice
+unresolved external symbol _D3DKMTDestroySynchronizationObject
+unresolved external symbol _D3DKMTEscape
+unresolved external symbol _D3DKMTGetContextSchedulingPriority
+unresolved external symbol _D3DKMTGetDeviceState
+unresolved external symbol _D3DKMTGetDisplayModeList
+unresolved external symbol _D3DKMTGetMultisampleMethodList
+unresolved external symbol _D3DKMTGetRuntimeData
+unresolved external symbol _D3DKMTGetSharedPrimaryHandle
+unresolved external symbol _D3DKMTLock
+unresolved external symbol _D3DKMTOpenAdapterFromHdc
+unresolved external symbol _D3DKMTOpenAdapterFromLuid
+unresolved external symbol _D3DKMTOpenResource
+unresolved external symbol _D3DKMTPresent
+unresolved external symbol _D3DKMTQueryAdapterInfo
+unresolved external symbol _D3DKMTQueryAllocationResidency
+unresolved external symbol _D3DKMTQueryResourceInfo
+unresolved external symbol _D3DKMTRender
+unresolved external symbol _D3DKMTSetAllocationPriority
+unresolved external symbol _D3DKMTSetContextSchedulingPriority
+unresolved external symbol _D3DKMTSetDisplayMode
+unresolved external symbol _D3DKMTSetDisplayPrivateDriverFormat
+unresolved external symbol _D3DKMTSetGammaRamp
+unresolved external symbol _D3DKMTSetVidPnSourceOwner
+unresolved external symbol _D3DKMTSignalSynchronizationObject
+unresolved external symbol _D3DKMTUnlock
+unresolved external symbol _D3DKMTWaitForSynchronizationObject
+unresolved external symbol _D3DKMTWaitForVerticalBlankEvent
+unresolved external symbol _SK_NtLdr_LockLoaderLock@12
+unresolved external symbol _SK_NtLdr_UnlockLoaderLock@8
+unresolved external symbol _SteamAPI_UnregisterCallResult
+unresolved external symbol _SymLoadModule@24
+unresolved external symbol _WindowsCreateString@12
+unresolved external symbol _WindowsCreateStringReference@16
+unresolved external symbol _WindowsDeleteString@4
+unresolved external symbol _WindowsGetStringRawBuffer@8
+unresolved external symbol __imp__RoGetActivationFactory@12
