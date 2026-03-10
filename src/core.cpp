@@ -3877,13 +3877,9 @@ SK_FrameCallback ( SK_RenderBackend& rb,
           }
         }
 
-        SK_RunOnce (
 #ifndef SK_SIDECAR_MINIMAL
-          SK_Input_HookScePad ()
-#else
-          (void)0
+        SK_RunOnce (SK_Input_HookScePad ());
 #endif
-        );
 
         if (rb.api != SK_RenderAPI::D3D12  &&
             rb.api != SK_RenderAPI::D3D11  &&
