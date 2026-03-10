@@ -348,4 +348,26 @@ SK_LazyGlobal <SK_FFXV_Thread> sk_ffxv_vsync,
 
 #endif // _WIN64
 
+
+// ==========================================================================
+//  control_panel.cpp stubs
+//  (control_panel.cpp is excluded from SK_SIDECAR_MINIMAL builds)
+// ==========================================================================
+
+SK_API
+DWORD
+SK_ImGui_DrawFrame ( _Unreferenced_parameter_ DWORD /*dwFlags*/,
+                                              LPVOID /*lpUser*/ )
+{
+  return 0;
+}
+
+SK_API
+void
+SK_ImGui_Toggle (void) {}
+
+void
+__stdcall
+SK_PlugIn_ControlPanelWidget (void) {}
+
 #endif // SK_SIDECAR_MINIMAL
