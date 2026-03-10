@@ -72,6 +72,19 @@ void  WINAPI D3DPERF_SetRegion        (D3DCOLOR, LPCWSTR)         { }
 // ==========================================================================
 
 __declspec (noinline) HRESULT STDMETHODCALLTYPE
+D3D9BeginScene_Override (IDirect3DDevice9*)                                              { return S_OK; }
+
+__declspec (noinline) HRESULT STDMETHODCALLTYPE
+D3D9CreateRenderTarget_Override (IDirect3DDevice9*, UINT, UINT, D3DFORMAT,
+                                  D3DMULTISAMPLE_TYPE, DWORD, BOOL,
+                                  IDirect3DSurface9**, HANDLE*)                         { return E_NOTIMPL; }
+
+__declspec (noinline) HRESULT STDMETHODCALLTYPE
+D3D9CreateDepthStencilSurface_Override (IDirect3DDevice9*, UINT, UINT, D3DFORMAT,
+                                         D3DMULTISAMPLE_TYPE, DWORD, BOOL,
+                                         IDirect3DSurface9**, HANDLE*)                  { return E_NOTIMPL; }
+
+__declspec (noinline) HRESULT STDMETHODCALLTYPE
 D3D9TestCooperativeLevel_Override (IDirect3DDevice9*)                                   { return S_OK; }
 
 __declspec (noinline) HRESULT STDMETHODCALLTYPE
