@@ -666,7 +666,7 @@ bool SK_File_CanUserWriteToPath          (const wchar_t*)    { return false; }
 bool SK_Power_InitEffectiveModeCallbacks (void)              { return false; }
 bool SK_Power_StopEffectiveModeCallbacks (void)              { return false; }
 bool SK_Steam_LoadOverlayEarly           (void)              { return false; }
-bool SK_Steam_TestImports (HINSTANCE *)                      { return false; }
+bool SK_Steam_TestImports (HMODULE)                          { return false; }
 bool __stdcall SK_WASAPI_Init            (void)              { return false; }
 
 SK_Widget* SK_HDR_GetWidget (void) { return nullptr; }
@@ -1049,6 +1049,7 @@ SK_ScreenshotManager::getRepoStats (bool)
 //  SK_HID_PlayStationDevice method stubs
 // ==========================================================================
 
+SK_HID_PlayStationDevice::~SK_HID_PlayStationDevice (void) { }
 bool SK_HID_PlayStationDevice::write_output_report (bool) { return false; }
 
 
@@ -1227,7 +1228,7 @@ namespace SK {
 
 bool SK_Debug_IsCrashing (void) { return false; }
 
-HINSTANCE* SK_Debug_LoadHelper (void) { return nullptr; }
+HMODULE SK_Debug_LoadHelper (void) { return nullptr; }
 
 ULONG SK_GetSymbolNameFromModuleAddr (HMODULE, uintptr_t, gsl::span <char> pszOut,
                                       ULONG ulLen)
@@ -1303,9 +1304,9 @@ bool SK_IsModuleLoaded (const wchar_t* wszModule)
 
 std::wstring SK_SYS_GetInstallPath (void) { return { }; }
 
-std::vector <unsigned int> const& SK_CPU_GetLogicalCorePairs (void)
+std::vector <uintptr_t> const& SK_CPU_GetLogicalCorePairs (void)
 {
-  static std::vector <unsigned int> _empty;
+  static std::vector <uintptr_t> _empty;
   return _empty;
 }
 
