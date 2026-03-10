@@ -245,8 +245,14 @@ struct SK_FFXV_Thread
   volatile LONG             dwPrio   = THREAD_PRIORITY_NORMAL;
   sk::ParameterInt*         prio_cfg = nullptr;
 
-  void setup (HANDLE hNewThread) { (void)hNewThread; }
+  void setup (HANDLE hNewThread);
 };
+
+// Out-of-line definition ensures a globally-visible symbol is emitted.
+// An inline body inside the class is not sufficient because debug_utils.cpp
+// only has a non-inline declaration and the compiler may elide an
+// inline-only definition that is never called within this TU.
+void SK_FFXV_Thread::setup (HANDLE /*hNewThread*/) {}
 
 SK_LazyGlobal <SK_FFXV_Thread> sk_ffxv_vsync,
                                 sk_ffxv_async_run;
