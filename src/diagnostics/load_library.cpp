@@ -387,6 +387,13 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
     return;
   }
 
+  // hLoadedMod is only referenced inside the #ifndef SK_SIDECAR_MINIMAL
+  // block (Streamline interposer detection).  Silence the unreferenced
+  // formal-parameter warning (C4100 → C2220) in minimal builds.
+#ifdef SK_SIDECAR_MINIMAL
+  (void)hLoadedMod;
+#endif
+
   // Catch imports that we missed because they were loaded
   //   as dependencies of another DLL... but stop doing this
   //     check after 15 frames to avoid unnecessary overhead.
