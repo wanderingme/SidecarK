@@ -235,6 +235,7 @@ SK_StartPerfMonThreads (void)
   //
   // Spawn CPU Refresh Thread
   //
+#ifndef SK_SIDECAR_MINIMAL
   if (config.cpu.show || ( SK_ImGui_Widgets->cpu_monitor != nullptr &&
                            SK_ImGui_Widgets->cpu_monitor->isActive () ))
   {
@@ -253,6 +254,7 @@ SK_StartPerfMonThreads (void)
     SpawnMonitorThread ( &SK_WMI_PagefileStats->hThread,
                          L"Pagefile Monitor", SK_MonitorPagefile );
   }
+#endif // !SK_SIDECAR_MINIMAL
 }
 
 void
@@ -3450,6 +3452,7 @@ SK_ShutdownCore (const wchar_t* backend)
                     SK_timeGetTime () - dwTime_WMIShutdown );
   };
 
+#ifndef SK_SIDECAR_MINIMAL
   static auto& cpu_stats      = *SK_WMI_CPUStats;
   static auto& disk_stats     = *SK_WMI_DiskStats;
   static auto& pagefile_stats = *SK_WMI_PagefileStats;
@@ -3460,6 +3463,7 @@ SK_ShutdownCore (const wchar_t* backend)
                      disk_stats.hThread,              L"Disk Monitor"    );
   ShutdownWMIThread (pagefile_stats.hShutdownSignal,
                      pagefile_stats.hThread,          L"Pagefile Monitor");
+#endif // !SK_SIDECAR_MINIMAL
 
   // Does power scheme need a reset? If not, skip this to avoid Windows Event Viewer spam
   if (! IsEqualGUID (config.cpu.power_scheme_guid_orig,

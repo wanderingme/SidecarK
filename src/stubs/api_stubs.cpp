@@ -29,8 +29,20 @@
 // ---- XInput types (XINPUT_STATE)
 #include <SpecialK/input/xinput.h>
 
-// ---- HID types (HIDP_REPORT_TYPE, PHIDP_DATA, PHIDP_PREPARSED_DATA)
+// ---- HID types (HIDP_REPORT_TYPE, PHIDP_DATA, PHIDP_PREPARSED_DATA, SK_HID_PlayStationDevice)
 #include <SpecialK/input/input.h>
+
+// ---- Render backend (SK_RenderBackend_V2, vk_reflex_s, latency_monitor_s)
+#include <SpecialK/render/backend.h>
+
+// ---- D3DKMT types
+#include <SpecialK/render/d3dkmt/d3dkmt.h>
+
+// ---- CPU diagnostics (SK_FPU_ControlWord)
+#include <SpecialK/diagnostics/cpu.h>
+
+// ---- Vulkan headers (SK_Reflex_SetVulkanSwapchain, SK_VK_SetLatencyMarker)
+#include <vulkan/vulkan.h>
 
 
 // ==========================================================================
@@ -326,6 +338,351 @@ HRESULT __stdcall SK_UpdateSoftware    (const wchar_t*)         { return S_FALSE
 // ==========================================================================
 
 void __stdcall SK_ImGui_DrawEULA (LPVOID) { }
+
+
+
+// ==========================================================================
+//  Function pointer globals — hooks.cpp  (defined in excluded debug_utils.cpp
+//  and diagnostics/memory.cpp; declared extern in their respective headers)
+// ==========================================================================
+
+GetCommandLineA_pfn    GetCommandLineA_Original    = nullptr;
+GetCommandLineW_pfn    GetCommandLineW_Original    = nullptr;
+CloseHandle_pfn        CloseHandle_Original        = nullptr;
+ExitProcess_pfn        ExitProcess_Original        = nullptr;
+ExitThread_pfn         ExitThread_Original         = nullptr;
+TerminateProcess_pfn   TerminateProcess_Original   = nullptr;
+TerminateThread_pfn    TerminateThread_Original    = nullptr;
+NtTerminateProcess_pfn NtTerminateProcess_Original = nullptr;
+RtlExitUserThread_pfn  RtlExitUserThread_Original  = nullptr;
+OutputDebugStringA_pfn OutputDebugStringA_Original = nullptr;
+OutputDebugStringW_pfn OutputDebugStringW_Original = nullptr;
+RaiseException_pfn     RaiseException_Original     = nullptr;
+SetLastError_pfn       SetLastError_Original       = nullptr;
+GetProcAddress_pfn     GetProcAddress_Original     = nullptr;
+SHGetKnownFolderPath_pfn SHGetKnownFolderPath_Original = nullptr;
+_endthreadex_pfn       _endthreadex_Original       = nullptr;
+
+HeapFree_pfn           HeapFree_Original           = nullptr;
+VirtualFree_pfn        VirtualFree_Original        = nullptr;
+VirtualAlloc_pfn       VirtualAlloc_Original       = nullptr;
+GlobalAlloc_pfn        GlobalAlloc_Original        = nullptr;
+GlobalFree_pfn         GlobalFree_Original         = nullptr;
+LocalAlloc_pfn         LocalAlloc_Original         = nullptr;
+LocalFree_pfn          LocalFree_Original          = nullptr;
+RtlAllocateHeap_pfn    RtlAllocateHeap_Original    = nullptr;
+
+BOOL __stdcall
+SK_Module_IsProcAddrLocal ( HMODULE                    hModExpected,
+                             LPCSTR                     lpProcName,
+                            FARPROC                     lpProcAddr,
+          PLDR_DATA_TABLE_ENTRY__SK *ppldrEntry )
+{
+  (void)hModExpected; (void)lpProcName; (void)lpProcAddr; (void)ppldrEntry;
+  return FALSE;
+}
+
+
+// ==========================================================================
+//  TLS globals  (defined in excluded diagnostics/memory.cpp)
+// ==========================================================================
+
+volatile LONG _SK_IgnoreTLSAlloc = 0;
+volatile LONG _SK_IgnoreTLSMap   = 0;
+
+
+// ==========================================================================
+//  DInput COM factory stubs  (defined in excluded dinput7/8 backends)
+// ==========================================================================
+
+HRESULT WINAPI
+CoCreateInstance_DI8 ( _In_  LPUNKNOWN pUnkOuter,
+                        _In_  DWORD     dwClsContext,
+                        _In_  REFIID    riid,
+                        _Out_ LPVOID   *ppv,
+                        _In_  LPVOID    pCallerAddr )
+{
+  (void)pUnkOuter; (void)dwClsContext; (void)riid;
+  (void)pCallerAddr;
+  if (ppv) *ppv = nullptr;
+  return E_NOTIMPL;
+}
+
+HRESULT WINAPI
+CoCreateInstance_DI7 ( _In_  LPUNKNOWN pUnkOuter,
+                        _In_  DWORD     dwClsContext,
+                        _In_  REFIID    riid,
+                        _Out_ LPVOID   *ppv,
+                        _In_  LPVOID    pCallerAddr )
+{
+  (void)pUnkOuter; (void)dwClsContext; (void)riid;
+  (void)pCallerAddr;
+  if (ppv) *ppv = nullptr;
+  return E_NOTIMPL;
+}
+
+HRESULT STDAPICALLTYPE
+CoCreateInstanceEx_DI8 ( _In_    REFCLSID     rclsid,
+                          _In_    IUnknown     *punkOuter,
+                          _In_    DWORD        dwClsCtx,
+                          _In_    COSERVERINFO *pServerInfo,
+                          _In_    DWORD        dwCount,
+                          _Inout_ MULTI_QI     *pResults,
+                          _In_    LPVOID        pCallerAddr )
+{
+  (void)rclsid; (void)punkOuter; (void)dwClsCtx;
+  (void)pServerInfo; (void)dwCount; (void)pResults; (void)pCallerAddr;
+  return E_NOTIMPL;
+}
+
+HRESULT STDAPICALLTYPE
+CoCreateInstanceEx_DI7 ( _In_    REFCLSID     rclsid,
+                          _In_    IUnknown     *punkOuter,
+                          _In_    DWORD        dwClsCtx,
+                          _In_    COSERVERINFO *pServerInfo,
+                          _In_    DWORD        dwCount,
+                          _Inout_ MULTI_QI     *pResults,
+                          _In_    LPVOID        pCallerAddr )
+{
+  (void)rclsid; (void)punkOuter; (void)dwClsCtx;
+  (void)pServerInfo; (void)dwCount; (void)pResults; (void)pCallerAddr;
+  return E_NOTIMPL;
+}
+
+
+// ==========================================================================
+//  Window / XInput / HID stubs  (window.cpp, excluded xinput/hid backends)
+// ==========================================================================
+
+bool SK_XInput_Enable (int) { return false; }
+void SK_HID_FlushPlayStationForceFeedback (void) { }
+
+
+// ==========================================================================
+//  DKMT globals  (defined in excluded render/d3dkmt/d3dkmt.cpp)
+// ==========================================================================
+
+extern "C" FARPROC D3DKMTOpenAdapterFromGdiDisplayName = nullptr;
+extern "C" FARPROC D3DKMTGetMultiPlaneOverlayCaps      = nullptr;
+extern "C" FARPROC D3DKMTGetScanLine                   = nullptr;
+
+
+// ==========================================================================
+//  D3DKMT wrappers  (defined in excluded d3dkmt.cpp)
+// ==========================================================================
+
+HRESULT SK_D3DKMT_CloseAdapter     (D3DKMT_CLOSEADAPTER     *p) { (void)p; return E_NOTIMPL; }
+HRESULT SK_D3DKMT_QueryAdapterInfo (D3DKMT_QUERYADAPTERINFO *p) { (void)p; return E_NOTIMPL; }
+
+
+// ==========================================================================
+//  Render backend class method stubs  (defined in excluded reflex.cpp / d3d9 texmgr)
+// ==========================================================================
+
+ULONG64 SK_RenderBackend_V2::vk_reflex_s::sleep           (void)       { return 0; }
+bool    SK_RenderBackend_V2::vk_reflex_s::isPacingEligible (void) const { return false; }
+bool    SK_RenderBackend_V2::vk_reflex_s::needsFallbackSleep (void) const { return false; }
+void    SK_RenderBackend_V2::driverSleepNV (int) const { }
+
+SK_RenderBackend_V2::latency_monitor_s SK_RenderBackend_V2::latency;
+
+void SK_RenderBackend_V2::latency_monitor_s::reset (void) { }
+void SK_RenderBackend_V2::latency_monitor_s::submitQueuedFrame (IDXGISwapChain1*) { }
+
+void SK::D3D9::TextureManager::Init (void) { }
+void SK::D3D9::TextureManager::Hook (void) { }
+
+
+// ==========================================================================
+//  Render stubs  (excluded reflex.cpp, d3d9.cpp, ddraw.cpp, d3d11_hdr, etc.)
+// ==========================================================================
+
+UINT SK_Reflex_CalculateSleepMinIntervalForVulkan (bool) { return 0; }
+
+void SK_Reflex_SetVulkanSwapchain (VkDevice, VkSwapchainKHR) { }
+
+void SK_VK_SetLatencyMarker (VkSetLatencyMarkerInfoNV&, VkLatencyMarkerNV) { }
+
+void __stdcall SK_HookD3D9  (void) { }
+void __stdcall SK_HookD3D8  (void) { }
+void __stdcall SK_HookDDraw (void) { }
+
+void SK_D3D9_QuickHook         (void) { }
+void SK_D3D9_InitShaderModTools (void) { }
+
+void SK_HDR_UpdateMaxLuminanceForActiveDisplay (bool) { }
+void SK_HDR_DisableOverridesForGame            (void) { }
+
+
+// ==========================================================================
+//  HDR globals  (defined in excluded widgets/hdr.cpp)
+// ==========================================================================
+
+bool  __SK_HDR_10BitSwap        = false;
+bool  __SK_HDR_16BitSwap        = false;
+bool  __SK_HDR_TonemapOverbright = true;
+
+float __SK_HDR_Luma             =  80.0f;
+float __SK_HDR_Exp              =   1.0f;
+float __SK_HDR_Saturation       =   1.0f;
+float __SK_HDR_Gamut            =  0.01f;
+float __SK_HDR_HorizCoverage    = 100.0f;
+float __SK_HDR_VertCoverage     = 100.0f;
+float __SK_HDR_ColorBoost       =   1.0f;
+float __SK_HDR_PQBoost0         =   0.0f;
+float __SK_HDR_PQBoost1         =   0.0f;
+float __SK_HDR_PQBoost2         =   0.0f;
+float __SK_HDR_PQBoost3         =   0.0f;
+
+
+// ==========================================================================
+//  Streamline  (defined in excluded streamline.cpp)
+// ==========================================================================
+
+sl::Result SK_slGetNativeInterface (void*, void**) { return sl::Result::eErrorFeatureNotSupported; }
+
+
+// ==========================================================================
+//  Screenshot  (defined in excluded screenshot.cpp)
+// ==========================================================================
+
+#include <SpecialK/render/screenshot.h>
+void SK_Screenshot_ProcessQueue (SK_ScreenshotStage stage, const SK_RenderBackend_V2& rb)
+{
+  (void)stage; (void)rb;
+}
+
+
+// ==========================================================================
+//  WMI / perf monitor globals  (defined in excluded io_monitor.cpp)
+// ==========================================================================
+
+SK_LazyGlobal <cpu_perf_t>      SK_WMI_CPUStats;
+SK_LazyGlobal <disk_perf_t>     SK_WMI_DiskStats;
+SK_LazyGlobal <pagefile_perf_t> SK_WMI_PagefileStats;
+
+
+// ==========================================================================
+//  Framerate stubs  (excluded widgets/cpu_widget.cpp, frame_pacing.cpp)
+// ==========================================================================
+
+bool    __SK_DoubleUpOnReflex         = false;
+bool    SK_CPU_IsZen                  (void)    { return false; }
+float   SK_Framerate_GetPercentileByIdx (int)   { return 0.0f; }
+
+long (__stdcall* Direct3DCreate9Ex_Import)(unsigned int, IDirect3D9Ex**) = nullptr;
+
+LONG __stdcall SK_DWM_GetCompositionTimingInfo (DWM_TIMING_INFO *p)
+{
+  if (p) *p = {};
+  return E_FAIL;
+}
+
+SK_FPU_ControlWord SK_FPU_SetControlWord (UINT mask, SK_FPU_ControlWord *pNew)
+{
+  (void)mask; (void)pNew;
+  return { 0, 0 };
+}
+
+SK_FPU_ControlWord SK_FPU_SetPrecision (UINT) { return { 0, 0 }; }
+void               SK_FPU_LogPrecision (void) { }
+
+void SK_ImGui_DrawCPUPower       (void) { }
+void SK_ImGui_DrawCPUTemperature (void) { }
+
+
+// ==========================================================================
+//  Config stubs  (excluded debug_utils.cpp, steam_api.cpp, widgets/widget.cpp,
+//                 diagnostics/file.cpp, etc.)
+// ==========================================================================
+
+bool SK_Debug_CheckDebugFlagInPEB (void)             { return false; }
+int  SK_Steam_PopupOriginWStrToEnum (const wchar_t*) { return 0; }
+
+iSK_Logger *read_log  = nullptr;
+iSK_Logger *write_log = nullptr;
+
+uint64_t SK_Steam_GetAppID_NoAPI (void) { return 0; }
+
+void* SK_Debug_GetImageBaseAddr (void) { return nullptr; }
+
+void __stdcall RtlAcquirePebLock_Detour (void) { }
+void __stdcall RtlReleasePebLock_Detour (void) { }
+
+const wchar_t* SK_Steam_PopupOriginToWStr (int) { return L"TopLeft"; }
+
+extern "C" void __stdcall SteamAPI_ManualDispatch_Init_Detour (void) { }
+
+BOOL __stdcall SK_ImGui_WidgetRegistry::SaveConfig (void) { return FALSE; }
+
+
+// ==========================================================================
+//  Core stubs  (excluded steam_api.cpp, wasapi.cpp, etw.cpp, network.cpp, etc.)
+// ==========================================================================
+
+bool SK_ETW_EndTracing                   (void)              { return false; }
+bool SK_File_CanUserWriteToPath          (const wchar_t*)    { return false; }
+bool SK_Power_InitEffectiveModeCallbacks (void)              { return false; }
+bool SK_Power_StopEffectiveModeCallbacks (void)              { return false; }
+bool SK_Steam_LoadOverlayEarly           (void)              { return false; }
+bool SK_Steam_TestImports (HINSTANCE *)                      { return false; }
+bool __stdcall SK_WASAPI_Init            (void)              { return false; }
+
+SK_Widget* SK_HDR_GetWidget (void) { return nullptr; }
+
+std::wstring SK_Network_MakeEscapeSequencedURL (std::wstring) { return {}; }
+
+int  SK_Steam_KickStart   (const wchar_t*) { return 0; }
+long SK_Decompress7zEx    (const wchar_t*, const wchar_t*,
+                            int (__stdcall*)(int,int,int)) { return 0; }
+
+DWORD WINAPI SK_MonitorCPU      (LPVOID) { return 0; }
+DWORD WINAPI SK_MonitorDisk     (LPVOID) { return 0; }
+DWORD WINAPI SK_MonitorPagefile (LPVOID) { return 0; }
+
+void SK::Diagnostics::CrashHandler::Reinstall (void) { }
+void SK::Diagnostics::CrashHandler::Shutdown  (void) { }
+void SK::SteamAPI::Shutdown                   (void) { }
+void SK::Xbox::Init                           (void) { }
+
+void SK_EndGPUPolling                     (void) { }
+void SK_File_InitHooks                    (void) { }
+void SK_GPU_InitSensorData                (void) { }
+void SK_Input_EnumOpenHIDFiles            (void) { }
+void SK_Memory_InitHooks                  (void) { }
+void SK_NGX_UpdateDLSSGStatus             (void) { }
+void SK_Network_InitHooks                 (void) { }
+void SK_Platform_PingBackendForNonSteamGame (void) { }
+void SK_ScePad_PaceMaker                  (void) { }
+void SK_Steam_InitCommandConsoleVariables (void) { }
+
+void __stdcall SK_SetGameMute (bool) { }
+
+const wchar_t* SK_Steam_GetDLLPath (void) { return L""; }
+
+// SymGetSearchPathW (_SymGetSearchPathW@12) and SymSetExtendedOption (_SymSetExtendedOption@8)
+// are called via function pointers in core.cpp – provide definitions so the
+// decorated (stdcall) symbols resolve at link time.
+#include <dbghelp.h>
+BOOL IMAGEAPI SymGetSearchPathW (HANDLE, PWSTR, DWORD)           { return FALSE; }
+BOOL IMAGEAPI SymSetExtendedOption (IMAGEHLP_EXTENDED_OPTIONS, BOOL) { return FALSE; }
+
+
+// ==========================================================================
+//  HID / PlayStation device stubs (excluded hid.cpp / playstation.cpp)
+// ==========================================================================
+
+XINPUT_STATE     hid_to_xi      = {};
+volatile ULONG64 hid_to_xi_time = 0;
+
+bool SK_HID_PlayStationDevice::request_input_report (void)          { return false; }
+XINPUT_STATE SK_HID_PlayStationDevice::hid_to_xi::getLatestState (void) { return {}; }
+
+void SK_HID_ProcessGamepadButtonBindings (void) { }
+void SK_HID_SetupPlayStationControllers  (void) { }
+void SK_Input_HookWinMM                  (void) { }
+void SK_TriggerHudFreeScreenshot         (void) noexcept { }
+void SK_XInput_Refresh                   (UINT) { }
 
 
 #endif // SK_SIDECAR_MINIMAL
