@@ -744,13 +744,13 @@ static void HostLogAppendf(const wchar_t* fmt, ...)
 
 static HWND SK_WaitForReadinessGate(DWORD targetPid, DWORD timeoutMs, const std::wstring& logPath, const std::wstring& exeNameForLog)
 {
-  AppendLogf(logPath, L"wait_gate_pid pid=%lu exe=%ls", (unsigned long)targetPid, exeNameForLog.c_str());
-  HostLogAppendf(L"wait_gate_pid pid=%lu exe=%ls", (unsigned long)targetPid, exeNameForLog.c_str());
+  const ULONGLONG gateStartMs = GetTickCount64();
+  AppendLogf(logPath, L"wait_gate_pid pid=%lu exe=%ls ts=%llu", (unsigned long)targetPid, exeNameForLog.c_str(), (unsigned long long)gateStartMs);
+  HostLogAppendf(L"wait_gate_pid pid=%lu exe=%ls ts=%llu", (unsigned long)targetPid, exeNameForLog.c_str(), (unsigned long long)gateStartMs);
 
   static constexpr DWORD POLL_MS = 100;
   static constexpr DWORD LOG_RATE_MS = 200;
 
-  const ULONGLONG gateStartMs = GetTickCount64();
   ULONGLONG visibleSinceMs = 0;
   HWND lastHwnd = nullptr;
   int lastVis = 0;
@@ -845,14 +845,15 @@ static HWND SK_WaitForReadinessGate(DWORD targetPid, DWORD timeoutMs, const std:
     Sleep(POLL_MS);
   }
 
-  HostLogAppendf(L"wait_gate_preinject pid=%lu hwnd=0x%p window_visible_ms=%lu gfx_modules_seen:dxgi=%d d3d11=%d opengl32=%d fallback=%d",
+  HostLogAppendf(L"wait_gate_preinject pid=%lu hwnd=0x%p window_visible_ms=%lu gfx_modules_seen:dxgi=%d d3d11=%d opengl32=%d fallback=%d gate_elapsed_ms=%llu",
     (unsigned long)targetPid,
     gateHwnd,
     (unsigned long)gateVisibleMs,
     gateSeenDxgi ? 1 : 0,
     gateSeenD3d11 ? 1 : 0,
     gateSeenOpenGL ? 1 : 0,
-    gateFallbackUsed ? 1 : 0);
+    gateFallbackUsed ? 1 : 0,
+    (unsigned long long)(GetTickCount64() - gateStartMs));
 
   WriteWindowProofOnceForPid(targetPid, gateHwnd);
 

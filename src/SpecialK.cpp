@@ -158,7 +158,6 @@ template <        >
   _RTL_CONSTANT_STRING_remove_const_macro(s)                \
 }
 
-static
 void
 SK_StageTraceW (const wchar_t* stage)
 {

@@ -80,6 +80,8 @@ volatile LONG     __SK_Init       = FALSE;
 
 //#define _THREADED_BASIC_INIT
 
+extern void SK_StageTraceW (const wchar_t* stage);
+
 struct init_params_s {
   std::wstring  backend    = L"INVALID";
   void*         callback   =    nullptr;
@@ -584,6 +586,8 @@ SK_InitCore (std::wstring, void* callback)
 
   SK_PROFILE_FIRST_CALL
 
+  SK_StageTraceW (L"09_initcore_begin");
+
   using finish_pfn   = void (WINAPI *)  (void);
   using callback_pfn = void (WINAPI *)(_Releases_exclusive_lock_ (init_mutex) finish_pfn);
 
@@ -689,10 +693,16 @@ extern void BasicInit (void);
 
   // Setup the compatibility back end, which monitors loaded libraries,
   //   blacklists bad DLLs and detects render APIs...
+  SK_StageTraceW (L"11_enummodules_begin");
   SK_EnumLoadedModules  (SK_ModuleEnum::PostLoad);
+  SK_StageTraceW (L"11_enummodules_end");
+  SK_StageTraceW (L"12_memhooks_begin");
   SK_Memory_InitHooks   ();
+  SK_StageTraceW (L"12_memhooks_end");
 
+  SK_StageTraceW (L"13_renderbk_begin");
   SK_InitRenderBackends ();
+  SK_StageTraceW (L"13_renderbk_end");
 
   if (SK_GetDLLRole () != DLL_ROLE::DInput8)
   {
@@ -715,6 +725,7 @@ extern void BasicInit (void);
 
   void
      __stdcall SK_InitFinishCallback (void);
+  SK_StageTraceW (L"09_initcore_end");
   callback_fn (SK_InitFinishCallback);
 }
 
@@ -1124,6 +1135,8 @@ void BasicInit (void)
 {
   SK_PROFILE_FIRST_CALL
 
+  SK_StageTraceW (L"08_basicinit_begin");
+
 #ifndef SK_SIDECAR_MINIMAL
   // Cleanup any leftover temporary files from the last launch
   SK_DeleteTemporaryFiles ();
@@ -1145,7 +1158,9 @@ void BasicInit (void)
     SK_GetModuleHandleW (L"nvwgf2umx.dll");
 
   // Setup unhooked function pointers
+  SK_StageTraceW (L"10_preinit_loadlib_begin");
   SK_PreInitLoadLibrary ();
+  SK_StageTraceW (L"10_preinit_loadlib_end");
 
   if (config.system.handle_crashes)
     SK::Diagnostics::CrashHandler::Init   ();
@@ -1273,6 +1288,7 @@ void BasicInit (void)
   //  SK_ApplyQueuedHooks ();
   //}
   //if (! bEnable) SK_DisableApplyQueuedHooks ();
+  SK_StageTraceW (L"08_basicinit_end");
 }
 
 DWORD
@@ -1280,6 +1296,8 @@ WINAPI
 DllThread (LPVOID user)
 {
   SK_PROFILE_FIRST_CALL
+
+  SK_StageTraceW (L"07_dllthread_enter");
 
   WriteULongNoFence (&dwInitThreadId, SK_Thread_GetCurrentId ());
 
