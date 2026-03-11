@@ -319,6 +319,7 @@ SK_LoadGPUVendorAPIs (void)
       dll_log->Log ( L"[  NvAPI   ] >> NVIDIA Driver Version: %s",
                       sk::NVAPI::GetDriverVersion ().c_str () );
 
+      // gpu_count is used in both full and minimal log paths below
       const int gpu_count =
         sk::NVAPI::CountPhysicalGPUs ();
 
@@ -1234,6 +1235,9 @@ void BasicInit (void)
     SK::Diagnostics::Debugger::SpawnConsole ();
 
 #ifndef SK_SIDECAR_MINIMAL
+   // All remaining subsystems (plugins, Steam, Fraps) are not needed for
+   //   SidecarK compositor startup; they are deferred to full builds only.
+
    // Games that need plug-in initialization before Steam
    //
    switch (SK_GetCurrentGameID ())
