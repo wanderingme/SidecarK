@@ -316,6 +316,7 @@ SK_LoadGPUVendorAPIs (void)
 #endif
       }
 
+#ifndef SK_SIDECAR_MINIMAL
       const int num_sli_gpus =
         sk::NVAPI::CountSLIGPUs ();
 
@@ -405,6 +406,7 @@ SK_LoadGPUVendorAPIs (void)
                                     SW_SHOWDEFAULT );
         exit (0);
       }
+#endif // !SK_SIDECAR_MINIMAL
     }
 
     // Not NVIDIA, maybe AMD?
@@ -1122,6 +1124,7 @@ void BasicInit (void)
 {
   SK_PROFILE_FIRST_CALL
 
+#ifndef SK_SIDECAR_MINIMAL
   // Cleanup any leftover temporary files from the last launch
   SK_DeleteTemporaryFiles ();
 
@@ -1134,6 +1137,7 @@ void BasicInit (void)
              SK_ImGui_Toast::ShowTitle   |
              SK_ImGui_Toast::ShowOnce    |
              SK_ImGui_Toast::UseDuration );
+#endif
 
   // Prewarm the usermode driver so we can do other initialization that
   //   depends on knowing whether nvgf2umx is active in the software or not.
@@ -1145,8 +1149,11 @@ void BasicInit (void)
 
   if (config.system.handle_crashes)
     SK::Diagnostics::CrashHandler::Init   ();
+#ifndef SK_SIDECAR_MINIMAL
   SK::Diagnostics::CrashHandler::InitSyms ();
+#endif
 
+#ifndef SK_SIDECAR_MINIMAL
   // Setup widgets now, some of them do non-trivial things
   //   such as load INI settings for HDR...
   SK_Widget_InitEverything ();
@@ -1154,11 +1161,14 @@ void BasicInit (void)
   // This installs hooks for COM's CoCreateInstance, used for various old DirectX
   //   features in addition to Special K's WMI monitoring services
   SK_WMI_Init ();
+#endif
 
+#ifndef SK_SIDECAR_MINIMAL
   SK_Unity_PreInit ();
 
   SK::EOS::Init    (false);
   SK::Galaxy::Init (     );
+#endif
 
   //// Do this from the startup thread [these functions queue, but don't apply]
   if (! config.input.dont_hook_core)
@@ -1168,10 +1178,14 @@ void BasicInit (void)
     SK_Input_PreInit        (); // Hook only symbols in user32 and kernel32
   }
   SK_HookWinAPI             ();
+#ifndef SK_SIDECAR_MINIMAL
   SK_CPU_InstallHooks       ();
+#endif
   SK_NvAPI_PreInitHDR       ();
   SK_NvAPI_InitializeHDR    ();
+#ifndef SK_SIDECAR_MINIMAL
   SK_DStorage_Init          ();
+#endif
 
   ////// For the global injector, when not started by SKIM, check its version
   ////if ( (SK_IsInjected () && (! SK_IsSuperSpecialK ())) )
@@ -1180,8 +1194,10 @@ void BasicInit (void)
   if (config.dpi.disable_scaling)   SK_Display_DisableDPIScaling      (     );
   if (config.dpi.per_monitor.aware) SK_Display_SetMonitorDPIAwareness (false);
 
+#ifndef SK_SIDECAR_MINIMAL
   SK_File_InitHooks    ();
   SK_Network_InitHooks ();
+#endif
 
   if (config.system.display_debug_out)
     SK::Diagnostics::Debugger::SpawnConsole ();
@@ -1204,6 +1220,7 @@ void BasicInit (void)
 #endif // !SK_SIDECAR_MINIMAL
 
 
+#ifndef SK_SIDECAR_MINIMAL
   // Steam Overlay and SteamAPI Manipulation
   //
   if (! config.platform.silent)
@@ -1246,6 +1263,7 @@ void BasicInit (void)
       SK_Steam_PreHookCore ();
     }
   }
+#endif
 
   if (SK_COMPAT_IsFrapsPresent ())
       SK_COMPAT_UnloadFraps ();
