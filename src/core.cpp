@@ -316,14 +316,15 @@ SK_LoadGPUVendorAPIs (void)
 #endif
       }
 
-      const int num_sli_gpus =
-        sk::NVAPI::CountSLIGPUs ();
-
       dll_log->Log ( L"[  NvAPI   ] >> NVIDIA Driver Version: %s",
                       sk::NVAPI::GetDriverVersion ().c_str () );
 
       const int gpu_count =
         sk::NVAPI::CountPhysicalGPUs ();
+
+#ifndef SK_SIDECAR_MINIMAL
+      const int num_sli_gpus =
+        sk::NVAPI::CountSLIGPUs ();
 
       dll_log->Log ( gpu_count > 1 ? L"[  NvAPI   ]  * Number of Installed NVIDIA GPUs: %i  "
                                      L"{ SLI: '%s' }"
@@ -405,6 +406,10 @@ SK_LoadGPUVendorAPIs (void)
                                     SW_SHOWDEFAULT );
         exit (0);
       }
+#else // SK_SIDECAR_MINIMAL
+      dll_log->Log ( L"[  NvAPI   ]  * Number of Installed NVIDIA GPUs: %i",
+                                       gpu_count );
+#endif // !SK_SIDECAR_MINIMAL
     }
 
     // Not NVIDIA, maybe AMD?
@@ -688,20 +693,31 @@ extern void BasicInit (void);
   // Setup the compatibility back end, which monitors loaded libraries,
   //   blacklists bad DLLs and detects render APIs...
   SK_EnumLoadedModules  (SK_ModuleEnum::PostLoad);
-  SK_Memory_InitHooks   ();
+
+#ifndef SK_SIDECAR_MINIMAL
+  { SK_PROFILE_SCOPED_TASK (InitCore_MemoryHooks)
+    SK_Memory_InitHooks   ();
+  }
+#endif // !SK_SIDECAR_MINIMAL
 
   SK_InitRenderBackends ();
 
-  if (SK_GetDLLRole () != DLL_ROLE::DInput8)
-  {
-    if (SK_GetModuleHandle (L"dinput8.dll"))
-      SK_Input_HookDI8  ();
+#ifndef SK_SIDECAR_MINIMAL
+  { SK_PROFILE_SCOPED_TASK (InitCore_DInput_Hooks)
+    if (SK_GetDLLRole () != DLL_ROLE::DInput8)
+    {
+      if (SK_GetModuleHandle (L"dinput8.dll"))
+        SK_Input_HookDI8  ();
 
-    if (SK_GetModuleHandle (L"dinput.dll"))
-      SK_Input_HookDI7  ();
+      if (SK_GetModuleHandle (L"dinput.dll"))
+        SK_Input_HookDI7  ();
+    }
   }
 
-  SK_Input_Init ();
+  { SK_PROFILE_SCOPED_TASK (InitCore_Input_Init)
+    SK_Input_Init ();
+  }
+#endif // !SK_SIDECAR_MINIMAL
 
   if (sk::NVAPI::nv_hardware)
   {
@@ -1122,18 +1138,24 @@ void BasicInit (void)
 {
   SK_PROFILE_FIRST_CALL
 
-  // Cleanup any leftover temporary files from the last launch
-  SK_DeleteTemporaryFiles ();
+#ifndef SK_SIDECAR_MINIMAL
+  { SK_PROFILE_SCOPED_TASK (BasicInit_TempCleanup)
+    // Cleanup any leftover temporary files from the last launch
+    SK_DeleteTemporaryFiles ();
+  }
 
-  // Add a notification that will not go away until a user reads it...
-  SK_ImGui_CreateNotification (
-    "Notification.HelloWorld", SK_ImGui_Toast::Success,
-    "Notifications can be configured by right-clicking them.",
-    "Special K Notification System Initialized Successfully",
-      25000, SK_ImGui_Toast::ShowCaption |
-             SK_ImGui_Toast::ShowTitle   |
-             SK_ImGui_Toast::ShowOnce    |
-             SK_ImGui_Toast::UseDuration );
+  { SK_PROFILE_SCOPED_TASK (BasicInit_Notification)
+    // Add a notification that will not go away until a user reads it...
+    SK_ImGui_CreateNotification (
+      "Notification.HelloWorld", SK_ImGui_Toast::Success,
+      "Notifications can be configured by right-clicking them.",
+      "Special K Notification System Initialized Successfully",
+        25000, SK_ImGui_Toast::ShowCaption |
+               SK_ImGui_Toast::ShowTitle   |
+               SK_ImGui_Toast::ShowOnce    |
+               SK_ImGui_Toast::UseDuration );
+  }
+#endif // !SK_SIDECAR_MINIMAL
 
   // Prewarm the usermode driver so we can do other initialization that
   //   depends on knowing whether nvgf2umx is active in the software or not.
@@ -1145,33 +1167,54 @@ void BasicInit (void)
 
   if (config.system.handle_crashes)
     SK::Diagnostics::CrashHandler::Init   ();
-  SK::Diagnostics::CrashHandler::InitSyms ();
 
-  // Setup widgets now, some of them do non-trivial things
-  //   such as load INI settings for HDR...
-  SK_Widget_InitEverything ();
+#ifndef SK_SIDECAR_MINIMAL
+  { SK_PROFILE_SCOPED_TASK (BasicInit_CrashSyms)
+    SK::Diagnostics::CrashHandler::InitSyms ();
+  }
 
-  // This installs hooks for COM's CoCreateInstance, used for various old DirectX
-  //   features in addition to Special K's WMI monitoring services
-  SK_WMI_Init ();
+  { SK_PROFILE_SCOPED_TASK (BasicInit_Widgets)
+    // Setup widgets now, some of them do non-trivial things
+    //   such as load INI settings for HDR...
+    SK_Widget_InitEverything ();
+  }
+
+  { SK_PROFILE_SCOPED_TASK (BasicInit_WMI)
+    // This installs hooks for COM's CoCreateInstance, used for various old DirectX
+    //   features in addition to Special K's WMI monitoring services
+    SK_WMI_Init ();
+  }
 
   SK_Unity_PreInit ();
 
-  SK::EOS::Init    (false);
-  SK::Galaxy::Init (     );
+  { SK_PROFILE_SCOPED_TASK (BasicInit_EOS_Galaxy)
+    SK::EOS::Init    (false);
+    SK::Galaxy::Init (     );
+  }
 
   //// Do this from the startup thread [these functions queue, but don't apply]
   if (! config.input.dont_hook_core)
-  {
+  { SK_PROFILE_SCOPED_TASK (BasicInit_InputPreInit)
     // TODO: Split this into Keyboard hooks and Mouse hooks
     //         and allow picking them individually
     SK_Input_PreInit        (); // Hook only symbols in user32 and kernel32
   }
+#endif // !SK_SIDECAR_MINIMAL
+
   SK_HookWinAPI             ();
-  SK_CPU_InstallHooks       ();
-  SK_NvAPI_PreInitHDR       ();
-  SK_NvAPI_InitializeHDR    ();
-  SK_DStorage_Init          ();
+
+#ifndef SK_SIDECAR_MINIMAL
+  { SK_PROFILE_SCOPED_TASK (BasicInit_CPU_Hooks)
+    SK_CPU_InstallHooks       ();
+  }
+  { SK_PROFILE_SCOPED_TASK (BasicInit_NvAPI_HDR)
+    SK_NvAPI_PreInitHDR       ();
+    SK_NvAPI_InitializeHDR    ();
+  }
+  { SK_PROFILE_SCOPED_TASK (BasicInit_DStorage)
+    SK_DStorage_Init          ();
+  }
+#endif // !SK_SIDECAR_MINIMAL
 
   ////// For the global injector, when not started by SKIM, check its version
   ////if ( (SK_IsInjected () && (! SK_IsSuperSpecialK ())) )
@@ -1180,16 +1223,19 @@ void BasicInit (void)
   if (config.dpi.disable_scaling)   SK_Display_DisableDPIScaling      (     );
   if (config.dpi.per_monitor.aware) SK_Display_SetMonitorDPIAwareness (false);
 
-  SK_File_InitHooks    ();
-  SK_Network_InitHooks ();
+#ifndef SK_SIDECAR_MINIMAL
+  { SK_PROFILE_SCOPED_TASK (BasicInit_FileNet_Hooks)
+    SK_File_InitHooks    ();
+    SK_Network_InitHooks ();
+  }
+#endif // !SK_SIDECAR_MINIMAL
 
   if (config.system.display_debug_out)
     SK::Diagnostics::Debugger::SpawnConsole ();
 
-
+#ifndef SK_SIDECAR_MINIMAL
    // Games that need plug-in initialization before Steam
    //
-#ifndef SK_SIDECAR_MINIMAL
    switch (SK_GetCurrentGameID ())
    {
 #ifdef _WIN64
@@ -1201,54 +1247,55 @@ void BasicInit (void)
      default:
        break;
    }
-#endif // !SK_SIDECAR_MINIMAL
 
-
-  // Steam Overlay and SteamAPI Manipulation
-  //
-  if (! config.platform.silent)
-  {
-    config.steam.force_load_steamapi = false;
-
-    // TODO: Rename -- this initializes critical sections and performance
-    //                   counters needed by SK's SteamAPI back end.
+  { SK_PROFILE_SCOPED_TASK (BasicInit_Steam)
+    // Steam Overlay and SteamAPI Manipulation
     //
-    SK_Steam_InitCommandConsoleVariables  ();
-
-    // Non-Steam games have non-zero (negative) AppIDs, but cannot use SteamAPI
-    if (SK::SteamAPI::AppID () + config.steam.appid > 0)
+    if (! config.platform.silent)
     {
-      ///// Lazy-load SteamAPI into a process that doesn't use it; this brings
-      /////   a number of general-purpose benefits (such as battery charge monitoring).
-      bool kick_start = config.steam.force_load_steamapi;
+      config.steam.force_load_steamapi = false;
 
-      if (kick_start || (! SK_Steam_TestImports (SK_GetModuleHandle (nullptr))))
+      // TODO: Rename -- this initializes critical sections and performance
+      //                   counters needed by SK's SteamAPI back end.
+      //
+      SK_Steam_InitCommandConsoleVariables  ();
+
+      // Non-Steam games have non-zero (negative) AppIDs, but cannot use SteamAPI
+      if (SK::SteamAPI::AppID () + config.steam.appid > 0)
       {
-        // Implicitly kick-start anything in SteamApps\common that does not import
-        //   SteamAPI...
-        if ((! kick_start) && config.steam.auto_inject)
+        ///// Lazy-load SteamAPI into a process that doesn't use it; this brings
+        /////   a number of general-purpose benefits (such as battery charge monitoring).
+        bool kick_start = config.steam.force_load_steamapi;
+
+        if (kick_start || (! SK_Steam_TestImports (SK_GetModuleHandle (nullptr))))
         {
-          if (StrStrIW (SK_GetHostPath (), LR"(SteamApps\common)") != nullptr)
+          // Implicitly kick-start anything in SteamApps\common that does not import
+          //   SteamAPI...
+          if ((! kick_start) && config.steam.auto_inject)
           {
-            // Only do this if the game doesn't have a copy of the DLL lying around somewhere,
-            //   because if we init Special K's SteamAPI DLL, the game's will fail to init and
-            //     the game won't be happy about that!
-            kick_start =
-              (! SK_Modules->LoadLibrary (SK_Steam_GetDLLPath ())) ||
-                    config.steam.force_load_steamapi;
+            if (StrStrIW (SK_GetHostPath (), LR"(SteamApps\common)") != nullptr)
+            {
+              // Only do this if the game doesn't have a copy of the DLL lying around somewhere,
+              //   because if we init Special K's SteamAPI DLL, the game's will fail to init and
+              //     the game won't be happy about that!
+              kick_start =
+                (! SK_Modules->LoadLibrary (SK_Steam_GetDLLPath ())) ||
+                      config.steam.force_load_steamapi;
+            }
           }
+
+          if (kick_start)
+            SK_Steam_KickStart (SK_Steam_GetDLLPath ());
         }
 
-        if (kick_start)
-          SK_Steam_KickStart (SK_Steam_GetDLLPath ());
+        SK_Steam_PreHookCore ();
       }
-
-      SK_Steam_PreHookCore ();
     }
   }
 
   if (SK_COMPAT_IsFrapsPresent ())
       SK_COMPAT_UnloadFraps ();
+#endif // !SK_SIDECAR_MINIMAL
 
   //bool bEnable = SK_EnableApplyQueuedHooks  ();
   //{
