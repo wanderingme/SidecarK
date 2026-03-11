@@ -316,11 +316,12 @@ SK_LoadGPUVendorAPIs (void)
 #endif
       }
 
-      const int num_sli_gpus =
-        sk::NVAPI::CountSLIGPUs ();
-
       dll_log->Log ( L"[  NvAPI   ] >> NVIDIA Driver Version: %s",
                       sk::NVAPI::GetDriverVersion ().c_str () );
+
+#ifndef SK_SIDECAR_MINIMAL
+      const int num_sli_gpus =
+        sk::NVAPI::CountSLIGPUs ();
 
       const int gpu_count =
         sk::NVAPI::CountPhysicalGPUs ();
@@ -405,6 +406,7 @@ SK_LoadGPUVendorAPIs (void)
                                     SW_SHOWDEFAULT );
         exit (0);
       }
+#endif // !SK_SIDECAR_MINIMAL
     }
 
     // Not NVIDIA, maybe AMD?
@@ -687,11 +689,14 @@ extern void BasicInit (void);
 
   // Setup the compatibility back end, which monitors loaded libraries,
   //   blacklists bad DLLs and detects render APIs...
+#ifndef SK_SIDECAR_MINIMAL
   SK_EnumLoadedModules  (SK_ModuleEnum::PostLoad);
   SK_Memory_InitHooks   ();
+#endif // !SK_SIDECAR_MINIMAL
 
   SK_InitRenderBackends ();
 
+#ifndef SK_SIDECAR_MINIMAL
   if (SK_GetDLLRole () != DLL_ROLE::DInput8)
   {
     if (SK_GetModuleHandle (L"dinput8.dll"))
@@ -710,6 +715,7 @@ extern void BasicInit (void);
       SK_NvAPI_DRS_SetDWORD (VSYNCMODE_ID, VSYNCMODE_PASSIVE);
     }
   }
+#endif // !SK_SIDECAR_MINIMAL
 
   void
      __stdcall SK_InitFinishCallback (void);
@@ -1122,6 +1128,7 @@ void BasicInit (void)
 {
   SK_PROFILE_FIRST_CALL
 
+#ifndef SK_SIDECAR_MINIMAL
   // Cleanup any leftover temporary files from the last launch
   SK_DeleteTemporaryFiles ();
 
@@ -1139,10 +1146,12 @@ void BasicInit (void)
   //   depends on knowing whether nvgf2umx is active in the software or not.
   sk::NVAPI::nvwgf2umx =
     SK_GetModuleHandleW (L"nvwgf2umx.dll");
+#endif // !SK_SIDECAR_MINIMAL
 
   // Setup unhooked function pointers
   SK_PreInitLoadLibrary ();
 
+#ifndef SK_SIDECAR_MINIMAL
   if (config.system.handle_crashes)
     SK::Diagnostics::CrashHandler::Init   ();
   SK::Diagnostics::CrashHandler::InitSyms ();
@@ -1167,11 +1176,14 @@ void BasicInit (void)
     //         and allow picking them individually
     SK_Input_PreInit        (); // Hook only symbols in user32 and kernel32
   }
+#endif // !SK_SIDECAR_MINIMAL
   SK_HookWinAPI             ();
+#ifndef SK_SIDECAR_MINIMAL
   SK_CPU_InstallHooks       ();
   SK_NvAPI_PreInitHDR       ();
   SK_NvAPI_InitializeHDR    ();
   SK_DStorage_Init          ();
+#endif // !SK_SIDECAR_MINIMAL
 
   ////// For the global injector, when not started by SKIM, check its version
   ////if ( (SK_IsInjected () && (! SK_IsSuperSpecialK ())) )
@@ -1180,8 +1192,10 @@ void BasicInit (void)
   if (config.dpi.disable_scaling)   SK_Display_DisableDPIScaling      (     );
   if (config.dpi.per_monitor.aware) SK_Display_SetMonitorDPIAwareness (false);
 
+#ifndef SK_SIDECAR_MINIMAL
   SK_File_InitHooks    ();
   SK_Network_InitHooks ();
+#endif // !SK_SIDECAR_MINIMAL
 
   if (config.system.display_debug_out)
     SK::Diagnostics::Debugger::SpawnConsole ();
@@ -1204,6 +1218,7 @@ void BasicInit (void)
 #endif // !SK_SIDECAR_MINIMAL
 
 
+#ifndef SK_SIDECAR_MINIMAL
   // Steam Overlay and SteamAPI Manipulation
   //
   if (! config.platform.silent)
@@ -1249,6 +1264,7 @@ void BasicInit (void)
 
   if (SK_COMPAT_IsFrapsPresent ())
       SK_COMPAT_UnloadFraps ();
+#endif // !SK_SIDECAR_MINIMAL
 
   //bool bEnable = SK_EnableApplyQueuedHooks  ();
   //{
