@@ -390,10 +390,12 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
   // Catch imports that we missed because they were loaded
   //   as dependencies of another DLL... but stop doing this
   //     check after 15 frames to avoid unnecessary overhead.
+#ifndef SK_SIDECAR_MINIMAL
   if (SK_GetFramesDrawn () < 15)
   {
     SK_Input_PreInit ();
   }
+#endif // !SK_SIDECAR_MINIMAL
 
   wchar_t     wszCallingMod [MAX_PATH + 2] = { };
   wcsncpy_s ( wszCallingMod, MAX_PATH,
@@ -513,6 +515,7 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
     {   if (!SK_IsModuleLoaded (L"EOSOVH-Win64-Shipping.dll"))
           SK_RunOnce (SK_BootOpenGL ());
     }
+#ifndef SK_SIDECAR_MINIMAL
     else if (   StrStrI  (lpFileName, SK_TEXT("GameInput.dll")) ||
                 StrStrIW (wszCallingMod,     L"GameInput.dll")  )
       SK_RunOnce (SK_Input_HookGameInput ());
@@ -576,6 +579,7 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
     {
       SK_RunOnce (SK_DStorage_Init ());
     }
+#endif // !SK_SIDECAR_MINIMAL
     else if (   StrStrI ( lpFileName, SK_TEXT("sl.interposer.dll")) ||
                 StrStrIW (wszCallingMod,     L"sl.interposer.dll") )
     {
