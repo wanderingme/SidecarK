@@ -276,6 +276,12 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
 #undef lstrcat
 #undef GetModuleHandleEx
 
+  // hLoadedMod is only referenced inside the !SK_SIDECAR_MINIMAL input/platform
+  //   dispatch block; suppress C4100 in minimal builds.
+#ifdef SK_SIDECAR_MINIMAL
+  UNREFERENCED_PARAMETER (hLoadedMod);
+#endif
+
   HMODULE
   SK_Debug_LoadHelper (void);
 
@@ -390,10 +396,12 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
   // Catch imports that we missed because they were loaded
   //   as dependencies of another DLL... but stop doing this
   //     check after 15 frames to avoid unnecessary overhead.
+#ifndef SK_SIDECAR_MINIMAL
   if (SK_GetFramesDrawn () < 15)
   {
     SK_Input_PreInit ();
   }
+#endif // !SK_SIDECAR_MINIMAL
 
   wchar_t     wszCallingMod [MAX_PATH + 2] = { };
   wcsncpy_s ( wszCallingMod, MAX_PATH,
@@ -513,6 +521,7 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
     {   if (!SK_IsModuleLoaded (L"EOSOVH-Win64-Shipping.dll"))
           SK_RunOnce (SK_BootOpenGL ());
     }
+#ifndef SK_SIDECAR_MINIMAL
     else if (   StrStrI  (lpFileName, SK_TEXT("GameInput.dll")) ||
                 StrStrIW (wszCallingMod,     L"GameInput.dll")  )
       SK_RunOnce (SK_Input_HookGameInput ());
@@ -590,6 +599,7 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
     {
       SK_COMPAT_CheckStreamlineSupport ();
     }
+#endif // !SK_SIDECAR_MINIMAL
     else if (   StrStrI ( lpFileName, SK_TEXT("msmpeg2vdec.dll")) ||
                 StrStrIW (wszCallingMod,     L"msmpeg2vdec.dll"))
     {
