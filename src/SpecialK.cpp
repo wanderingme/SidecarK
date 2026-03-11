@@ -201,6 +201,35 @@ SK_StageTraceW (const wchar_t* stage)
     WriteFile (hFile, szLine, cch, &cbWritten, nullptr);
     CloseHandle (hFile);
   }
+
+  // Consolidated timing log: one line per stage in call order.
+  // %TEMP%\sk_timing_{pid}.txt  — append-only, ASCII, easy to diff.
+  // Format: tick=NNNNNNN stage=STAGE_NAME
+  {
+    char    szStageName  [64]       = { };
+    char    szTimingLine [128]      = { };
+    wchar_t wszTimingPath [MAX_PATH] = { };
+
+    WideCharToMultiByte (CP_UTF8, 0, stage, -1, szStageName,
+                         (int)sizeof (szStageName) - 1, nullptr, nullptr);
+
+    wsprintfW ( wszTimingPath, L"%ssk_timing_%lu.txt", wszTempPath, (unsigned long)pid );
+    _snprintf_s ( szTimingLine, sizeof (szTimingLine), _TRUNCATE,
+                  "tick=%I64u stage=%s\r\n", t, szStageName );
+
+    HANDLE hTimingFile =
+      CreateFileW ( wszTimingPath, FILE_APPEND_DATA,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr );
+
+    if (hTimingFile != INVALID_HANDLE_VALUE)
+    {
+      DWORD cbTimingWritten = 0;
+      const DWORD cchTiming = (DWORD)lstrlenA (szTimingLine);
+      WriteFile (hTimingFile, szTimingLine, cchTiming, &cbTimingWritten, nullptr);
+      CloseHandle (hTimingFile);
+    }
+  }
 }
 
 void SK_LazyCleanup (void)

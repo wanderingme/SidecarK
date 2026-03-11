@@ -2018,7 +2018,8 @@ int wmain(int argc, wchar_t** argv)
     "(use --log / --status to opt into explicit file output)"
   );
 
-  AppendLog(logPath, L"starting");
+  AppendLogf(logPath, L"starting ts=%llu", (unsigned long long)GetTickCount64());
+  HostLogAppendf(L"starting ts=%llu", (unsigned long long)GetTickCount64());
   WriteStatusAtomic(statusPath, L"starting", 0, L"none");
   SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
 
