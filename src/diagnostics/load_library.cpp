@@ -276,6 +276,12 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
 #undef lstrcat
 #undef GetModuleHandleEx
 
+  // hLoadedMod is only referenced inside the !SK_SIDECAR_MINIMAL input/platform
+  //   dispatch block; suppress C4100 in minimal builds.
+#ifdef SK_SIDECAR_MINIMAL
+  UNREFERENCED_PARAMETER (hLoadedMod);
+#endif
+
   HMODULE
   SK_Debug_LoadHelper (void);
 
