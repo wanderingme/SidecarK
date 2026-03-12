@@ -1060,6 +1060,20 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static UINT                         s_d3d12_staging_height    = 0;
   static UINT64                       s_d3d12_upload_size       = 0;
 
+  // D3D11 shader fallback resources (for unsupported backbuffer formats, e.g. R16G16B16A16_FLOAT)
+  static ID3D11Texture2D*           s_fb11_tex         = nullptr; // BGRA8 SRV-capable overlay texture
+  static ID3D11ShaderResourceView*  s_fb11_srv         = nullptr; // SRV for s_fb11_tex
+  static ID3D11VertexShader*        s_fb11_vs          = nullptr; // Fullscreen quad VS (SV_VertexID)
+  static ID3D11PixelShader*         s_fb11_ps          = nullptr; // Simple overlay sample PS
+  static ID3D11BlendState*          s_fb11_blend       = nullptr; // Alpha blend: src*srcA + dst*(1-srcA)
+  static ID3D11SamplerState*        s_fb11_sampler     = nullptr; // Linear clamp sampler
+  static ID3D11RasterizerState*     s_fb11_raster      = nullptr; // Solid fill, no cull, no depth clip
+  static UINT                       s_fb11_texW        = 0;
+  static UINT                       s_fb11_texH        = 0;
+  static std::atomic<bool>          s_fb11_shaders_ok  = false;
+  static bool                       s_fb11_has_frame   = false;
+  static LONG                       s_fb11_last_counter = 0;
+
   auto _SidecarLog = [&](const wchar_t* fmt, ...)
   {
     if (! SidecarK_DiagnosticsEnabled ())
@@ -1173,6 +1187,19 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     s_d3d12_staging_width  = 0;
     s_d3d12_staging_height = 0;
     s_d3d12_upload_size    = 0;
+
+    // Release D3D11 shader fallback resources (device-bound; must reset on PID/device change)
+    if (s_fb11_srv)     { s_fb11_srv->Release();     s_fb11_srv     = nullptr; }
+    if (s_fb11_tex)     { s_fb11_tex->Release();     s_fb11_tex     = nullptr; }
+    if (s_fb11_vs)      { s_fb11_vs->Release();      s_fb11_vs      = nullptr; }
+    if (s_fb11_ps)      { s_fb11_ps->Release();      s_fb11_ps      = nullptr; }
+    if (s_fb11_blend)   { s_fb11_blend->Release();   s_fb11_blend   = nullptr; }
+    if (s_fb11_sampler) { s_fb11_sampler->Release(); s_fb11_sampler = nullptr; }
+    if (s_fb11_raster)  { s_fb11_raster->Release();  s_fb11_raster  = nullptr; }
+    s_fb11_texW = 0; s_fb11_texH = 0;
+    s_fb11_shaders_ok.store (false);
+    s_fb11_has_frame    = false;
+    s_fb11_last_counter = 0;
 
     // Release cached target swapchain so the next matching swapchain can claim it
     InterlockedExchangePointer (reinterpret_cast<void **> (&s_target_swapchain), nullptr);
@@ -1962,12 +1989,267 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         }
         else
         {
-          static std::atomic<bool> s_logged_format_fail = false;
-          if (!s_logged_format_fail.exchange(true))
+          // -----------------------------------------------------------------------
+          // UNSUPPORTED FORMAT FALLBACK (D3D11): shader-based composite.
+          // Activated for backbuffer formats not in the direct-copy set, e.g.
+          // DXGI_FORMAT_R16G16B16A16_FLOAT (HDR exclusive/borderless fullscreen).
+          // -----------------------------------------------------------------------
+          static std::atomic<bool> s_logged_d3d11_fb_entry = false;
+          if (!s_logged_d3d11_fb_entry.exchange (true))
+            _SidecarLog (L"SKF1 D3D11 fallback: shader composite path for fmt=%u", (UINT)bbDesc.Format);
+
+          // --- Step 1: compile VS + PS once (using SK_D3D_Compile / D3DCompiler) ---
+          if (!s_fb11_shaders_ok.load ())
           {
-            wchar_t msg[256];
-            wsprintfW(msg, L"→ Format check FAILED: bbDesc.Format=%u (not B8G8R8A8, R8G8B8A8, or R10G10B10A2)", bbDesc.Format);
-            _SidecarLog(msg);
+            // Fullscreen quad VS: generates positions and UVs from SV_VertexID,
+            // no vertex buffer or input layout required.
+            static constexpr char s_fb_vs_src[] =
+              "void main(uint id:SV_VertexID,out float4 p:SV_Position,out float2 uv:TEXCOORD0)"
+              "{uv=float2((id<<1)&2,id&2);p=float4(uv.x*2.0-1.0,-(uv.y*2.0-1.0),0.0,1.0);}";
+            // Passthrough PS: samples the BGRA8 SRV and outputs to the RTV.
+            // D3D11 maps BGRA8 SRV channels to (r,g,b,a) correctly for the shader.
+            static constexpr char s_fb_ps_src[] =
+              "Texture2D<float4> t:register(t0);SamplerState s:register(s0);"
+              "float4 main(float4 p:SV_Position,float2 uv:TEXCOORD0):SV_Target{return t.Sample(s,uv);}";
+
+            ID3DBlob* vsBlob = nullptr;
+            ID3DBlob* psBlob = nullptr;
+            const HRESULT hrVS = SK_D3D_Compile (
+              s_fb_vs_src, strlen (s_fb_vs_src), "SKF1_FB_VS",
+              nullptr, nullptr, "main", "vs_4_0", 0, 0, &vsBlob, nullptr);
+            const HRESULT hrPS = SK_D3D_Compile (
+              s_fb_ps_src, strlen (s_fb_ps_src), "SKF1_FB_PS",
+              nullptr, nullptr, "main", "ps_4_0", 0, 0, &psBlob, nullptr);
+
+            if (SUCCEEDED (hrVS) && vsBlob != nullptr && s_fb11_vs == nullptr)
+              dev->CreateVertexShader (vsBlob->GetBufferPointer (), vsBlob->GetBufferSize (), nullptr, &s_fb11_vs);
+            if (SUCCEEDED (hrPS) && psBlob != nullptr && s_fb11_ps == nullptr)
+              dev->CreatePixelShader  (psBlob->GetBufferPointer (), psBlob->GetBufferSize (), nullptr, &s_fb11_ps);
+            if (vsBlob) vsBlob->Release ();
+            if (psBlob) psBlob->Release ();
+
+            // Alpha blend: output = srcRGB*srcA + dstRGB*(1-srcA)
+            if (s_fb11_blend == nullptr)
+            {
+              D3D11_BLEND_DESC bdesc = {};
+              bdesc.RenderTarget[0].BlendEnable           = TRUE;
+              bdesc.RenderTarget[0].SrcBlend              = D3D11_BLEND_SRC_ALPHA;
+              bdesc.RenderTarget[0].DestBlend             = D3D11_BLEND_INV_SRC_ALPHA;
+              bdesc.RenderTarget[0].BlendOp               = D3D11_BLEND_OP_ADD;
+              bdesc.RenderTarget[0].SrcBlendAlpha         = D3D11_BLEND_ONE;
+              bdesc.RenderTarget[0].DestBlendAlpha        = D3D11_BLEND_INV_SRC_ALPHA;
+              bdesc.RenderTarget[0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
+              bdesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+              dev->CreateBlendState (&bdesc, &s_fb11_blend);
+            }
+            if (s_fb11_sampler == nullptr)
+            {
+              D3D11_SAMPLER_DESC sdesc = {};
+              sdesc.Filter         = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+              sdesc.AddressU = sdesc.AddressV = sdesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+              sdesc.MaxLOD   = D3D11_FLOAT32_MAX;
+              dev->CreateSamplerState (&sdesc, &s_fb11_sampler);
+            }
+            if (s_fb11_raster == nullptr)
+            {
+              D3D11_RASTERIZER_DESC rdesc = {};
+              rdesc.FillMode        = D3D11_FILL_SOLID;
+              rdesc.CullMode        = D3D11_CULL_NONE;
+              rdesc.DepthClipEnable = FALSE;
+              dev->CreateRasterizerState (&rdesc, &s_fb11_raster);
+            }
+
+            const bool all_ok = (s_fb11_vs != nullptr && s_fb11_ps     != nullptr &&
+                                  s_fb11_blend != nullptr && s_fb11_sampler != nullptr &&
+                                  s_fb11_raster != nullptr);
+            if (all_ok)
+            {
+              s_fb11_shaders_ok.store (true);
+              static std::atomic<bool> s_logged_fb_compile_ok = false;
+              if (!s_logged_fb_compile_ok.exchange (true))
+                _SidecarLog (L"SKF1 D3D11 fallback: shader resources compiled OK");
+            }
+            else
+            {
+              static std::atomic<bool> s_logged_fb_compile_fail = false;
+              if (!s_logged_fb_compile_fail.exchange (true))
+                _SidecarLog (L"SKF1 D3D11 fallback: shader/state creation FAILED (hrVS=0x%08X hrPS=0x%08X vs=%p ps=%p)",
+                             hrVS, hrPS, s_fb11_vs, s_fb11_ps);
+            }
+          }
+
+          // --- Step 2: create/recreate the BGRA8 SRV-capable intermediate texture ---
+          if (s_fb11_shaders_ok.load ())
+          {
+            const UINT fbW = copyW, fbH = copyH;
+            if (s_fb11_tex == nullptr || s_fb11_texW != fbW || s_fb11_texH != fbH)
+            {
+              if (s_fb11_srv) { s_fb11_srv->Release (); s_fb11_srv = nullptr; }
+              if (s_fb11_tex) { s_fb11_tex->Release (); s_fb11_tex = nullptr; }
+              s_fb11_has_frame = false; s_fb11_last_counter = 0;
+
+              D3D11_TEXTURE2D_DESC ftdesc = {};
+              ftdesc.Width              = fbW;
+              ftdesc.Height             = fbH;
+              ftdesc.MipLevels          = 1;
+              ftdesc.ArraySize          = 1;
+              ftdesc.Format             = DXGI_FORMAT_B8G8R8A8_UNORM;
+              ftdesc.SampleDesc.Count   = 1;
+              ftdesc.Usage              = D3D11_USAGE_DEFAULT;
+              ftdesc.BindFlags          = D3D11_BIND_SHADER_RESOURCE;
+              const HRESULT hrFTex = dev->CreateTexture2D (&ftdesc, nullptr, &s_fb11_tex);
+              if (SUCCEEDED (hrFTex) && s_fb11_tex != nullptr)
+              {
+                D3D11_SHADER_RESOURCE_VIEW_DESC srvdesc = {};
+                srvdesc.Format                    = DXGI_FORMAT_B8G8R8A8_UNORM;
+                srvdesc.ViewDimension             = D3D11_SRV_DIMENSION_TEXTURE2D;
+                srvdesc.Texture2D.MipLevels       = 1;
+                dev->CreateShaderResourceView (s_fb11_tex, &srvdesc, &s_fb11_srv);
+                s_fb11_texW = fbW;
+                s_fb11_texH = fbH;
+              }
+              else
+              {
+                static std::atomic<bool> s_logged_fb_tex_fail = false;
+                if (!s_logged_fb_tex_fail.exchange (true))
+                  _SidecarLog (L"SKF1 D3D11 fallback: BGRA8 overlay tex creation FAILED hr=0x%08X", hrFTex);
+              }
+            }
+
+            // --- Step 3: stable-read + upload BGRA8 frame to intermediate texture ---
+            if (s_fb11_tex != nullptr && s_fb11_srv != nullptr)
+            {
+              const size_t        fbBytes  = (size_t)s_skf1.stride * (size_t)fbH;
+              const uint8_t*      fbSrc    = s_skf1.view_ptr + s_skf1.data_offset;
+              static std::vector<uint8_t> s_fb11_snapshot;
+              if (s_fb11_snapshot.size () != fbBytes)
+                s_fb11_snapshot.resize (fbBytes);
+              memcpy (s_fb11_snapshot.data (), fbSrc, fbBytes);
+              const LONG         fb_c2     = *counter_ptr;
+              const bool         fb_stable = (c1 == fb_c2);
+              const bool         fb_valid  = (c1 != 0);
+              const bool         changed   = (c1 != s_fb11_last_counter);
+
+              if (fb_stable && fb_valid && (changed || !s_fb11_has_frame))
+              {
+                ctx->UpdateSubresource (s_fb11_tex, 0, nullptr,
+                                        s_fb11_snapshot.data (), s_skf1.stride, 0);
+                s_fb11_last_counter = c1;
+                s_fb11_has_frame    = true;
+              }
+
+              // --- Step 4: shader draw onto backbuffer RTV if we have a valid frame ---
+              if (overlay_enabled && s_fb11_has_frame)
+              {
+                ID3D11RenderTargetView* rtv = nullptr;
+                D3D11_RENDER_TARGET_VIEW_DESC rtvdesc = {};
+                rtvdesc.Format        = bbDesc.Format;
+                rtvdesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+                const HRESULT hrRTV = dev->CreateRenderTargetView (bb, &rtvdesc, &rtv);
+                if (SUCCEEDED (hrRTV) && rtv != nullptr)
+                {
+                  // -- Save pipeline state (everything we touch) --
+                  ID3D11RenderTargetView* savedRTVs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+                  ID3D11DepthStencilView* savedDSV = nullptr;
+                  ctx->OMGetRenderTargets (_countof (savedRTVs), savedRTVs, &savedDSV);
+
+                  ID3D11BlendState* savedBlend = nullptr;
+                  float blendFactor[4] = {};
+                  UINT  blendMask      = 0xFFFFFFFF;
+                  ctx->OMGetBlendState (&savedBlend, blendFactor, &blendMask);
+
+                  ID3D11VertexShader* savedVS = nullptr;
+                  ctx->VSGetShader (&savedVS, nullptr, nullptr);
+
+                  ID3D11PixelShader* savedPS = nullptr;
+                  ctx->PSGetShader  (&savedPS, nullptr, nullptr);
+
+                  ID3D11ShaderResourceView* savedSRV = nullptr;
+                  ctx->PSGetShaderResources (0, 1, &savedSRV);
+
+                  ID3D11SamplerState* savedSampler = nullptr;
+                  ctx->PSGetSamplers (0, 1, &savedSampler);
+
+                  ID3D11RasterizerState* savedRaster = nullptr;
+                  ctx->RSGetState (&savedRaster);
+
+                  UINT              numVPs  = 1;
+                  D3D11_VIEWPORT    savedVP = {};
+                  ctx->RSGetViewports (&numVPs, &savedVP);
+
+                  D3D11_PRIMITIVE_TOPOLOGY savedTopo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+                  ctx->IAGetPrimitiveTopology (&savedTopo);
+
+                  ID3D11InputLayout* savedIL = nullptr;
+                  ctx->IAGetInputLayout (&savedIL);
+
+                  ID3D11Buffer* savedVB    = nullptr;
+                  UINT          savedStride = 0, savedOffset = 0;
+                  ctx->IAGetVertexBuffers (0, 1, &savedVB, &savedStride, &savedOffset);
+
+                  // -- Set our pipeline state --
+                  const D3D11_VIEWPORT newVP = { 0.0f, 0.0f, (float)fbW, (float)fbH, 0.0f, 1.0f };
+                  ctx->RSSetViewports (1, &newVP);
+                  ctx->RSSetState (s_fb11_raster);
+                  ctx->OMSetRenderTargets (1, &rtv, nullptr);
+                  ctx->OMSetBlendState (s_fb11_blend, nullptr, 0xFFFFFFFF);
+                  ctx->VSSetShader (s_fb11_vs, nullptr, 0);
+                  ctx->PSSetShader (s_fb11_ps, nullptr, 0);
+                  ctx->PSSetShaderResources (0, 1, &s_fb11_srv);
+                  ctx->PSSetSamplers (0, 1, &s_fb11_sampler);
+                  ctx->IASetPrimitiveTopology (D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+                  ctx->IASetInputLayout (nullptr);
+                  ID3D11Buffer* noVB = nullptr; UINT vbStride = 0, vbOffset = 0;
+                  ctx->IASetVertexBuffers (0, 1, &noVB, &vbStride, &vbOffset);
+
+                  // -- Draw fullscreen quad (4 vertices, no index buffer) --
+                  ctx->Draw (4, 0);
+
+                  // -- Restore pipeline state --
+                  ctx->RSSetViewports (numVPs, &savedVP);
+                  ctx->RSSetState (savedRaster);
+                  ctx->OMSetRenderTargets (_countof (savedRTVs), savedRTVs, savedDSV);
+                  ctx->OMSetBlendState (savedBlend, blendFactor, blendMask);
+                  ctx->VSSetShader (savedVS, nullptr, 0);
+                  ctx->PSSetShader (savedPS, nullptr, 0);
+                  ctx->PSSetShaderResources (0, 1, &savedSRV);
+                  ctx->PSSetSamplers (0, 1, &savedSampler);
+                  ctx->IASetPrimitiveTopology (savedTopo);
+                  ctx->IASetInputLayout (savedIL);
+                  ctx->IASetVertexBuffers (0, 1, &savedVB, &savedStride, &savedOffset);
+
+                  // Release saved refs (OMGet/VSGet/etc add a reference)
+                  if (savedDSV)     savedDSV->Release ();
+                  for (auto& rv : savedRTVs) if (rv) rv->Release ();
+                  if (savedBlend)   savedBlend->Release ();
+                  if (savedRaster)  savedRaster->Release ();
+                  if (savedVS)      savedVS->Release ();
+                  if (savedPS)      savedPS->Release ();
+                  if (savedSRV)     savedSRV->Release ();
+                  if (savedSampler) savedSampler->Release ();
+                  if (savedIL)      savedIL->Release ();
+                  if (savedVB)      savedVB->Release ();
+                  rtv->Release ();
+
+                  if (!s_skf1.logged_stage_f_ok.exchange (true))
+                    _SidecarLog (L"SKF1 Stage F OK: D3D11 fallback composite executed fmt=%u", (UINT)bbDesc.Format);
+
+                  // Health signal (same cadence as the direct path)
+                  if (s_last_overlay_log_frame.load () + 120 < frame)
+                  {
+                    s_last_overlay_log_frame.store (frame);
+                    _SidecarLog (L"SKF1 composite(fallback): swapchain=%p bbfmt=%d w=%u h=%u counter=%ld",
+                                 pReal, (int)bbDesc.Format, (UINT)s_skf1.width, (UINT)s_skf1.height, (long)c1);
+                  }
+                }
+                else
+                {
+                  static std::atomic<bool> s_logged_fb_rtv_fail = false;
+                  if (!s_logged_fb_rtv_fail.exchange (true))
+                    _SidecarLog (L"SKF1 D3D11 fallback: RTV creation FAILED hr=0x%08X fmt=%u", hrRTV, (UINT)bbDesc.Format);
+                }
+              }
+            }
           }
         }
 
@@ -2121,8 +2403,16 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
         if (bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
             bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
-            bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
+            bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM ||
+            bbDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
         {
+          // One-time log showing which format triggered the fallback path
+          if (bbDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
+          {
+            static std::atomic<bool> s_logged_d3d12_fp16_entry = false;
+            if (!s_logged_d3d12_fp16_entry.exchange (true))
+              _SidecarLog (L"SKF1 D3D12 fallback: FP16 conversion path for fmt=%u (R16G16B16A16_FLOAT)", (UINT)bbDesc.Format);
+          }
           // STAGE E: Upload pixels if we have new frame data
           if (s_skf1.view_ptr != nullptr && s_skf1.width > 0 && s_skf1.height > 0)
           {
@@ -2196,7 +2486,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 s_d3d12_cmd_list->Close(); // Start closed
               }
 
-              const UINT uploadRowPitch = ((copyW12 * 4u + 255u) & ~255u);
+              // Bytes per pixel: 8 for R16G16B16A16_FLOAT (4 × float16), 4 for all others
+              const UINT bpp12 = (bbDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 8u : 4u;
+              const UINT uploadRowPitch = ((copyW12 * bpp12 + 255u) & ~255u);
               const UINT64 uploadBufferSize = (UINT64)uploadRowPitch * (UINT64)copyH12;
 
               // Recreate upload buffer if needed
@@ -2297,7 +2589,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                         dstRow[x * 4 + 3] = a;
                       }
                     }
-                    else
+                    else if (bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
                     {
                       uint32_t* dstRow32 = (uint32_t*)dstRow;
                       for (UINT x = 0; x < copyW12; ++x)
@@ -2311,6 +2603,29 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                         const uint32_t b10 = (b8 * 1023u + 127u) / 255u;
                         const uint32_t a2  = (a8 *    3u + 127u) / 255u;
                         dstRow32[x] = (r10) | (g10 << 10u) | (b10 << 20u) | (a2 << 30u);
+                      }
+                    }
+                    else // DXGI_FORMAT_R16G16B16A16_FLOAT
+                    {
+                      // Convert BGRA8 -> R16G16B16A16_FLOAT (scRGB [0,1] range for SDR overlay).
+                      // float-to-half: valid for [0, 65504] normalized values; all
+                      // BGRA8/255 results are normal float16 values (min nonzero ~0.004 >> 2^-14).
+                      auto f32_to_f16 = [](float f) -> uint16_t {
+                        if (f <= 0.0f) return 0u;
+                        if (f >= 65504.0f) return 0x7BFFu;
+                        uint32_t bits; memcpy (&bits, &f, 4);
+                        const uint16_t sign = (uint16_t)((bits >> 16u) & 0x8000u);
+                        const uint32_t expm = (bits & 0x7f800000u) - 0x38000000u;
+                        const uint16_t mant = (uint16_t)((bits & 0x007fe000u) >> 13u);
+                        return (uint16_t)(sign | ((expm >> 13u) & 0x7C00u) | mant);
+                      };
+                      uint16_t* dstRow16 = (uint16_t*)dstRow;
+                      for (UINT x = 0; x < copyW12; ++x)
+                      {
+                        dstRow16[x * 4 + 0] = f32_to_f16 (srcRow[x * 4 + 2] * (1.0f / 255.0f)); // R
+                        dstRow16[x * 4 + 1] = f32_to_f16 (srcRow[x * 4 + 1] * (1.0f / 255.0f)); // G
+                        dstRow16[x * 4 + 2] = f32_to_f16 (srcRow[x * 4 + 0] * (1.0f / 255.0f)); // B
+                        dstRow16[x * 4 + 3] = f32_to_f16 (srcRow[x * 4 + 3] * (1.0f / 255.0f)); // A
                       }
                     }
                   }
@@ -2471,7 +2786,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
                 if (!s_skf1.logged_stage_f_ok.exchange(true))
                 {
-                  _SidecarLog(L"SKF1 Stage F OK: D3D12 blit executed");
+                  _SidecarLog(L"SKF1 Stage F OK: D3D12 blit executed fmt=%u", (UINT)bbDesc.Format);
                 }
               }
             }
@@ -2481,7 +2796,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         {
           static std::atomic<bool> s_logged_d3d12_bad_format = false;
           if (!s_logged_d3d12_bad_format.exchange(true))
-            _SidecarLog(L"SKF1 D3D12 skip: reason=BAD_BACKBUFFER_FORMAT fmt=%u", (UINT)bbDesc.Format);
+            _SidecarLog(L"SKF1 D3D12 skip: reason=UNSUPPORTED_FORMAT fmt=%u (not B8G8R8A8/R8G8B8A8/R10G10B10A2/R16G16B16A16F)", (UINT)bbDesc.Format);
         }
         
         bb12->Release();
