@@ -2566,6 +2566,19 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 {
                   const uint8_t* srcPixels = s_frame_snapshot12.data ();
                   uint8_t* dstBytes = (uint8_t*)uploadData;
+
+                  // float-to-half converter: defined once, used in the R16F loop below.
+                  // Valid for [0, 65504]; all BGRA8/255 values are normal float16 (min ~0.004 >> 2^-14).
+                  auto f32_to_f16 = [](float f) -> uint16_t {
+                    if (f <= 0.0f) return 0u;
+                    if (f >= 65504.0f) return 0x7BFFu;
+                    uint32_t bits; memcpy (&bits, &f, 4);
+                    const uint16_t sign = (uint16_t)((bits >> 16u) & 0x8000u);
+                    const uint32_t expm = (bits & 0x7f800000u) - 0x38000000u;
+                    const uint16_t mant = (uint16_t)((bits & 0x007fe000u) >> 13u);
+                    return (uint16_t)(sign | ((expm >> 13u) & 0x7C00u) | mant);
+                  };
+
                   for (UINT y = 0; y < copyH12; ++y)
                   {
                     const uint8_t* srcRow = srcPixels + (size_t)y * (size_t)s_skf1.stride;
@@ -2605,20 +2618,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                         dstRow32[x] = (r10) | (g10 << 10u) | (b10 << 20u) | (a2 << 30u);
                       }
                     }
-                    else // DXGI_FORMAT_R16G16B16A16_FLOAT
+                    else if (bbDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
                     {
                       // Convert BGRA8 -> R16G16B16A16_FLOAT (scRGB [0,1] range for SDR overlay).
-                      // float-to-half: valid for [0, 65504] normalized values; all
-                      // BGRA8/255 results are normal float16 values (min nonzero ~0.004 >> 2^-14).
-                      auto f32_to_f16 = [](float f) -> uint16_t {
-                        if (f <= 0.0f) return 0u;
-                        if (f >= 65504.0f) return 0x7BFFu;
-                        uint32_t bits; memcpy (&bits, &f, 4);
-                        const uint16_t sign = (uint16_t)((bits >> 16u) & 0x8000u);
-                        const uint32_t expm = (bits & 0x7f800000u) - 0x38000000u;
-                        const uint16_t mant = (uint16_t)((bits & 0x007fe000u) >> 13u);
-                        return (uint16_t)(sign | ((expm >> 13u) & 0x7C00u) | mant);
-                      };
+                      // f32_to_f16 is defined above, outside this row loop.
                       uint16_t* dstRow16 = (uint16_t*)dstRow;
                       for (UINT x = 0; x < copyW12; ++x)
                       {
