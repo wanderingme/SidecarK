@@ -3447,6 +3447,53 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // It runs for ALL non-D3D11-interop games regardless of BFI / framerate config.
         do
         {
+          // Write diagnostic lines to %TEMP%\SidecarK_Overlay.log (same sink as
+          // dxgi_swapchain.cpp _SidecarLog).  Gated by SidecarK_DiagnosticsEnabled()
+          // which is enabled unconditionally by SidecarKHost at attach time.
+          // Output is collected by SidecarKHost at session end and appended to --log.
+          auto _GL_SKF1_Log = [&](const wchar_t* fmt, ...)
+          {
+            if (! SidecarK_DiagnosticsEnabled ())
+              return;
+
+            wchar_t wpath [MAX_PATH] = {};
+            DWORD   cch = GetTempPathW (MAX_PATH, wpath);
+            if (cch == 0 || cch >= MAX_PATH)
+              return;
+
+            wcscat_s (wpath, L"SidecarK_Overlay.log");
+            FILE* f = nullptr;
+            _wfopen_s (&f, wpath, L"a+, ccs=UTF-8");
+            if (f == nullptr)
+              return;
+
+            SYSTEMTIME st = {};
+            GetLocalTime (&st);
+            fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu [GL] ",
+                      st.wYear, st.wMonth, st.wDay,
+                      st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                      (unsigned long)GetCurrentProcessId ());
+
+            va_list args;
+            va_start (args, fmt);
+            vfwprintf (f, fmt, args);
+            va_end (args);
+
+            fwprintf (f, L"\n");
+            fclose (f);
+          };
+          (void)_GL_SKF1_Log; // suppress unused warning if diagnostics off
+
+          static std::atomic<bool> s_gl_path_logged { false };
+          if (!s_gl_path_logged.exchange (true))
+          {
+            _GL_SKF1_Log (L"GL-path-entry: hwnd=%p client=%ldx%ld pid=%lu",
+                          (void *)hWnd,
+                          (long)(rcWnd.right  - rcWnd.left),
+                          (long)(rcWnd.bottom - rcWnd.top),
+                          (unsigned long)GetCurrentProcessId ());
+          }
+
           static HANDLE         skf1_hMap          = nullptr;
           static uint8_t*       skf1_base          = nullptr;
           static uint32_t       skf1_w             = 0;
@@ -3508,6 +3555,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           if (magic != 0x31464B53u || ver != 1u)
           {
             // Bad header — reset and retry next frame
+            static std::atomic<bool> s_gl_bad_hdr { false };
+            if (!s_gl_bad_hdr.exchange (true))
+              _GL_SKF1_Log (L"GL early-out: BAD_HEADER magic=0x%08X ver=%u (expected 0x31464B53 ver=1)", magic, ver);
             UnmapViewOfFile (skf1_base);  skf1_base = nullptr;
             CloseHandle     (skf1_hMap);  skf1_hMap = nullptr;
             break;
@@ -3527,7 +3577,15 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                                          pix_fmt2 == 1u && width2 > 0u && height2 > 0u &&
                                          stride2 == (uint32_t)((uint64_t)width2 * 4u) &&
                                          end2 <= skf1_view_bytes);
-          if (! hdr_ok2) break;  // invalid header - skip this frame
+          if (! hdr_ok2)
+          {
+            static std::atomic<bool> s_gl_inv_hdr { false };
+            if (!s_gl_inv_hdr.exchange (true))
+              _GL_SKF1_Log (L"GL early-out: INVALID_HEADER hdr_bytes=%u data_off=%u fmt=%u w=%u h=%u stride=%u end=%llu view_bytes=%llu",
+                            hdr_bytes2, data_off2, pix_fmt2, width2, height2, stride2,
+                            (unsigned long long)end2, (unsigned long long)skf1_view_bytes);
+            break;  // invalid header - skip this frame
+          }
 
           // Stage D: counter stability check + texture upload
           const uint32_t c1    = *(const uint32_t *)(b + (size_t)ctr_off2);
@@ -3601,9 +3659,20 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             }
           }
           else if (! skf1_has_frame)
+          {
+            static std::atomic<bool> s_gl_no_frame { false };
+            if (!s_gl_no_frame.exchange (true))
+              _GL_SKF1_Log (L"GL early-out: NO_FRAME_YET (counter=%u valid=%d changed=%d)", c1, valid ? 1 : 0, changed ? 1 : 0);
             break;  // no frame to draw yet — skip and proceed to swap
+          }
 
-          if (! (skf1_has_frame && skf1_tex != 0)) break;
+          if (! (skf1_has_frame && skf1_tex != 0))
+          {
+            static std::atomic<bool> s_gl_no_tex { false };
+            if (!s_gl_no_tex.exchange (true))
+              _GL_SKF1_Log (L"GL early-out: NO_TEX has_frame=%d tex=%u", skf1_has_frame ? 1 : 0, (unsigned)skf1_tex);
+            break;
+          }
 
           // Stage E: draw overlay to FBO 0 (default back buffer) with full viewport
           if (skf1_prog == 0)
@@ -3692,22 +3761,50 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           // GetClientRect returns LOGICAL pixels on DPI-scaled systems (e.g., 1280x720 when the
           // physical drawable is 1920x1080 at 150% DPI), which would clip the overlay to a
           // sub-region of the framebuffer. The game's pre-swap viewport is in physical pixels.
+
+          // B/C/D/E: about-to-composite + size-space audit — emitted once per overlay session.
+          // Mandatory per diagnostic spec. Goes to %TEMP%\SidecarK_Overlay.log (collected by host).
           {
+            const long cl_w = (long)(rcWnd.right  - rcWnd.left);
+            const long cl_h = (long)(rcWnd.bottom - rcWnd.top);
+            const GLsizei vp_w_probe = (skf1_prev_vp[2] > 0)
+              ? (GLsizei)skf1_prev_vp[2]
+              : (GLsizei)std::max (1L, cl_w);
+            const GLsizei vp_h_probe = (skf1_prev_vp[3] > 0)
+              ? (GLsizei)skf1_prev_vp[3]
+              : (GLsizei)std::max (1L, cl_h);
+
+            static std::atomic<bool> s_logged_composite_once { false };
+            if (!s_logged_composite_once.exchange (true))
+            {
+              _GL_SKF1_Log (
+                L"ABOUT-TO-COMPOSITE path=OpenGL method=GL-draw"
+                L" src=%ux%u stride=%u counter=%u"
+                L" fbo=%d vp_saved=%dx%d vp_used=%dx%d"
+                L" client=%ldx%ld dpi_mismatch=%d"
+                L" src_eq_vp=%d",
+                skf1_w, skf1_h, skf1_stride, skf1_last_counter,
+                skf1_prev_fbo, skf1_prev_vp[2], skf1_prev_vp[3],
+                (int)vp_w_probe, (int)vp_h_probe,
+                cl_w, cl_h,
+                (skf1_prev_vp[2] != (GLint)cl_w || skf1_prev_vp[3] != (GLint)cl_h) ? 1 : 0,
+                (skf1_w == (uint32_t)vp_w_probe && skf1_h == (uint32_t)vp_h_probe) ? 1 : 0);
+            }
+
+            // Also mirror to ODS for attaching debuggers.
             static std::atomic<bool> s_logged_gl_vp_once = false;
             if (!s_logged_gl_vp_once.exchange (true))
             {
-              const long cl_w = (long)(rcWnd.right  - rcWnd.left);
-              const long cl_h = (long)(rcWnd.bottom - rcWnd.top);
-              OutputDebugStringW (L"SKF1 GL size-space: ");
               wchar_t glvpbuf [256] = {};
               wsprintfW (glvpbuf,
-                L"saved_vp=%dx%d client_rect=%ldx%ld skf1=%ux%u dpi_mismatch=%d\n",
+                L"SKF1 GL size-space: saved_vp=%dx%d client_rect=%ldx%ld skf1=%ux%u dpi_mismatch=%d\n",
                 skf1_prev_vp[2], skf1_prev_vp[3], cl_w, cl_h,
                 (unsigned)skf1_w, (unsigned)skf1_h,
                 (skf1_prev_vp[2] != (GLint)cl_w || skf1_prev_vp[3] != (GLint)cl_h) ? 1 : 0);
               OutputDebugStringW (glvpbuf);
             }
           }
+
           const GLsizei skf1_vp_w = (skf1_prev_vp[2] > 0)
             ? (GLsizei)skf1_prev_vp[2]
             : (GLsizei)std::max (1L, (long)(rcWnd.right  - rcWnd.left));
@@ -3747,6 +3844,14 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           if (skf1_prev_blend) glEnable (GL_BLEND); else glDisable (GL_BLEND);
           glBlendFunc ((GLenum)skf1_prev_bs, (GLenum)skf1_prev_bd);
           glColorMask (skf1_prev_cm[0], skf1_prev_cm[1], skf1_prev_cm[2], skf1_prev_cm[3]);
+
+          // F: stage correctness — composite happened before wglSwapBuffers
+          {
+            static std::atomic<bool> s_gl_draw_ok { false };
+            if (!s_gl_draw_ok.exchange (true))
+              _GL_SKF1_Log (L"GL Stage-F OK: glDrawElements executed before wglSwapBuffers vp=%dx%d tex=%u",
+                            (int)skf1_vp_w, (int)skf1_vp_h, (unsigned)skf1_tex);
+          }
         } while (0);  // end SKF1 pre-swap overlay block
 
         status =
