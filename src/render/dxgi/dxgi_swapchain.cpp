@@ -1059,6 +1059,16 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static UINT                         s_d3d12_staging_width     = 0;
   static UINT                         s_d3d12_staging_height    = 0;
   static UINT64                       s_d3d12_upload_size       = 0;
+  // Tracks whether the D3D12 staging texture has ever received valid pixel data.
+  // Cleared when the staging texture is recreated (e.g., after resize/fullscreen
+  // transition that changes format or dimensions). Stage F blit is guarded by this
+  // flag to avoid blitting an empty/zeroed staging texture over the game frame.
+  static bool                         s_d3d12_staging_has_content = false;
+
+  // Cached last-seen backbuffer dimensions for detecting resize/fullscreen transitions.
+  // Used to reset one-time log flags so the post-transition swapchain state is re-logged.
+  static UINT s_last_bb_w = 0;
+  static UINT s_last_bb_h = 0;
 
   auto _SidecarLog = [&](const wchar_t* fmt, ...)
   {
@@ -1173,6 +1183,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     s_d3d12_staging_width  = 0;
     s_d3d12_staging_height = 0;
     s_d3d12_upload_size    = 0;
+    s_d3d12_staging_has_content = false;
 
     // Release cached target swapchain so the next matching swapchain can claim it
     InterlockedExchangePointer (reinterpret_cast<void **> (&s_target_swapchain), nullptr);
@@ -1605,6 +1616,44 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         D3D11_TEXTURE2D_DESC bbDesc = { };
         bb->GetDesc (&bbDesc);
 
+        // Detect backbuffer dimension changes (resize / fullscreen transition).
+        // Done before any early-out so s_last_bb_w/h is always current; otherwise a
+        // persistent early-out (e.g. MSAA) would re-log the resize event every frame.
+        static std::atomic<bool> s_logged_d3d11_msaa_skip = false;
+        if (bbDesc.Width != s_last_bb_w || bbDesc.Height != s_last_bb_h)
+        {
+          if (s_last_bb_w != 0 || s_last_bb_h != 0)
+          {
+            _SidecarLog(L"D3D11 bb-resize: %ux%u → %ux%u fmt=%u sample=%u (resource reinit triggered)",
+                        s_last_bb_w, s_last_bb_h, bbDesc.Width, bbDesc.Height,
+                        (UINT)bbDesc.Format, bbDesc.SampleDesc.Count);
+            // Reset one-time log flags so the new state is re-captured.
+            s_logged_swapchain_once.store(false);
+            // Reset MSAA skip flag: if mode changed, allow the new state to be logged
+            // (handles MSAA→non-MSAA transition — compositing will resume automatically).
+            s_logged_d3d11_msaa_skip.store(false);
+          }
+          s_last_bb_w = bbDesc.Width;
+          s_last_bb_h = bbDesc.Height;
+        }
+
+        // D3D11: CopySubresourceRegion requires matching sample count.
+        // Exclusive-fullscreen swap chains can expose MSAA backbuffers (SampleDesc.Count > 1).
+        // Copying from a non-MSAA overlay texture to an MSAA backbuffer is illegal per D3D11 spec
+        // and silently produces no output (the copy is a no-op in the runtime, invisible in Release).
+        if (bbDesc.SampleDesc.Count > 1)
+        {
+          if (!s_logged_d3d11_msaa_skip.exchange(true))
+            _SidecarLog(L"SKF1 D3D11 skip: reason=MSAA_BACKBUFFER sample_count=%u format=%u %ux%u",
+                        bbDesc.SampleDesc.Count, (UINT)bbDesc.Format, bbDesc.Width, bbDesc.Height);
+          bb->Release ();
+          ctx->Release ();
+          dev->Release ();
+          return
+            SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                        nullptr, SK_DXGI_PresentSource::Wrapper );
+        }
+
         // copyW/copyH: clamp copy rect to min(backbuffer, header).
         // When header dims are 0 (not yet published by producer), copyW/copyH will be 0
         // and the 64×64 minimum gate below will reject compositing until real dims arrive.
@@ -1626,9 +1675,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           const LONG fc_log = (s_skf1.view_ptr != nullptr && s_skf1.data_offset >= 4u)
             ? *reinterpret_cast<volatile const LONG*>(s_skf1.view_ptr + s_skf1.data_offset - 4u)
             : 0;
-          _SidecarLog(L"[periodic] sc=%p bb=%ux%u hdr=%ux%u copy=%ux%u is_target=%d fc=%ld",
+          _SidecarLog(L"[periodic] sc=%p bb=%ux%u fmt=%u sample=%u hdr=%ux%u copy=%ux%u is_target=%d fc=%ld",
                       (void*)pReal,
                       bbDesc.Width, bbDesc.Height,
+                      (UINT)bbDesc.Format, bbDesc.SampleDesc.Count,
                       s_skf1.width, s_skf1.height,
                       copyW, copyH,
                       is_target ? 1 : 0,
@@ -2048,13 +2098,46 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       }
       
       ID3D12Resource* bb12 = nullptr;
+      // D3D12 requires GetCurrentBackBufferIndex() to identify the correct back buffer.
+      // Unlike D3D11 flip model (where buffer 0 is always the render target), D3D12 rotates
+      // the back buffer index after each Present. Using buffer 0 unconditionally copies the
+      // overlay to the WRONG buffer in multi-buffer swapchains (triple-buffer fullscreen),
+      // making the overlay invisible. This is the primary fullscreen compositor failure.
+      UINT bb12_index = 0;
+      {
+        IDXGISwapChain3* sc3 = nullptr;
+        if (SUCCEEDED(pReal->QueryInterface(__uuidof(IDXGISwapChain3), (void**)&sc3)))
+        {
+          bb12_index = sc3->GetCurrentBackBufferIndex();
+          sc3->Release();
+        }
+      }
       const ULONGLONG tGetBuf12 = GetTickCount64 ();
-      hr12 = pReal->GetBuffer(0, __uuidof(ID3D12Resource), (void**)&bb12);
+      hr12 = pReal->GetBuffer(bb12_index, __uuidof(ID3D12Resource), (void**)&bb12);
       _LogSlowStage (L"D3D12.GetBuffer", tGetBuf12);
       
       if (SUCCEEDED(hr12) && bb12 != nullptr && cmdQueue != nullptr)
       {
         D3D12_RESOURCE_DESC bbDesc = bb12->GetDesc();
+
+        // Detect backbuffer dimension changes (resize / fullscreen transition) on D3D12 path.
+        // D3D11 path does this check too; here we cover the case where the game uses D3D12.
+        {
+          const UINT cur_w = (UINT)bbDesc.Width;
+          const UINT cur_h = bbDesc.Height;
+          if (cur_w != s_last_bb_w || cur_h != s_last_bb_h)
+          {
+            if (s_last_bb_w != 0 || s_last_bb_h != 0)
+            {
+              _SidecarLog(L"D3D12 bb-resize: %ux%u → %ux%u fmt=%u bb_index=%u (resource reinit triggered)",
+                          s_last_bb_w, s_last_bb_h, cur_w, cur_h,
+                          (UINT)bbDesc.Format, bb12_index);
+              s_logged_swapchain_once.store(false);
+            }
+            s_last_bb_w = cur_w;
+            s_last_bb_h = cur_h;
+          }
+        }
 
         // copyW12/copyH12: clamp copy rect to min(backbuffer, header).
         // When header dims are 0 (not yet published), copyW12/copyH12 will be 0
@@ -2065,7 +2148,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         const UINT copyH12 = (s_skf1.height > 0u)
           ? std::min(bbDesc.Height, s_skf1.height) : 0u;
 
-        // Per-second log: sc, bbWxH, hdrWxH, copyWxH, is_target, frame_counter.
+        // Per-second log: sc, bbWxH, fmt, bb_index, hdrWxH, copyWxH, is_target, frame_counter.
         {
           static ULONGLONG s_last_periodic_log_ms12 = 0;
           const ULONGLONG nowMs12 = GetTickCount64 ();
@@ -2081,9 +2164,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             const LONG fc_log12 = (s_skf1.view_ptr != nullptr && s_skf1.data_offset >= 4u)
               ? *reinterpret_cast<volatile const LONG*>(s_skf1.view_ptr + s_skf1.data_offset - 4u)
               : 0;
-            _SidecarLog(L"[periodic/d3d12] sc=%p bb=%llux%u hdr=%ux%u copy=%ux%u is_target=%d fc=%ld",
+            _SidecarLog(L"[periodic/d3d12] sc=%p bb=%llux%u fmt=%u bb_index=%u hdr=%ux%u copy=%ux%u is_target=%d fc=%ld",
                         (void*)pReal,
                         (unsigned long long)bbDesc.Width, bbDesc.Height,
+                        (UINT)bbDesc.Format, bb12_index,
                         s_skf1.width, s_skf1.height,
                         copyW12, copyH12,
                         is_target ? 1 : 0,
@@ -2259,6 +2343,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 s_d3d12_staging_format = bbDesc.Format;
                 s_d3d12_staging_width  = copyW12;
                 s_d3d12_staging_height = copyH12;
+                // Staging texture was just created — it contains no valid pixel data yet.
+                // Stage F blit is guarded by s_d3d12_staging_has_content so we do not copy
+                // a zeroed staging texture over the game frame after a resize/fullscreen transition.
+                s_d3d12_staging_has_content = false;
+                _SidecarLog(L"D3D12 staging recreated: %ux%u fmt=%u (has_content cleared)",
+                            copyW12, copyH12, (UINT)bbDesc.Format);
               }
 
               if (s_d3d12_upload_buffer != nullptr && s_d3d12_staging_texture != nullptr &&
@@ -2318,6 +2408,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
                   d3d12_has_upload_for_staging = true;
                   d3d12_upload_row_pitch = uploadRowPitch;
+                  // Upload buffer now has valid pixel data. Stage F is allowed to blit
+                  // from the staging texture once CopyTextureRegion executes on the GPU.
+                  s_d3d12_staging_has_content = true;
 
                   s_skf1.last_counter = c1_12;
                   s_skf1.has_frame = true;
@@ -2355,7 +2448,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             }
 
             // STAGE F: Blit staging texture to backbuffer (always last-good if available)
-            if (overlay_enabled && s_skf1.has_frame && s_d3d12_staging_texture != nullptr &&
+            // s_d3d12_staging_has_content guards against blitting an empty/zeroed staging
+            // texture over the game frame (which would happen after staging recreation when
+            // no new upload data has arrived in the same frame — e.g. after a resize or
+            // fullscreen transition that changes backbuffer format or dimensions).
+            if (overlay_enabled && s_skf1.has_frame && s_d3d12_staging_has_content &&
+                s_d3d12_staging_texture != nullptr &&
                 s_d3d12_cmd_allocator != nullptr && s_d3d12_cmd_list != nullptr)
             {
               bool can_blit = true;
