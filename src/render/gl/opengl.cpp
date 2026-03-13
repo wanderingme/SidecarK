@@ -3688,9 +3688,32 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
           // Bind FBO 0 = default framebuffer (the back buffer that wglSwapBuffers will present)
           glBindFramebuffer (GL_FRAMEBUFFER, 0);
-          // Full window viewport so overlay fills the entire presentable surface
-          const GLsizei skf1_vp_w = (GLsizei)std::max (1L, (long)(rcWnd.right  - rcWnd.left));
-          const GLsizei skf1_vp_h = (GLsizei)std::max (1L, (long)(rcWnd.bottom - rcWnd.top));
+          // Viewport sizing: use the game's saved GL viewport (physical pixels) when non-zero.
+          // GetClientRect returns LOGICAL pixels on DPI-scaled systems (e.g., 1280x720 when the
+          // physical drawable is 1920x1080 at 150% DPI), which would clip the overlay to a
+          // sub-region of the framebuffer. The game's pre-swap viewport is in physical pixels.
+          {
+            static std::atomic<bool> s_logged_gl_vp_once = false;
+            if (!s_logged_gl_vp_once.exchange (true))
+            {
+              const long cl_w = (long)(rcWnd.right  - rcWnd.left);
+              const long cl_h = (long)(rcWnd.bottom - rcWnd.top);
+              OutputDebugStringW (L"SKF1 GL size-space: ");
+              wchar_t glvpbuf [256] = {};
+              wsprintfW (glvpbuf,
+                L"saved_vp=%dx%d client_rect=%ldx%ld skf1=%ux%u dpi_div=%d\n",
+                skf1_prev_vp[2], skf1_prev_vp[3], cl_w, cl_h,
+                (unsigned)skf1_w, (unsigned)skf1_h,
+                (skf1_prev_vp[2] != (GLint)cl_w || skf1_prev_vp[3] != (GLint)cl_h) ? 1 : 0);
+              OutputDebugStringW (glvpbuf);
+            }
+          }
+          const GLsizei skf1_vp_w = (skf1_prev_vp[2] > 0)
+            ? (GLsizei)skf1_prev_vp[2]
+            : (GLsizei)std::max (1L, (long)(rcWnd.right  - rcWnd.left));
+          const GLsizei skf1_vp_h = (skf1_prev_vp[3] > 0)
+            ? (GLsizei)skf1_prev_vp[3]
+            : (GLsizei)std::max (1L, (long)(rcWnd.bottom - rcWnd.top));
           glViewport (0, 0, skf1_vp_w, skf1_vp_h);
 
           if (skf1_prev_scissor) glDisable  (GL_SCISSOR_TEST);
@@ -4109,10 +4132,16 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                    // Fix: bind FBO 0 (default framebuffer = presentable back buffer)
                    // and set full-window viewport so the overlay covers the whole screen.
                    // Any non-zero FBO the game had bound would never be presented.
+                   // Use the game's saved physical-pixel viewport (prev_viewport) instead of
+                   // GetClientRect, which returns logical pixels on DPI-scaled systems.
                    glBindFramebuffer (GL_FRAMEBUFFER, 0);
                    {
-                     const GLsizei vp_w = (GLsizei)std::max (1L, (long)(rcWnd.right  - rcWnd.left));
-                     const GLsizei vp_h = (GLsizei)std::max (1L, (long)(rcWnd.bottom - rcWnd.top));
+                     const GLsizei vp_w = (prev_viewport[2] > 0)
+                       ? (GLsizei)prev_viewport[2]
+                       : (GLsizei)std::max (1L, (long)(rcWnd.right  - rcWnd.left));
+                     const GLsizei vp_h = (prev_viewport[3] > 0)
+                       ? (GLsizei)prev_viewport[3]
+                       : (GLsizei)std::max (1L, (long)(rcWnd.bottom - rcWnd.top));
                      glViewport (0, 0, vp_w, vp_h);
                    }
                    glGetIntegerv (GL_BLEND_SRC_RGB, &prev_blend_src);

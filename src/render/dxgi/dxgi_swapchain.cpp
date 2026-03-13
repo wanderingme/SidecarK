@@ -1624,7 +1624,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         const UINT copyW = (s_skf1.width  > 0u) ? std::min((UINT)bbDesc.Width,  s_skf1.width)  : 0u;
         const UINT copyH = (s_skf1.height > 0u) ? std::min((UINT)bbDesc.Height, s_skf1.height) : 0u;
 
-        // Per-second log: sc, bbWxH, hdrWxH, copyWxH, is_target, frame_counter.
+        // Per-second log: sc, bbWxH, hdrWxH, copyWxH, is_target, frame_counter,
+        // client rect (logical pixels), and windowed flag — exposes DPI divergence.
         static ULONGLONG s_last_periodic_log_ms = 0;
         const ULONGLONG nowMs11 = GetTickCount64 ();
         if (nowMs11 - s_last_periodic_log_ms >= 1000ULL)
@@ -1639,11 +1640,21 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           const LONG fc_log = (s_skf1.view_ptr != nullptr && s_skf1.data_offset >= 4u)
             ? *reinterpret_cast<volatile const LONG*>(s_skf1.view_ptr + s_skf1.data_offset - 4u)
             : 0;
-          _SidecarLog(L"[periodic] sc=%p bb=%ux%u hdr=%ux%u copy=%ux%u is_target=%d fc=%ld",
+          // DPI size-space audit: GetClientRect returns LOGICAL pixels on DPI-scaled systems.
+          // bbDesc.Width/Height are always PHYSICAL. Log both to detect divergence.
+          DXGI_SWAP_CHAIN_DESC scdPeriodic = {};
+          HWND hwndPeriodic = nullptr;
+          if (SUCCEEDED (pReal->GetDesc (&scdPeriodic))) hwndPeriodic = scdPeriodic.OutputWindow;
+          RECT rcPeriodic = {};
+          if (hwndPeriodic != nullptr) GetClientRect (hwndPeriodic, &rcPeriodic);
+          _SidecarLog(L"[periodic/d3d11] sc=%p bb=%ux%u hdr=%ux%u copy=%ux%u client=%ldx%ld windowed=%d is_target=%d fc=%ld",
                       (void*)pReal,
                       bbDesc.Width, bbDesc.Height,
                       s_skf1.width, s_skf1.height,
                       copyW, copyH,
+                      (long)(rcPeriodic.right - rcPeriodic.left),
+                      (long)(rcPeriodic.bottom - rcPeriodic.top),
+                      scdPeriodic.Windowed ? 1 : 0,
                       is_target ? 1 : 0,
                       (long)fc_log);
         }
@@ -1659,8 +1670,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                         nullptr, SK_DXGI_PresentSource::Wrapper );
         }
 
-        // Target-swapchain gate: claim if unclaimed, skip if another swapchain is already
-        // the target. Uses a single CAS to avoid races between concurrent presents.
+        // Target-swapchain gate: claim if unclaimed, reclaim if a stale swapchain owns the
+        // slot (e.g., windowed swapchain claimed it and game created a new fullscreen swapchain).
+        // Uses CAS for thread safety. Reclaim path handles windowed→fullscreen transitions.
         {
           void* const prev =
             InterlockedCompareExchangePointer (
@@ -1670,15 +1682,47 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             );
           // prev == nullptr  → we just claimed it (first match)
           // prev == pReal    → we are the cached target (keep going)
-          // prev == other    → another swapchain owns this slot (skip)
+          // prev == other    → a different swapchain owns this slot
           if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
           {
-            bb->Release ();
-            ctx->Release ();
-            dev->Release ();
-            return
-              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
-                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+            // Log the block once so the gate is no longer silent in diagnostics.
+            static std::atomic<bool> s_logged_d3d11_gate_block = false;
+            if (!s_logged_d3d11_gate_block.exchange (true))
+              _SidecarLog (L"D3D11 GATE-BLOCK: target=%p current=%p (windowed→fullscreen? will reclaim)",
+                           prev, reinterpret_cast<void *>(pReal));
+
+            // Attempt reclaim: replace the stale target with the current swapchain.
+            // This handles windowed→fullscreen transitions where the game destroys the
+            // windowed swapchain and creates a new fullscreen one with a different pointer.
+            // The second CAS only succeeds if the slot still holds `prev` (atomic).
+            void* const was =
+              InterlockedCompareExchangePointer (
+                reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                reinterpret_cast<void *>(pReal),
+                prev
+              );
+
+            if (was == prev || was == reinterpret_cast<void *>(pReal))
+            {
+              // Reclaim succeeded (or we already own it). Invalidate D3D11 texture
+              // state because the new swapchain may have different format/dimensions.
+              if (s_skf1.tex != nullptr) { s_skf1.tex->Release (); s_skf1.tex = nullptr; }
+              s_skf1.texFmt = DXGI_FORMAT_UNKNOWN;
+              s_skf1.texW   = 0;
+              s_skf1.texH   = 0;
+              _SidecarLog (L"D3D11 GATE-RECLAIM: new target=%p (replaced %p)", pReal, prev);
+              // Fall through and composite on the new swapchain.
+            }
+            else
+            {
+              // Truly concurrent swapchains in use; skip this one Present call.
+              bb->Release ();
+              ctx->Release ();
+              dev->Release ();
+              return
+                SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                            nullptr, SK_DXGI_PresentSource::Wrapper );
+            }
           }
         }
 
@@ -2301,7 +2345,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         const UINT copyH12 = (s_skf1.height > 0u)
           ? std::min(bbDesc.Height, s_skf1.height) : 0u;
 
-        // Per-second log: sc, bbWxH, hdrWxH, copyWxH, is_target, frame_counter.
+        // Per-second log: sc, bbWxH, hdrWxH, copyWxH, is_target, frame_counter,
+        // client rect (logical pixels), windowed flag — exposes DPI divergence.
         {
           static ULONGLONG s_last_periodic_log_ms12 = 0;
           const ULONGLONG nowMs12 = GetTickCount64 ();
@@ -2317,11 +2362,20 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             const LONG fc_log12 = (s_skf1.view_ptr != nullptr && s_skf1.data_offset >= 4u)
               ? *reinterpret_cast<volatile const LONG*>(s_skf1.view_ptr + s_skf1.data_offset - 4u)
               : 0;
-            _SidecarLog(L"[periodic/d3d12] sc=%p bb=%llux%u hdr=%ux%u copy=%ux%u is_target=%d fc=%ld",
+            // DPI size-space audit: GetClientRect returns LOGICAL pixels; bbDesc is PHYSICAL.
+            DXGI_SWAP_CHAIN_DESC scdPeriodic12 = {};
+            HWND hwndPeriodic12 = nullptr;
+            if (SUCCEEDED (pReal->GetDesc (&scdPeriodic12))) hwndPeriodic12 = scdPeriodic12.OutputWindow;
+            RECT rcPeriodic12 = {};
+            if (hwndPeriodic12 != nullptr) GetClientRect (hwndPeriodic12, &rcPeriodic12);
+            _SidecarLog(L"[periodic/d3d12] sc=%p bb=%llux%u hdr=%ux%u copy=%ux%u client=%ldx%ld windowed=%d is_target=%d fc=%ld",
                         (void*)pReal,
                         (unsigned long long)bbDesc.Width, bbDesc.Height,
                         s_skf1.width, s_skf1.height,
                         copyW12, copyH12,
+                        (long)(rcPeriodic12.right - rcPeriodic12.left),
+                        (long)(rcPeriodic12.bottom - rcPeriodic12.top),
+                        scdPeriodic12.Windowed ? 1 : 0,
                         is_target ? 1 : 0,
                         (long)fc_log12);
           }
@@ -2337,7 +2391,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                         nullptr, SK_DXGI_PresentSource::Wrapper );
         }
 
-        // Target-swapchain gate: claim if unclaimed, skip if another swapchain owns it.
+        // Target-swapchain gate: claim if unclaimed, reclaim if a stale swapchain owns the
+        // slot (e.g., windowed swapchain claimed it and game created a new fullscreen swapchain).
+        // Uses CAS for thread safety. Reclaim path handles windowed→fullscreen transitions.
         {
           void* const prev =
             InterlockedCompareExchangePointer (
@@ -2347,11 +2403,33 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             );
           if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
           {
-            bb12->Release ();
-            dev12->Release ();
-            return
-              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
-                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+            static std::atomic<bool> s_logged_d3d12_gate_block = false;
+            if (!s_logged_d3d12_gate_block.exchange (true))
+              _SidecarLog (L"D3D12 GATE-BLOCK: target=%p current=%p (windowed→fullscreen? will reclaim)",
+                           prev, reinterpret_cast<void *>(pReal));
+
+            // Attempt reclaim: replace the stale target with the current swapchain.
+            void* const was =
+              InterlockedCompareExchangePointer (
+                reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                reinterpret_cast<void *>(pReal),
+                prev
+              );
+
+            if (was == prev || was == reinterpret_cast<void *>(pReal))
+            {
+              _SidecarLog (L"D3D12 GATE-RECLAIM: new target=%p (replaced %p)", pReal, prev);
+              // Fall through and composite on the new swapchain.
+            }
+            else
+            {
+              // Truly concurrent swapchains; skip this one Present call.
+              bb12->Release ();
+              dev12->Release ();
+              return
+                SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                            nullptr, SK_DXGI_PresentSource::Wrapper );
+            }
           }
         }
 
