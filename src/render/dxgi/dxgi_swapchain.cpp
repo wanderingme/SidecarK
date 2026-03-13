@@ -1008,6 +1008,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     UINT             texH = 0;
 
     // D3D11 MSAA composite resources (used when backbuffer SampleDesc.Count > 1)
+    // Ownership: created lazily in Stage F; released in _ReleaseMappedOverlay.
+    // Raw pointers match the existing style of this struct (no ComPtr).
     ID3D11VertexShader*    msaa_vs      = nullptr;
     ID3D11PixelShader*     msaa_ps      = nullptr;
     ID3D11SamplerState*    msaa_sampler = nullptr;
@@ -1989,10 +1991,16 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                                  nullptr, nullptr, "main", "vs_4_0", 0, 0,
                                                  &vsBlob, &vsErr)))
                   {
-                    dev->CreateVertexShader (vsBlob->GetBufferPointer (),
-                                             vsBlob->GetBufferSize    (),
-                                             nullptr, &s_skf1.msaa_vs);
+                    const HRESULT hrVS = dev->CreateVertexShader (vsBlob->GetBufferPointer (),
+                                                                   vsBlob->GetBufferSize    (),
+                                                                   nullptr, &s_skf1.msaa_vs);
                     vsBlob->Release ();
+                    if (FAILED (hrVS))
+                      _SidecarLog(L"SKF1 MSAA: CreateVertexShader failed hr=0x%08X", hrVS);
+                  }
+                  else
+                  {
+                    _SidecarLog(L"SKF1 MSAA: SK_D3D_Compile VS failed");
                   }
                   if (vsErr != nullptr) vsErr->Release ();
 
@@ -2001,10 +2009,16 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                                  nullptr, nullptr, "main", "ps_4_0", 0, 0,
                                                  &psBlob, &psErr)))
                   {
-                    dev->CreatePixelShader (psBlob->GetBufferPointer (),
-                                            psBlob->GetBufferSize    (),
-                                            nullptr, &s_skf1.msaa_ps);
+                    const HRESULT hrPS = dev->CreatePixelShader (psBlob->GetBufferPointer (),
+                                                                  psBlob->GetBufferSize    (),
+                                                                  nullptr, &s_skf1.msaa_ps);
                     psBlob->Release ();
+                    if (FAILED (hrPS))
+                      _SidecarLog(L"SKF1 MSAA: CreatePixelShader failed hr=0x%08X", hrPS);
+                  }
+                  else
+                  {
+                    _SidecarLog(L"SKF1 MSAA: SK_D3D_Compile PS failed");
                   }
                   if (psErr != nullptr) psErr->Release ();
                 }
@@ -2016,7 +2030,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
                   sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
                   sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-                  dev->CreateSamplerState (&sd, &s_skf1.msaa_sampler);
+                  const HRESULT hrSamp = dev->CreateSamplerState (&sd, &s_skf1.msaa_sampler);
+                  if (FAILED (hrSamp))
+                    _SidecarLog(L"SKF1 MSAA: CreateSamplerState failed hr=0x%08X", hrSamp);
                 }
 
                 if (s_skf1.msaa_rs == nullptr)
@@ -2025,7 +2041,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   rd.FillMode        = D3D11_FILL_SOLID;
                   rd.CullMode        = D3D11_CULL_NONE;
                   rd.DepthClipEnable = TRUE;
-                  dev->CreateRasterizerState (&rd, &s_skf1.msaa_rs);
+                  const HRESULT hrRS = dev->CreateRasterizerState (&rd, &s_skf1.msaa_rs);
+                  if (FAILED (hrRS))
+                    _SidecarLog(L"SKF1 MSAA: CreateRasterizerState failed hr=0x%08X", hrRS);
                 }
 
                 if (s_skf1.msaa_vs != nullptr && s_skf1.msaa_ps      != nullptr &&
@@ -2105,7 +2123,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                     // Restore pipeline state
                     ctx->OMSetRenderTargets   (1, &prevRTV, prevDSV);
                     ctx->OMSetBlendState      (prevBS, prevBF, prevSM);
-                    ctx->RSSetViewports       (numVP > 0 ? 1 : 0, numVP > 0 ? &prevVP : nullptr);
+                    ctx->RSSetViewports       (numVP, numVP > 0 ? &prevVP : nullptr);
                     ctx->RSSetState           (prevRS);
                     ctx->VSSetShader          (prevVS, nullptr, 0);
                     ctx->PSSetShader          (prevPS, nullptr, 0);
