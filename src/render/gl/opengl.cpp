@@ -3701,7 +3701,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               OutputDebugStringW (L"SKF1 GL size-space: ");
               wchar_t glvpbuf [256] = {};
               wsprintfW (glvpbuf,
-                L"saved_vp=%dx%d client_rect=%ldx%ld skf1=%ux%u dpi_div=%d\n",
+                L"saved_vp=%dx%d client_rect=%ldx%ld skf1=%ux%u dpi_mismatch=%d\n",
                 skf1_prev_vp[2], skf1_prev_vp[3], cl_w, cl_h,
                 (unsigned)skf1_w, (unsigned)skf1_h,
                 (skf1_prev_vp[2] != (GLint)cl_w || skf1_prev_vp[3] != (GLint)cl_h) ? 1 : 0);
