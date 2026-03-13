@@ -3482,7 +3482,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             fwprintf (f, L"\n");
             fclose (f);
           };
-          (void)_GL_SKF1_Log; // suppress unused warning if diagnostics off
+          (void)_GL_SKF1_Log; // suppress unused-lambda warning when diagnostics disabled at build time
 
           static std::atomic<bool> s_gl_path_logged { false };
           if (!s_gl_path_logged.exchange (true))

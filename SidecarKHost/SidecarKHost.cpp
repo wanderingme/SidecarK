@@ -2698,10 +2698,10 @@ int wmain(int argc, wchar_t** argv)
         std::wstring partial;
 
         // Read the file as UTF-8 lines and emit each one via AppendLog.
-        // Stop after 64 KB to avoid flooding the log on repeated runs.
+        // Limit to 64 KB to prevent log flooding on repeated runs (diagnostic data
+        // only, not a data file). The full log remains in %TEMP% for deep inspection.
         DWORD totalRead = 0;
         static constexpr DWORD kMaxReadBytes = 65536;
-        bool truncated = false;
 
         while (totalRead < kMaxReadBytes &&
                ReadFile(hSrc, rawBuf, (DWORD)sizeof(rawBuf) - 1, &cbRead, nullptr) &&
@@ -2710,19 +2710,26 @@ int wmain(int argc, wchar_t** argv)
           totalRead += cbRead;
           rawBuf[cbRead] = '\0';
 
-          // Convert narrow UTF-8 to wide and emit line-by-line.
-          for (DWORD i = 0; i < cbRead; ++i)
+          // Convert UTF-8 chunk to wide string, then split on newlines.
+          int wlen = MultiByteToWideChar(CP_UTF8, 0, rawBuf, (int)cbRead, nullptr, 0);
+          if (wlen > 0)
           {
-            if (rawBuf[i] == '\r') continue;
-            if (rawBuf[i] == '\n')
+            std::wstring wchunk((size_t)wlen, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, rawBuf, (int)cbRead, &wchunk[0], wlen);
+
+            for (wchar_t wc : wchunk)
             {
-              if (!partial.empty())
-                AppendLog(logPath, partial.c_str());
-              partial.clear();
-            }
-            else
-            {
-              partial += (wchar_t)(unsigned char)rawBuf[i];
+              if (wc == L'\r') continue;
+              if (wc == L'\n')
+              {
+                if (!partial.empty())
+                  AppendLog(logPath, partial.c_str());
+                partial.clear();
+              }
+              else
+              {
+                partial += wc;
+              }
             }
           }
         }

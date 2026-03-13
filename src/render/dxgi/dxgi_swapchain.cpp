@@ -1688,7 +1688,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             // Log the block once so the gate is no longer silent in diagnostics.
             static std::atomic<bool> s_logged_d3d11_gate_block = false;
             if (!s_logged_d3d11_gate_block.exchange (true))
-              _SidecarLog (L"D3D11 GATE-BLOCK: target=%p current=%p (windowed→fullscreen? will reclaim)",
+              _SidecarLog (L"D3D11 GATE-BLOCK: target=%p current=%p (attempting reclaim for windowed→fullscreen transition)",
                            prev, reinterpret_cast<void *>(pReal));
 
             // Attempt reclaim: replace the stale target with the current swapchain.
@@ -2324,6 +2324,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           bbIdx12 = pSwap3->GetCurrentBackBufferIndex ();
           pSwap3->Release ();
         }
+        else
+        {
+          static std::atomic<bool> s_logged_d3d12_no_sc3 = false;
+          if (!s_logged_d3d12_no_sc3.exchange (true))
+            _SidecarLog (L"D3D12 WARN: IDXGISwapChain3 unavailable; using GetBuffer(0) fallback (may be wrong buffer in flip model)");
+        }
         static std::atomic<bool> s_logged_d3d12_bb_idx = false;
         if (!s_logged_d3d12_bb_idx.exchange(true))
           _SidecarLog(L"D3D12 composite: using backbuffer index=%u (GetCurrentBackBufferIndex)", bbIdx12);
@@ -2405,7 +2411,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           {
             static std::atomic<bool> s_logged_d3d12_gate_block = false;
             if (!s_logged_d3d12_gate_block.exchange (true))
-              _SidecarLog (L"D3D12 GATE-BLOCK: target=%p current=%p (windowed→fullscreen? will reclaim)",
+              _SidecarLog (L"D3D12 GATE-BLOCK: target=%p current=%p (attempting reclaim for windowed→fullscreen transition)",
                            prev, reinterpret_cast<void *>(pReal));
 
             // Attempt reclaim: replace the stale target with the current swapchain.
