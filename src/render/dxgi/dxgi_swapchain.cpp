@@ -1007,6 +1007,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     UINT             texW = 0;
     UINT             texH = 0;
 
+    // D3D11 MSAA composite resources (used when backbuffer SampleDesc.Count > 1)
+    ID3D11VertexShader*    msaa_vs      = nullptr;
+    ID3D11PixelShader*     msaa_ps      = nullptr;
+    ID3D11SamplerState*    msaa_sampler = nullptr;
+    ID3D11RasterizerState* msaa_rs      = nullptr;
+
     // One-time transition markers
     std::atomic_bool logged_enabled_on = false;
     std::atomic_bool logged_stage_a_ok = false;
@@ -1134,6 +1140,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     s_skf1.texFmt = DXGI_FORMAT_UNKNOWN;
     s_skf1.texW   = 0;
     s_skf1.texH   = 0;
+
+    if (s_skf1.msaa_vs      != nullptr) { s_skf1.msaa_vs->Release();      s_skf1.msaa_vs      = nullptr; }
+    if (s_skf1.msaa_ps      != nullptr) { s_skf1.msaa_ps->Release();      s_skf1.msaa_ps      = nullptr; }
+    if (s_skf1.msaa_sampler != nullptr) { s_skf1.msaa_sampler->Release(); s_skf1.msaa_sampler = nullptr; }
+    if (s_skf1.msaa_rs      != nullptr) { s_skf1.msaa_rs->Release();      s_skf1.msaa_rs      = nullptr; }
 
     if (s_skf1.view_ptr != nullptr)
     {
@@ -1918,26 +1929,217 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           {
             if (s_skf1.texFmt == bbDesc.Format)
             {
-              // Formats match - safe to use CopySubresourceRegion.
-              // Use clamped copy rect (copyW×copyH), not full header dims.
-              D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
-              static std::atomic<bool> s_logged_blit_details = false;
-              if (!s_logged_blit_details.exchange(true))
+              if (bbDesc.SampleDesc.Count == 1)
               {
-                _SidecarLog(L"→ Blit destination: bb=%p (backbuffer from GetBuffer(0))", bb);
-                _SidecarLog(L"→ Backbuffer format: %u, Overlay format: %u", bbDesc.Format, s_skf1.texFmt);
-                _SidecarLog(L"→ No backbuffer clear performed (composite only)");
-                _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
-              }
-              if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
-              const ULONGLONG tCopySub11 = GetTickCount64 ();
-              ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
-              _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
+                // Non-MSAA fast path: CopySubresourceRegion is valid when source and
+                // destination both have SampleDesc.Count == 1 and formats match.
+                static std::atomic<bool> s_logged_blit_details = false;
+                if (!s_logged_blit_details.exchange(true))
+                {
+                  _SidecarLog(L"→ Blit path: single-sample CopySubresourceRegion fmt=%u %ux%u",
+                              bbDesc.Format, copyW, copyH);
+                }
+                D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
+                if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
+                const ULONGLONG tCopySub11 = GetTickCount64 ();
+                ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
+                _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
 
-              // STAGE F OK
-              if (!s_skf1.logged_stage_f_ok.exchange(true))
+                // STAGE F OK
+                if (!s_skf1.logged_stage_f_ok.exchange(true))
+                {
+                  _SidecarLog(L"SKF1 Stage F OK: Blit executed (single-sample)");
+                }
+              }
+              else
               {
-                _SidecarLog(L"SKF1 Stage F OK: Blit executed");
+                // MSAA path: backbuffer is multisampled; CopySubresourceRegion from a
+                // single-sample source into an MSAA destination is invalid (D3D11 spec
+                // requires matching sample counts). Use a shader draw instead.
+                static std::atomic<bool> s_logged_msaa_path = false;
+                if (!s_logged_msaa_path.exchange(true))
+                {
+                  _SidecarLog(L"→ Blit path: MSAA shader composite fmt=%u sampleCount=%u %ux%u",
+                              bbDesc.Format, bbDesc.SampleDesc.Count, copyW, copyH);
+                }
+
+                // Lazy-compile shaders (once per overlay session, released on mapping close)
+                if (s_skf1.msaa_vs == nullptr || s_skf1.msaa_ps == nullptr)
+                {
+                  // Full-screen triangle VS:
+                  //   vid=0 → top-left,       vid=1 → far-bottom-left, vid=2 → far-top-right
+                  // Triangle covers entire viewport; CW winding matches D3D11 default front-face.
+                  static const char szVS[] =
+                    "void main(uint vid : SV_VertexID,"
+                    "          out float4 pos : SV_Position,"
+                    "          out float2 uv  : TEXCOORD0)"
+                    "{"
+                    "  uv  = float2((vid == 2u) ? 2.0f : 0.0f, (vid == 1u) ? 2.0f : 0.0f);"
+                    "  pos = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f, 0.0f, 1.0f);"
+                    "}";
+
+                  static const char szPS[] =
+                    "Texture2D    g_tex : register(t0);"
+                    "SamplerState g_smp : register(s0);"
+                    "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target"
+                    "{ return g_tex.Sample(g_smp, uv); }";
+
+                  ID3DBlob* vsBlob = nullptr; ID3DBlob* vsErr = nullptr;
+                  if (SUCCEEDED (SK_D3D_Compile (szVS, sizeof(szVS) - 1, "SKF1_MSAA_VS",
+                                                 nullptr, nullptr, "main", "vs_4_0", 0, 0,
+                                                 &vsBlob, &vsErr)))
+                  {
+                    dev->CreateVertexShader (vsBlob->GetBufferPointer (),
+                                             vsBlob->GetBufferSize    (),
+                                             nullptr, &s_skf1.msaa_vs);
+                    vsBlob->Release ();
+                  }
+                  if (vsErr != nullptr) vsErr->Release ();
+
+                  ID3DBlob* psBlob = nullptr; ID3DBlob* psErr = nullptr;
+                  if (SUCCEEDED (SK_D3D_Compile (szPS, sizeof(szPS) - 1, "SKF1_MSAA_PS",
+                                                 nullptr, nullptr, "main", "ps_4_0", 0, 0,
+                                                 &psBlob, &psErr)))
+                  {
+                    dev->CreatePixelShader (psBlob->GetBufferPointer (),
+                                            psBlob->GetBufferSize    (),
+                                            nullptr, &s_skf1.msaa_ps);
+                    psBlob->Release ();
+                  }
+                  if (psErr != nullptr) psErr->Release ();
+                }
+
+                if (s_skf1.msaa_sampler == nullptr)
+                {
+                  D3D11_SAMPLER_DESC sd = {};
+                  sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
+                  sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+                  sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+                  sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+                  dev->CreateSamplerState (&sd, &s_skf1.msaa_sampler);
+                }
+
+                if (s_skf1.msaa_rs == nullptr)
+                {
+                  D3D11_RASTERIZER_DESC rd = {};
+                  rd.FillMode        = D3D11_FILL_SOLID;
+                  rd.CullMode        = D3D11_CULL_NONE;
+                  rd.DepthClipEnable = TRUE;
+                  dev->CreateRasterizerState (&rd, &s_skf1.msaa_rs);
+                }
+
+                if (s_skf1.msaa_vs != nullptr && s_skf1.msaa_ps      != nullptr &&
+                    s_skf1.msaa_sampler != nullptr && s_skf1.msaa_rs  != nullptr)
+                {
+                  // Per-frame: SRV on single-sample overlay texture, RTV on MSAA backbuffer
+                  D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+                  srvDesc.Format                    = s_skf1.texFmt;
+                  srvDesc.ViewDimension             = D3D11_SRV_DIMENSION_TEXTURE2D;
+                  srvDesc.Texture2D.MostDetailedMip = 0;
+                  srvDesc.Texture2D.MipLevels       = 1;
+
+                  D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = {};
+                  rtvDesc.Format        = bbDesc.Format;
+                  rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+
+                  ID3D11ShaderResourceView* srv = nullptr;
+                  ID3D11RenderTargetView*   rtv = nullptr;
+
+                  if (SUCCEEDED (dev->CreateShaderResourceView (s_skf1.tex, &srvDesc, &srv)) &&
+                      SUCCEEDED (dev->CreateRenderTargetView   (bb,         &rtvDesc, &rtv)))
+                  {
+                    // Save pipeline state that we are about to change
+                    ID3D11RenderTargetView* prevRTV  = nullptr;
+                    ID3D11DepthStencilView* prevDSV  = nullptr;
+                    ctx->OMGetRenderTargets (1, &prevRTV, &prevDSV);
+
+                    ID3D11BlendState* prevBS = nullptr;
+                    FLOAT             prevBF [4] = {};
+                    UINT              prevSM     = 0;
+                    ctx->OMGetBlendState (&prevBS, prevBF, &prevSM);
+
+                    UINT             numVP  = 1;
+                    D3D11_VIEWPORT   prevVP = {};
+                    ctx->RSGetViewports (&numVP, &prevVP);
+
+                    ID3D11RasterizerState* prevRS = nullptr;
+                    ctx->RSGetState (&prevRS);
+
+                    ID3D11VertexShader* prevVS  = nullptr;
+                    ctx->VSGetShader (&prevVS, nullptr, nullptr);
+
+                    ID3D11PixelShader* prevPS  = nullptr;
+                    ctx->PSGetShader (&prevPS, nullptr, nullptr);
+
+                    ID3D11ShaderResourceView* prevSRV0 = nullptr;
+                    ctx->PSGetShaderResources (0, 1, &prevSRV0);
+
+                    ID3D11SamplerState* prevSamp0 = nullptr;
+                    ctx->PSGetSamplers (0, 1, &prevSamp0);
+
+                    D3D11_PRIMITIVE_TOPOLOGY prevTopo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+                    ctx->IAGetPrimitiveTopology (&prevTopo);
+
+                    // Set up for MSAA composite draw
+                    ctx->OMSetRenderTargets (1, &rtv, nullptr);
+                    ctx->OMSetBlendState    (nullptr, nullptr, 0xFFFFFFFF);
+
+                    D3D11_VIEWPORT vp = {};
+                    vp.Width    = static_cast<FLOAT>(copyW);
+                    vp.Height   = static_cast<FLOAT>(copyH);
+                    vp.MaxDepth = 1.0f;
+                    ctx->RSSetViewports (1, &vp);
+                    ctx->RSSetState     (s_skf1.msaa_rs);
+
+                    ctx->VSSetShader          (s_skf1.msaa_vs,      nullptr, 0);
+                    ctx->PSSetShader          (s_skf1.msaa_ps,      nullptr, 0);
+                    ctx->PSSetShaderResources (0, 1, &srv);
+                    ctx->PSSetSamplers        (0, 1, &s_skf1.msaa_sampler);
+                    ctx->IASetPrimitiveTopology (D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+                    if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
+                    const ULONGLONG tDrawMSAA = GetTickCount64 ();
+                    ctx->Draw (3, 0);
+                    _LogSlowStage (L"D3D11.DrawMSAAOverlay", tDrawMSAA);
+
+                    // Restore pipeline state
+                    ctx->OMSetRenderTargets   (1, &prevRTV, prevDSV);
+                    ctx->OMSetBlendState      (prevBS, prevBF, prevSM);
+                    ctx->RSSetViewports       (numVP > 0 ? 1 : 0, numVP > 0 ? &prevVP : nullptr);
+                    ctx->RSSetState           (prevRS);
+                    ctx->VSSetShader          (prevVS, nullptr, 0);
+                    ctx->PSSetShader          (prevPS, nullptr, 0);
+                    ctx->PSSetShaderResources (0, 1, &prevSRV0);
+                    ctx->PSSetSamplers        (0, 1, &prevSamp0);
+                    ctx->IASetPrimitiveTopology (prevTopo);
+
+                    // Release saved-state COM references
+                    if (prevRTV   != nullptr) prevRTV->Release   ();
+                    if (prevDSV   != nullptr) prevDSV->Release   ();
+                    if (prevBS    != nullptr) prevBS->Release    ();
+                    if (prevRS    != nullptr) prevRS->Release    ();
+                    if (prevVS    != nullptr) prevVS->Release    ();
+                    if (prevPS    != nullptr) prevPS->Release    ();
+                    if (prevSRV0  != nullptr) prevSRV0->Release  ();
+                    if (prevSamp0 != nullptr) prevSamp0->Release ();
+
+                    // STAGE F OK
+                    if (!s_skf1.logged_stage_f_ok.exchange(true))
+                    {
+                      _SidecarLog(L"SKF1 Stage F OK: MSAA draw executed sampleCount=%u",
+                                  bbDesc.SampleDesc.Count);
+                    }
+                  }
+
+                  if (srv != nullptr) srv->Release ();
+                  if (rtv != nullptr) rtv->Release ();
+                }
+                else
+                {
+                  static std::atomic<bool> s_logged_msaa_res_fail = false;
+                  if (!s_logged_msaa_res_fail.exchange(true))
+                    _SidecarLog(L"SKF1 D3D11 MSAA skip: shader/sampler/rs not ready");
+                }
               }
             }
             else
@@ -2048,8 +2250,24 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       }
       
       ID3D12Resource* bb12 = nullptr;
+      // Fix A: In flip-model / fullscreen multi-buffer swapchains, GetBuffer(0) is NOT
+      // guaranteed to be the currently presented backbuffer. Use GetCurrentBackBufferIndex()
+      // to select the correct buffer for this Present call.
+      UINT bbIdx12 = 0;
+      {
+        IDXGISwapChain3* pSwap3 = nullptr;
+        if (SUCCEEDED (pReal->QueryInterface (__uuidof (IDXGISwapChain3), (void **)&pSwap3)) &&
+            pSwap3 != nullptr)
+        {
+          bbIdx12 = pSwap3->GetCurrentBackBufferIndex ();
+          pSwap3->Release ();
+        }
+        static std::atomic<bool> s_logged_d3d12_bb_idx = false;
+        if (!s_logged_d3d12_bb_idx.exchange(true))
+          _SidecarLog(L"D3D12 composite: using backbuffer index=%u (GetCurrentBackBufferIndex)", bbIdx12);
+      }
       const ULONGLONG tGetBuf12 = GetTickCount64 ();
-      hr12 = pReal->GetBuffer(0, __uuidof(ID3D12Resource), (void**)&bb12);
+      hr12 = pReal->GetBuffer(bbIdx12, __uuidof(ID3D12Resource), (void**)&bb12);
       _LogSlowStage (L"D3D12.GetBuffer", tGetBuf12);
       
       if (SUCCEEDED(hr12) && bb12 != nullptr && cmdQueue != nullptr)
