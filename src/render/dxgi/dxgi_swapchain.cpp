@@ -2026,7 +2026,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 if (s_skf1.msaa_sampler == nullptr)
                 {
                   D3D11_SAMPLER_DESC sd = {};
-                  sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
+                  sd.Filter   = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
                   sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
                   sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
                   sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -2076,9 +2076,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                     UINT              prevSM     = 0;
                     ctx->OMGetBlendState (&prevBS, prevBF, &prevSM);
 
-                    UINT             numVP  = 1;
-                    D3D11_VIEWPORT   prevVP = {};
-                    ctx->RSGetViewports (&numVP, &prevVP);
+                    UINT             numVP  = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                    D3D11_VIEWPORT   prevVP [D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+                    ctx->RSGetViewports (&numVP, prevVP);
 
                     ID3D11RasterizerState* prevRS = nullptr;
                     ctx->RSGetState (&prevRS);
@@ -2100,7 +2100,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
                     // Set up for MSAA composite draw
                     ctx->OMSetRenderTargets (1, &rtv, nullptr);
-                    ctx->OMSetBlendState    (nullptr, nullptr, 0xFFFFFFFF);
+                    ctx->OMSetBlendState    (nullptr, nullptr, D3D11_DEFAULT_SAMPLE_MASK);
 
                     D3D11_VIEWPORT vp = {};
                     vp.Width    = static_cast<FLOAT>(copyW);
@@ -2123,7 +2123,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                     // Restore pipeline state
                     ctx->OMSetRenderTargets   (1, &prevRTV, prevDSV);
                     ctx->OMSetBlendState      (prevBS, prevBF, prevSM);
-                    ctx->RSSetViewports       (numVP, numVP > 0 ? &prevVP : nullptr);
+                    ctx->RSSetViewports       (numVP, numVP > 0 ? prevVP  : nullptr);
                     ctx->RSSetState           (prevRS);
                     ctx->VSSetShader          (prevVS, nullptr, 0);
                     ctx->PSSetShader          (prevPS, nullptr, 0);

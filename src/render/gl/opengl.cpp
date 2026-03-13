@@ -3714,8 +3714,13 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           glBindTexture    (GL_TEXTURE_2D, (GLuint)skf1_prev_tex2d);
           glBindFramebuffer (GL_FRAMEBUFFER, (GLuint)skf1_prev_fbo);
           glViewport (skf1_prev_vp [0], skf1_prev_vp [1], skf1_prev_vp [2], skf1_prev_vp [3]);
-          if (skf1_prev_scissor) { glEnable (GL_SCISSOR_TEST); glScissor (skf1_prev_sc[0], skf1_prev_sc[1], skf1_prev_sc[2], skf1_prev_sc[3]); }
-          else                     glDisable (GL_SCISSOR_TEST);
+          if (skf1_prev_scissor)
+          {
+            glEnable  (GL_SCISSOR_TEST);
+            glScissor (skf1_prev_sc[0], skf1_prev_sc[1], skf1_prev_sc[2], skf1_prev_sc[3]);
+          }
+          else
+            glDisable (GL_SCISSOR_TEST);
           if (skf1_prev_blend) glEnable (GL_BLEND); else glDisable (GL_BLEND);
           glBlendFunc ((GLenum)skf1_prev_bs, (GLenum)skf1_prev_bd);
           glColorMask (skf1_prev_cm[0], skf1_prev_cm[1], skf1_prev_cm[2], skf1_prev_cm[3]);
