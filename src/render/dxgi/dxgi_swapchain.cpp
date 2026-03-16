@@ -1261,12 +1261,16 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       devUnk->Release ();
       SK_LOGi0 (L"SidecarK: Present is running on a D3D11 swapchain");
       _SidecarLog (L"device=D3D11");
+      _SidecarLog (L"SKDLL-D3D11-PATH-ENTERED pid=%lu sc=%p hwnd=%p windowed=%d",
+                   (unsigned long)GetCurrentProcessId (), pReal, scd.OutputWindow, scd.Windowed);
     }
     else if (SUCCEEDED (pReal->GetDevice (__uuidof (ID3D12Device), (void **)&devUnk)) && devUnk != nullptr)
     {
       devUnk->Release ();
       SK_LOGi0 (L"SidecarK: Present is running on a D3D12 swapchain");
       _SidecarLog (L"device=D3D12");
+      _SidecarLog (L"SKDLL-D3D12-PATH-ENTERED pid=%lu sc=%p hwnd=%p windowed=%d",
+                   (unsigned long)GetCurrentProcessId (), pReal, scd.OutputWindow, scd.Windowed);
     }
     else
     {
@@ -1973,6 +1977,21 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
           {
+            // ABOUT-TO-COMPOSITE: log once with full source/destination/size/method/windowed info.
+            // This is the definitive proof that the D3D11 compositor reached draw stage.
+            static std::atomic<bool> s_logged_d3d11_atc { false };
+            if (!s_logged_d3d11_atc.exchange (true))
+            {
+              DXGI_SWAP_CHAIN_DESC scdATC = {};
+              pReal->GetDesc (&scdATC);
+              _SidecarLog (L"ABOUT-TO-COMPOSITE path=D3D11 method=%ls"
+                           L" sc=%p bb=%ux%u bbfmt=%u sampleCount=%u"
+                           L" src=%ux%u stride=%u fc=%ld windowed=%d",
+                           (bbDesc.SampleDesc.Count == 1) ? L"CopySubresourceRegion" : L"MSAA-shader-draw",
+                           pReal, bbDesc.Width, bbDesc.Height, (UINT)bbDesc.Format, bbDesc.SampleDesc.Count,
+                           s_skf1.width, s_skf1.height, s_skf1.stride, (long)c1,
+                           scdATC.Windowed ? 1 : 0);
+            }
             if (s_skf1.texFmt == bbDesc.Format)
             {
               if (bbDesc.SampleDesc.Count == 1)
@@ -2443,6 +2462,21 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
             bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
         {
+          // ABOUT-TO-COMPOSITE: log once with full source/destination/size/method/windowed info.
+          // This is the definitive proof that the D3D12 compositor reached draw stage.
+          static std::atomic<bool> s_logged_d3d12_atc { false };
+          if (!s_logged_d3d12_atc.exchange (true))
+          {
+            DXGI_SWAP_CHAIN_DESC scdATC12 = {};
+            pReal->GetDesc (&scdATC12);
+            _SidecarLog (L"ABOUT-TO-COMPOSITE path=D3D12 method=CopyTextureRegion"
+                         L" sc=%p bbIdx=%u bb=%llux%u bbfmt=%u"
+                         L" src=%ux%u stride=%u fc=%ld windowed=%d",
+                         pReal, bbIdx12, (unsigned long long)bbDesc.Width, bbDesc.Height, (UINT)bbDesc.Format,
+                         s_skf1.width, s_skf1.height, s_skf1.stride, (long)s_skf1.last_counter,
+                         scdATC12.Windowed ? 1 : 0);
+          }
+
           // STAGE E: Upload pixels if we have new frame data
           if (s_skf1.view_ptr != nullptr && s_skf1.width > 0 && s_skf1.height > 0)
           {

@@ -3482,11 +3482,16 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             fwprintf (f, L"\n");
             fclose (f);
           };
-          (void)_GL_SKF1_Log; // suppress unused-lambda warning when diagnostics disabled at build time
+          (void)_GL_SKF1_Log; // used below; cast suppresses any potential unused-variable warning from aggressive optimizers
 
           static std::atomic<bool> s_gl_path_logged { false };
           if (!s_gl_path_logged.exchange (true))
           {
+            _GL_SKF1_Log (L"SKDLL-GL-PATH-ENTERED pid=%lu hwnd=%p client=%ldx%ld",
+                          (unsigned long)GetCurrentProcessId (),
+                          (void *)hWnd,
+                          (long)(rcWnd.right  - rcWnd.left),
+                          (long)(rcWnd.bottom - rcWnd.top));
             _GL_SKF1_Log (L"GL-path-entry: hwnd=%p client=%ldx%ld pid=%lu",
                           (void *)hWnd,
                           (long)(rcWnd.right  - rcWnd.left),
