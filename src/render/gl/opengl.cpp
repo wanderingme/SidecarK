@@ -78,6 +78,9 @@ SK_LazyGlobal <std::unordered_map <HGLRC, BOOL>>  init_;
 
 extern std::atomic_bool g_dxgi_present_seen;
 extern std::atomic_bool g_dxgi_overlay_owner;
+// SKF1 backend ownership arbitration (defined in dxgi_swapchain.cpp).
+// 0=unclaimed, 1=DXGI(D3D11/D3D12), 2=GL.
+extern std::atomic<int>  g_skf1_composite_backend;
 
 thread_local int  tls_gl_present_depth      = 0;
 thread_local bool tls_gl_in_overlay_submit  = false;
@@ -3499,6 +3502,24 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                           (unsigned long)GetCurrentProcessId ());
           }
 
+          // Backend ownership: GL is in the non-interop path (SK_GL_OnD3D11=false),
+          // meaning GL is the actual visible renderer. Claim SKF1 ownership so DXGI
+          // composite is suppressed on helper/interop surfaces.
+          // In pure D3D11/D3D12 games (no wglSwapBuffers), this block never runs.
+          // In D3D11+GL interop games, SK_GL_OnD3D11 becomes true once the interop
+          // device is ready, routing wglSwapBuffers away from this else-branch.
+          {
+            static std::atomic<bool> s_gl_claimed { false };
+            if (!s_gl_claimed.load (std::memory_order_relaxed))
+            {
+              const int prev =
+                g_skf1_composite_backend.exchange (2, std::memory_order_release);
+              s_gl_claimed.store (true, std::memory_order_relaxed);
+              _GL_SKF1_Log (L"SKF1-BACKEND-CLAIM: GL owns SKF1 compositing (prev=%d) SK_GL_OnD3D11=%d",
+                            prev, SK_GL_OnD3D11 ? 1 : 0);
+            }
+          }
+
           static HANDLE         skf1_hMap          = nullptr;
           static uint8_t*       skf1_base          = nullptr;
           static uint32_t       skf1_w             = 0;
@@ -3526,7 +3547,15 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           if (skf1_base == nullptr)
           {
             HANDLE hm = OpenFileMappingW (FILE_MAP_READ, FALSE, map_name);
-            if (hm == NULL) break;  // mapping not published yet - skip draw
+            if (hm == NULL)
+            {
+              // Log the first failure so the exact cause is visible in the log file.
+              static std::atomic<bool> s_gl_open_fail { false };
+              if (!s_gl_open_fail.exchange (true))
+                _GL_SKF1_Log (L"GL early-out: OPEN_FAIL name=%ls gle=%lu",
+                              map_name, (unsigned long)GetLastError ());
+              break;
+            }
 
             if (skf1_hMap != nullptr && skf1_hMap != hm)
             {

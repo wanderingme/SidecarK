@@ -46,6 +46,12 @@ std::atomic_bool g_dxgi_present_seen{ false };
 
 std::atomic_bool g_dxgi_overlay_owner{ false };
 
+// SKF1 backend ownership arbitration.
+// 0 = unclaimed, 1 = DXGI (D3D11/D3D12), 2 = GL.
+// Shared with opengl.cpp via extern; GL claims when SK_GL_OnD3D11=false
+// (GL is the actual visible renderer, not the D3D11-interop helper path).
+std::atomic<int> g_skf1_composite_backend { 0 };
+
 #define SK_LOG_ONCE(x) { static bool logged = false; if (! logged) \
                        { dll_log->Log ((x)); logged = true; } }
 
@@ -1578,6 +1584,20 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
   if (skf1_stage_ef_ready)
   {
+    // Backend ownership: if GL owns SKF1 compositing, suppress DXGI composite.
+    // This handles mixed GL+DXGI processes where GL is the actual visible renderer
+    // and DXGI is only a helper/interop surface. Pure D3D11/D3D12-only games are
+    // unaffected (GL never claims ownership when there is no wglSwapBuffers activity).
+    if (g_skf1_composite_backend.load (std::memory_order_acquire) == 2)
+    {
+      static std::atomic<bool> s_dxgi_suppressed_log { false };
+      if (!s_dxgi_suppressed_log.exchange (true))
+        _SidecarLog (L"DXGI-SKF1-SUPPRESSED: GL owns visible presentation, skipping D3D11/D3D12 composite");
+      return
+        SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                    nullptr, SK_DXGI_PresentSource::Wrapper );
+    }
+
     static std::atomic<bool> s_logged_ef_entered = false;
     if (!s_logged_ef_entered.exchange(true))
     {
@@ -2014,6 +2034,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 if (!s_skf1.logged_stage_f_ok.exchange(true))
                 {
                   _SidecarLog(L"SKF1 Stage F OK: Blit executed (single-sample)");
+                  // Claim DXGI ownership (only if not already claimed by GL)
+                  int expected = 0;
+                  if (g_skf1_composite_backend.compare_exchange_strong (expected, 1))
+                    _SidecarLog (L"SKF1-BACKEND-CLAIM: DXGI(D3D11) owns SKF1 compositing");
                 }
               }
               else
@@ -2209,6 +2233,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                     {
                       _SidecarLog(L"SKF1 Stage F OK: MSAA draw executed sampleCount=%u",
                                   bbDesc.SampleDesc.Count);
+                      // Claim DXGI ownership (only if not already claimed by GL)
+                      int expected = 0;
+                      if (g_skf1_composite_backend.compare_exchange_strong (expected, 1))
+                        _SidecarLog (L"SKF1-BACKEND-CLAIM: DXGI(D3D11-MSAA) owns SKF1 compositing");
                     }
                   }
 
@@ -2826,6 +2854,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 if (!s_skf1.logged_stage_f_ok.exchange(true))
                 {
                   _SidecarLog(L"SKF1 Stage F OK: D3D12 blit executed");
+                  // Claim DXGI ownership (only if not already claimed by GL)
+                  int expected = 0;
+                  if (g_skf1_composite_backend.compare_exchange_strong (expected, 1))
+                    _SidecarLog (L"SKF1-BACKEND-CLAIM: DXGI(D3D12) owns SKF1 compositing");
                 }
               }
             }
