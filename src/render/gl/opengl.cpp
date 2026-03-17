@@ -3502,23 +3502,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                           (unsigned long)GetCurrentProcessId ());
           }
 
-          // Backend ownership: GL is in the non-interop path (SK_GL_OnD3D11=false),
-          // meaning GL is the actual visible renderer. Claim SKF1 ownership so DXGI
-          // composite is suppressed on helper/interop surfaces.
-          // In pure D3D11/D3D12 games (no wglSwapBuffers), this block never runs.
-          // In D3D11+GL interop games, SK_GL_OnD3D11 becomes true once the interop
-          // device is ready, routing wglSwapBuffers away from this else-branch.
-          {
-            static std::atomic<bool> s_gl_claimed { false };
-            if (!s_gl_claimed.load (std::memory_order_relaxed))
-            {
-              const int prev =
-                g_skf1_composite_backend.exchange (2, std::memory_order_release);
-              s_gl_claimed.store (true, std::memory_order_relaxed);
-              _GL_SKF1_Log (L"SKF1-BACKEND-CLAIM: GL owns SKF1 compositing (prev=%d) SK_GL_OnD3D11=%d",
-                            prev, SK_GL_OnD3D11 ? 1 : 0);
-            }
-          }
+          // GL ownership will be claimed (see below) only AFTER the SKF1 mapping is
+          // successfully opened and the view is valid (Stage B OK). Claiming early
+          // (before OpenFileMappingW) would block DXGI even when GL cannot composite.
 
           static HANDLE         skf1_hMap          = nullptr;
           static uint8_t*       skf1_base          = nullptr;
@@ -3549,11 +3535,16 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             HANDLE hm = OpenFileMappingW (FILE_MAP_READ, FALSE, map_name);
             if (hm == NULL)
             {
+              const DWORD gle = GetLastError ();
+              open_gle = gle;
+              reason   = R_OPEN_FAIL;
               // Log the first failure so the exact cause is visible in the log file.
+              // DXGI remains unblocked (g_skf1_composite_backend stays unchanged) so it
+              // can composite if it is the visible path.
               static std::atomic<bool> s_gl_open_fail { false };
               if (!s_gl_open_fail.exchange (true))
-                _GL_SKF1_Log (L"GL early-out: OPEN_FAIL name=%ls gle=%lu",
-                              map_name, (unsigned long)GetLastError ());
+                _GL_SKF1_Log (L"GL early-out: OPEN_FAIL name=%ls gle=%lu (DXGI not blocked; retrying next frame)",
+                              map_name, (unsigned long)gle);
               break;
             }
 
@@ -3580,6 +3571,29 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               CloseHandle     (skf1_hMap);  skf1_hMap = nullptr;
               break;
             }
+
+            // Stage B OK: mapping is open and view is valid.
+            // Only NOW is it safe to claim GL ownership: we know the mapping is
+            // accessible. Pure D3D11/D3D12 games never call wglSwapBuffers so this
+            // block never runs there. In D3D11+GL interop, SK_GL_OnD3D11 becomes true
+            // and routes wglSwapBuffers out of this else-branch entirely.
+            {
+              static std::atomic<bool> s_gl_claimed { false };
+              if (!s_gl_claimed.load (std::memory_order_relaxed))
+              {
+                const int prev =
+                  g_skf1_composite_backend.exchange (2, std::memory_order_release);
+                s_gl_claimed.store (true, std::memory_order_relaxed);
+                _GL_SKF1_Log (L"SKF1-BACKEND-CLAIM: GL owns SKF1 compositing (prev=%d)"
+                              L" mapping opened successfully name=%ls",
+                              prev, map_name);
+              }
+            }
+
+            // Update Emit diagnostic variables so sk_gl_present_{pid}.txt shows
+            // that the mapping was successfully opened from the fast-path.
+            hmap_dbg      = skf1_hMap;
+            created_mapping = 1;
           }
 
           // Stage C: read and validate header
@@ -3620,6 +3634,16 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                             (unsigned long long)end2, (unsigned long long)skf1_view_bytes);
             break;  // invalid header - skip this frame
           }
+
+          // Stage C OK: header is valid. Update Emit diagnostic variables so that
+          // sk_gl_present_{pid}.txt shows the header that the fast-path read.
+          hdr_ver    = ver;
+          hdr_bytes  = hdr_bytes2;
+          hdr_off    = data_off2;
+          hdr_fmt    = pix_fmt2;
+          hdr_w      = width2;
+          hdr_h      = height2;
+          hdr_stride = stride2;
 
           // Stage D: counter stability check + texture upload
           const uint32_t c1    = *(const uint32_t *)(b + (size_t)ctr_off2);
@@ -3886,6 +3910,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               _GL_SKF1_Log (L"GL Stage-F OK: glDrawElements executed before wglSwapBuffers vp=%dx%d tex=%u",
                             (int)skf1_vp_w, (int)skf1_vp_h, (unsigned)skf1_tex);
           }
+          // Stage F OK: composite executed. Update Emit diagnostic variables so that
+          // sk_gl_present_{pid}.txt shows reached_draw=1 and reason=360 (R_COMPOSITE_HIT).
+          reached_draw = true;
+          reason       = R_COMPOSITE_HIT;
         } while (0);  // end SKF1 pre-swap overlay block
 
         status =
