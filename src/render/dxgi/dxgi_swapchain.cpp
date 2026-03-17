@@ -30,6 +30,9 @@
 
 extern bool SidecarK_DiagnosticsEnabled ();
 
+// GL-on-D3D11 interop swapchain nomination (defined in opengl.cpp, declared in backend.h)
+extern IDXGISwapChain* SK_GL_GetInteropPresentSwapChain (void);
+
 static constexpr bool kEnableSKF1_PresentHitCounter = true;
 static constexpr bool kEnableSKF1_SkipCounters      = true;
 static constexpr ULONGLONG kSKF1_StaleCounterTimeoutMs = 2000ull;
@@ -1646,9 +1649,55 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                         nullptr, SK_DXGI_PresentSource::Wrapper );
         }
 
-        // Target-swapchain gate: claim if unclaimed, skip if another swapchain is already
-        // the target. Uses a single CAS to avoid races between concurrent presents.
+        // Target-swapchain gate.
+        // GL-on-D3D11: route compositing only to the nominated interop swapchain.
+        // Non-GL: use the existing first-claimant CAS gate.
+        if (SK_GL_OnD3D11)
         {
+          // SK_GL_GetInteropPresentSwapChain returns a raw pointer for address comparison.
+          // Do not call methods on it; it is used only to check if this swapchain is nominated.
+          IDXGISwapChain* const nominated = SK_GL_GetInteropPresentSwapChain ();
+          const bool is_nominated_target  =
+            (nominated != nullptr) && ((IDXGISwapChain*)this == nominated);
+
+          if (nominated == nullptr)
+          {
+            static std::atomic<bool> s_logged_gl_no_nominated = false;
+            if (!s_logged_gl_no_nominated.exchange (true))
+              _SidecarLog (L"SKF1 D3D11 GL-skip: no nominated interop swapchain yet");
+            bb->Release ();
+            ctx->Release ();
+            dev->Release ();
+            return
+              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+          }
+          else if (!is_nominated_target)
+          {
+            static ULONGLONG s_last_gl_mismatch_ms = 0;
+            const ULONGLONG nowGLMs = GetTickCount64 ();
+            if (nowGLMs - s_last_gl_mismatch_ms >= 1000ULL)
+            {
+              s_last_gl_mismatch_ms = nowGLMs;
+              _SidecarLog (L"SKF1 D3D11 GL-skip: this=%p is not nominated interop swapchain", (void*)this);
+            }
+            bb->Release ();
+            ctx->Release ();
+            dev->Release ();
+            return
+              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+          }
+          else
+          {
+            static std::atomic<bool> s_logged_gl_match = false;
+            if (!s_logged_gl_match.exchange (true))
+              _SidecarLog (L"SKF1 D3D11 GL-match: compositing on nominated interop swapchain=%p", (void*)this);
+          }
+        }
+        else
+        {
+          // Non-GL: first-claimant CAS gate.
           void* const prev =
             InterlockedCompareExchangePointer (
               reinterpret_cast<void * volatile *> (&s_target_swapchain),

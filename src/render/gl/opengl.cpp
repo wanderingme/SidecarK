@@ -93,6 +93,38 @@ int  SK_GL_ContextCount  = 0;
 bool SK_GL_OnD3D11       = false;
 bool SK_GL_OnD3D11_Reset = false;
 
+// Nominated interop present swapchain for GL-on-D3D11 mode.
+// Stored here; queried by dxgi_swapchain.cpp via SK_GL_GetInteropPresentSwapChain().
+// Accessed only through Interlocked ops for thread safety.
+static IDXGISwapChain* s_gl_interop_nominated_swapchain = nullptr;
+
+void SK_GL_SetInteropPresentSwapChain (IDXGISwapChain* pSwapChain)
+{
+  // AddRef before exchange so the ref is valid as soon as the pointer is visible.
+  if (pSwapChain != nullptr) pSwapChain->AddRef ();
+  IDXGISwapChain* prev =
+    (IDXGISwapChain*)InterlockedExchangePointer (
+      reinterpret_cast<void * volatile *>(&s_gl_interop_nominated_swapchain), pSwapChain);
+  if (prev != nullptr) prev->Release ();
+  SK_LOGi0 (L"SK_GL_SetInteropPresentSwapChain: nominated=%p", pSwapChain);
+}
+
+void SK_GL_ClearInteropPresentSwapChain (void)
+{
+  SK_GL_SetInteropPresentSwapChain (nullptr);
+}
+
+IDXGISwapChain* SK_GL_GetInteropPresentSwapChain (void)
+{
+  // Returns the stored pointer for address comparison ONLY.
+  // Lifetime safety: SK_GL_SetInteropPresentSwapChain holds an AddRef.
+  // Clear() sets the storage to null before releasing, so Get() never returns
+  // a pointer that has already been cleared from storage.
+  // Callers must not call methods on the returned pointer without AddRef'ing it.
+  return (IDXGISwapChain*)InterlockedCompareExchangePointer (
+    reinterpret_cast<void * volatile *>(&s_gl_interop_nominated_swapchain), nullptr, nullptr);
+}
+
 unsigned int SK_GL_SwapHook = 0;
 volatile LONG __gl_ready = FALSE;
 
@@ -2935,6 +2967,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
     if (SK_GL_OnD3D11 && (std::exchange (dx_gl_interop.stale, false) || pSwapChain == nullptr))
     {
+      // Clear the nominated interop swapchain before tearing down / recreating.
+      // The DXGI side must not composite on a stale pointer during recovery.
+      SK_GL_ClearInteropPresentSwapChain ();
+
       glFinish ();
 
       if (pSwapChain != nullptr)
@@ -3033,6 +3069,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       }
 
       pSwapChain->GetDesc1 (&desc1);
+
+      // Nominate the interop swapchain so dxgi_swapchain.cpp routes SKF1
+      // compositing to exactly this swapchain in GL-on-D3D11 fullscreen mode.
+      SK_GL_SetInteropPresentSwapChain (pSwapChain.p);
 
       dx_gl_interop.output.viewport = { 0.0f, 0.0f,
                      static_cast <float> (desc1.Width),
