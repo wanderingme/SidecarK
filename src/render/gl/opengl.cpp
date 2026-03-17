@@ -3158,6 +3158,497 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     }
 
 
+    // Diagnostics helper: write a timestamped line to SidecarK_Overlay.log.
+    // Defined here (outer-gate scope) so the SKF1 pre-blit block and the
+    // present-path branch logs can both use it.
+    auto _GL_SKF1_Log = [&](const wchar_t* fmt, ...)
+    {
+      if (! SidecarK_DiagnosticsEnabled ())
+        return;
+
+      wchar_t wpath [MAX_PATH] = {};
+      DWORD   cch = GetTempPathW (MAX_PATH, wpath);
+      if (cch == 0 || cch >= MAX_PATH)
+        return;
+
+      wcscat_s (wpath, L"SidecarK_Overlay.log");
+      FILE* f = nullptr;
+      _wfopen_s (&f, wpath, L"a+, ccs=UTF-8");
+      if (f == nullptr)
+        return;
+
+      SYSTEMTIME st = {};
+      GetLocalTime (&st);
+      fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu [GL] ",
+                st.wYear, st.wMonth, st.wDay,
+                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                (unsigned long)GetCurrentProcessId ());
+
+      va_list args;
+      va_start (args, fmt);
+      vfwprintf (f, fmt, args);
+      va_end (args);
+
+      fwprintf (f, L"\n");
+      fclose (f);
+    };
+
+    // SKF1 overlay: draw to FBO 0 BEFORE the D3D11-interop blit or wglSwapBuffers.
+    // Previously nested inside `else(!SK_GL_OnD3D11)` which prevented it from
+    // running in mixed GL+DXGI processes (SK_GL_OnD3D11=true blocks that else).
+    // Now moved to outer-gate scope so it runs for every non-_SkipThisFrame path.
+    do
+    {
+      static std::atomic<bool> s_gl_fastpath_entered { false };
+      if (!s_gl_fastpath_entered.exchange (true))
+        _GL_SKF1_Log (
+          L"GL-SKF1-PATH: entering-fastpath SK_GL_OnD3D11=%d pSwapChain=%p",
+          SK_GL_OnD3D11 ? 1 : 0, (void *)pSwapChain.p);
+
+
+      static std::atomic<bool> s_gl_path_logged { false };
+      if (!s_gl_path_logged.exchange (true))
+      {
+        _GL_SKF1_Log (L"SKDLL-GL-PATH-ENTERED pid=%lu hwnd=%p client=%ldx%ld",
+                      (unsigned long)GetCurrentProcessId (),
+                      (void *)hWnd,
+                      (long)(rcWnd.right  - rcWnd.left),
+                      (long)(rcWnd.bottom - rcWnd.top));
+        _GL_SKF1_Log (L"GL-path-entry: hwnd=%p client=%ldx%ld pid=%lu",
+                      (void *)hWnd,
+                      (long)(rcWnd.right  - rcWnd.left),
+                      (long)(rcWnd.bottom - rcWnd.top),
+                      (unsigned long)GetCurrentProcessId ());
+      }
+
+      // GL ownership will be claimed (see below) only AFTER the SKF1 mapping is
+      // successfully opened and the view is valid (Stage B OK). Claiming early
+      // (before OpenFileMappingW) would block DXGI even when GL cannot composite.
+
+      static HANDLE         skf1_hMap          = nullptr;
+      static uint8_t*       skf1_base          = nullptr;
+      static uint32_t       skf1_w             = 0;
+      static uint32_t       skf1_h             = 0;
+      static uint32_t       skf1_stride        = 0;
+      static uint32_t       skf1_last_counter  = 0;
+      static bool           skf1_has_frame     = false;
+      static bool           skf1_saw_zero      = false;
+      static ULONGLONG      skf1_stale_since   = 0;
+      static GLuint         skf1_tex           = 0;
+      static SIZE_T         skf1_view_bytes    = 0;
+      static uint32_t       skf1_fmt           = 0;
+      static std::vector <uint8_t> skf1_snapshot;
+      static GLuint         skf1_prog          = 0;
+      static GLuint         skf1_vs_obj        = 0;
+      static GLuint         skf1_fs_obj        = 0;
+      static GLint          skf1_uTex          = -1;
+      static GLuint         skf1_vbo           = 0;
+      static GLuint         skf1_ibo           = 0;
+      static GLuint         skf1_vao            = 0;
+
+      static constexpr ULONGLONG kSkf1StaleMs  = 2000ull;
+
+      // Stage A/B: open shared-memory mapping (once)
+      if (skf1_base == nullptr)
+      {
+        static std::atomic<bool> s_gl_omfw_tried { false };
+        if (!s_gl_omfw_tried.exchange (true))
+          _GL_SKF1_Log (L"GL-SKF1-PATH: proceeding-to-OpenFileMappingW name=%ls", map_name);
+        HANDLE hm = OpenFileMappingW (FILE_MAP_READ, FALSE, map_name);
+        if (hm == NULL)
+        {
+          const DWORD gle = GetLastError ();
+          open_gle = gle;
+          reason   = R_OPEN_FAIL;
+          // Log the first failure so the exact cause is visible in the log file.
+          // DXGI remains unblocked (g_skf1_composite_backend stays unchanged) so it
+          // can composite if it is the visible path.
+          static std::atomic<bool> s_gl_open_fail { false };
+          if (!s_gl_open_fail.exchange (true))
+            _GL_SKF1_Log (L"GL-SKF1-PATH: OpenFileMappingW-fail name=%ls gle=%lu (DXGI not blocked; retrying)",
+                          map_name, (unsigned long)gle);
+          break;
+        }
+        static std::atomic<bool> s_gl_omfw_ok { false };
+        if (!s_gl_omfw_ok.exchange (true))
+          _GL_SKF1_Log (L"GL-SKF1-PATH: OpenFileMappingW-ok hmap=%p name=%ls",
+                        (void *)hm, map_name);
+
+        if (skf1_hMap != nullptr && skf1_hMap != hm)
+        {
+          CloseHandle (skf1_hMap);
+          skf1_hMap = nullptr;
+        }
+        skf1_hMap = hm;
+
+        skf1_base = (uint8_t *)MapViewOfFile (skf1_hMap, FILE_MAP_READ, 0, 0, 0);
+        if (skf1_base == nullptr)
+        {
+          CloseHandle (skf1_hMap);
+          skf1_hMap = nullptr;
+          break;
+        }
+
+        MEMORY_BASIC_INFORMATION mbi = {};
+        skf1_view_bytes = VirtualQuery (skf1_base, &mbi, sizeof (mbi)) ? mbi.RegionSize : 0;
+        if (skf1_view_bytes == 0)
+        {
+          UnmapViewOfFile (skf1_base);  skf1_base = nullptr;
+          CloseHandle     (skf1_hMap);  skf1_hMap = nullptr;
+          break;
+        }
+
+        // Stage B OK: mapping is open and view is valid.
+        // Only NOW is it safe to claim GL ownership: we know the mapping is
+        // accessible. Pure D3D11/D3D12 games never call wglSwapBuffers so this
+        // block never runs there. In D3D11+GL interop (SK_GL_OnD3D11=true), this
+        // block now DOES run because the fast-path is no longer inside that else.
+        {
+          static std::atomic<bool> s_gl_claimed { false };
+          if (!s_gl_claimed.load (std::memory_order_relaxed))
+          {
+            const int prev =
+              g_skf1_composite_backend.exchange (2, std::memory_order_release);
+            s_gl_claimed.store (true, std::memory_order_relaxed);
+            _GL_SKF1_Log (L"SKF1-BACKEND-CLAIM: GL owns SKF1 compositing (prev=%d)"
+                          L" mapping opened successfully name=%ls",
+                          prev, map_name);
+          }
+        }
+
+        // Update Emit diagnostic variables so sk_gl_present_{pid}.txt shows
+        // that the mapping was successfully opened from the fast-path.
+        hmap_dbg      = skf1_hMap;
+        created_mapping = 1;
+      }
+
+      // Stage C: read and validate header
+      const uint8_t* const b         = skf1_base;
+      const uint32_t magic           = *(const uint32_t *)(b + 0x00);
+      const uint32_t ver             = *(const uint32_t *)(b + 0x04);
+      if (magic != 0x31464B53u || ver != 1u)
+      {
+        // Bad header — reset and retry next frame
+        static std::atomic<bool> s_gl_bad_hdr { false };
+        if (!s_gl_bad_hdr.exchange (true))
+          _GL_SKF1_Log (L"GL early-out: BAD_HEADER magic=0x%08X ver=%u (expected 0x31464B53 ver=1)", magic, ver);
+        UnmapViewOfFile (skf1_base);  skf1_base = nullptr;
+        CloseHandle     (skf1_hMap);  skf1_hMap = nullptr;
+        break;
+      }
+
+      const uint32_t hdr_bytes2   = *(const uint32_t *)(b + 0x08);
+      const uint32_t data_off2    = *(const uint32_t *)(b + 0x0C);
+      const uint32_t pix_fmt2     = *(const uint32_t *)(b + 0x10);
+      const uint32_t width2       = *(const uint32_t *)(b + 0x14);
+      const uint32_t height2      = *(const uint32_t *)(b + 0x18);
+      const uint32_t stride2      = *(const uint32_t *)(b + 0x1C);
+      const uint64_t ctr_off2     = (uint64_t)data_off2 - 4ull;
+      const uint64_t pix_off2     = (uint64_t)data_off2;
+      const uint64_t bytes2       = (uint64_t)stride2 * (uint64_t)height2;
+      const uint64_t end2         = pix_off2 + bytes2;
+      const bool hdr_ok2          = (hdr_bytes2 == 0x20u && data_off2 == 0x24u &&
+                                     pix_fmt2 == 1u && width2 > 0u && height2 > 0u &&
+                                     stride2 == (uint32_t)((uint64_t)width2 * 4u) &&
+                                     end2 <= skf1_view_bytes);
+      if (! hdr_ok2)
+      {
+        static std::atomic<bool> s_gl_inv_hdr { false };
+        if (!s_gl_inv_hdr.exchange (true))
+          _GL_SKF1_Log (L"GL early-out: INVALID_HEADER hdr_bytes=%u data_off=%u fmt=%u w=%u h=%u stride=%u end=%llu view_bytes=%llu",
+                        hdr_bytes2, data_off2, pix_fmt2, width2, height2, stride2,
+                        (unsigned long long)end2, (unsigned long long)skf1_view_bytes);
+        break;  // invalid header - skip this frame
+      }
+
+      // Stage C OK: header is valid. Update Emit diagnostic variables so that
+      // sk_gl_present_{pid}.txt shows the header that the fast-path read.
+      hdr_ver    = ver;
+      hdr_bytes  = hdr_bytes2;
+      hdr_off    = data_off2;
+      hdr_fmt    = pix_fmt2;
+      hdr_w      = width2;
+      hdr_h      = height2;
+      hdr_stride = stride2;
+      static std::atomic<bool> s_gl_hdr_valid { false };
+      if (!s_gl_hdr_valid.exchange (true))
+        _GL_SKF1_Log (
+          L"GL-SKF1-PATH: header-valid w=%u h=%u stride=%u fmt=%u",
+          width2, height2, stride2, pix_fmt2);
+
+      // Stage D: counter stability check + texture upload
+      const uint32_t c1    = *(const uint32_t *)(b + (size_t)ctr_off2);
+      const bool     valid = (c1 != 0u);
+      if (! valid) skf1_saw_zero = true;
+
+      const bool changed    = (c1 != skf1_last_counter);
+      const ULONGLONG nowMs = GetTickCount64 ();
+
+      if (skf1_has_frame && valid && c1 == skf1_last_counter)
+      {
+        if (skf1_stale_since == 0) skf1_stale_since = nowMs;
+        else if (nowMs - skf1_stale_since >= kSkf1StaleMs) skf1_saw_zero = true;
+      }
+      else
+        skf1_stale_since = 0;
+
+      const bool regressed    = (skf1_has_frame && c1 < skf1_last_counter);
+      const bool restart_zero = (regressed && skf1_saw_zero);
+      const bool monotonic    = (! regressed || restart_zero || ! skf1_has_frame);
+
+      if (valid && changed && monotonic)
+      {
+        const size_t snap_bytes = (size_t)stride2 * (size_t)height2;
+        if (skf1_snapshot.size () != snap_bytes) skf1_snapshot.resize (snap_bytes);
+        const uint8_t* pixels = b + (size_t)pix_off2;
+        memcpy (skf1_snapshot.data (), pixels, snap_bytes);
+        const uint32_t c2 = *(const uint32_t *)(b + (size_t)ctr_off2);
+
+        if (c1 == c2)  // stable read
+        {
+          GLint prev_tex_up = 0;
+          glGetIntegerv (GL_TEXTURE_BINDING_2D, &prev_tex_up);
+
+          if (skf1_tex == 0) glGenTextures (1, &skf1_tex);
+          if (skf1_tex != 0)
+          {
+            glBindTexture (GL_TEXTURE_2D, skf1_tex);
+            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
+            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
+
+            GLint prev_unpack3 = 0;
+            glGetIntegerv (GL_UNPACK_ALIGNMENT, &prev_unpack3);
+            glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
+
+            if (skf1_w != width2 || skf1_h != height2 ||
+                skf1_stride != stride2 || skf1_fmt != pix_fmt2)
+            {
+              glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
+                            (GLsizei)width2, (GLsizei)height2, 0,
+                            GL_BGRA, GL_UNSIGNED_BYTE, skf1_snapshot.data ());
+              skf1_w      = width2;   skf1_h      = height2;
+              skf1_stride = stride2;  skf1_fmt    = pix_fmt2;
+            }
+            else
+            {
+              glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
+                               (GLsizei)width2, (GLsizei)height2,
+                               GL_BGRA, GL_UNSIGNED_BYTE, skf1_snapshot.data ());
+            }
+
+            glPixelStorei (GL_UNPACK_ALIGNMENT, prev_unpack3);
+            skf1_last_counter = c1;
+            skf1_has_frame    = true;
+            skf1_saw_zero     = false;
+            skf1_stale_since  = 0;
+          }
+          glBindTexture (GL_TEXTURE_2D, (GLuint)prev_tex_up);
+        }
+      }
+      else if (! skf1_has_frame)
+      {
+        static std::atomic<bool> s_gl_no_frame { false };
+        if (!s_gl_no_frame.exchange (true))
+          _GL_SKF1_Log (L"GL early-out: NO_FRAME_YET (counter=%u valid=%d changed=%d)", c1, valid ? 1 : 0, changed ? 1 : 0);
+        break;  // no frame to draw yet — skip and proceed to swap
+      }
+
+      if (! (skf1_has_frame && skf1_tex != 0))
+      {
+        static std::atomic<bool> s_gl_no_tex { false };
+        if (!s_gl_no_tex.exchange (true))
+          _GL_SKF1_Log (L"GL early-out: NO_TEX has_frame=%d tex=%u", skf1_has_frame ? 1 : 0, (unsigned)skf1_tex);
+        break;
+      }
+
+      // Stage E: draw overlay to FBO 0 (default back buffer) with full viewport
+      if (skf1_prog == 0)
+      {
+        const char* vs_src =
+          "#version 130\n"
+          "in vec2 aPos;\n"
+          "in vec2 aUV;\n"
+          "out vec2 vUV;\n"
+          "void main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }\n";
+        const char* fs_src =
+          "#version 130\n"
+          "uniform sampler2D uTex;\n"
+          "in vec2 vUV;\n"
+          "out vec4 oColor;\n"
+          "void main(){ oColor = texture(uTex, vUV); }\n";
+
+        skf1_vs_obj = glCreateShader (GL_VERTEX_SHADER);
+        glShaderSource  (skf1_vs_obj, 1, &vs_src, nullptr);
+        glCompileShader (skf1_vs_obj);
+
+        skf1_fs_obj = glCreateShader (GL_FRAGMENT_SHADER);
+        glShaderSource  (skf1_fs_obj, 1, &fs_src, nullptr);
+        glCompileShader (skf1_fs_obj);
+
+        skf1_prog = glCreateProgram ();
+        glAttachShader       (skf1_prog, skf1_vs_obj);
+        glAttachShader       (skf1_prog, skf1_fs_obj);
+        glBindAttribLocation (skf1_prog, 0, "aPos");
+        glBindAttribLocation (skf1_prog, 1, "aUV");
+        glLinkProgram        (skf1_prog);
+        skf1_uTex = glGetUniformLocation (skf1_prog, "uTex");
+
+        const float verts [16] = {
+          -1.0f, -1.0f,  0.0f, 0.0f,
+           1.0f, -1.0f,  1.0f, 0.0f,
+           1.0f,  1.0f,  1.0f, 1.0f,
+          -1.0f,  1.0f,  0.0f, 1.0f
+        };
+        const uint16_t idx [6] = { 0, 1, 2, 0, 2, 3 };
+
+        glGenBuffers (1, &skf1_vbo);
+        glBindBuffer (GL_ARRAY_BUFFER, skf1_vbo);
+        glBufferData (GL_ARRAY_BUFFER, sizeof (verts), verts, GL_STATIC_DRAW);
+
+        glGenBuffers (1, &skf1_ibo);
+        glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, skf1_ibo);
+        glBufferData (GL_ELEMENT_ARRAY_BUFFER, sizeof (idx), idx, GL_STATIC_DRAW);
+
+        glGenVertexArrays (1, &skf1_vao);
+        glBindVertexArray (skf1_vao);
+        glBindBuffer (GL_ARRAY_BUFFER,         skf1_vbo);
+        glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, skf1_ibo);
+        glEnableVertexAttribArray (0);
+        glEnableVertexAttribArray (1);
+        glVertexAttribPointer (0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)0);
+        glVertexAttribPointer (1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)(2 * sizeof (float)));
+        glBindVertexArray (0);
+        glBindBuffer (GL_ARRAY_BUFFER, 0);
+        glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, 0);
+      }
+
+      if (skf1_prog == 0) break;
+
+      // Save GL state
+      GLint skf1_prev_prog   = 0;  glGetIntegerv (GL_CURRENT_PROGRAM,              &skf1_prev_prog);
+      GLint skf1_prev_atex   = 0;  glGetIntegerv (GL_ACTIVE_TEXTURE,               &skf1_prev_atex);
+      GLint skf1_prev_tex2d  = 0;  glGetIntegerv (GL_TEXTURE_BINDING_2D,           &skf1_prev_tex2d);
+      GLint skf1_prev_vao    = 0;  glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &skf1_prev_vao);
+      GLint skf1_prev_vbo2   = 0;  glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &skf1_prev_vbo2);
+      GLint skf1_prev_ibo2   = 0;  glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &skf1_prev_ibo2);
+      GLint skf1_prev_fbo    = 0;  glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &skf1_prev_fbo);
+      GLint skf1_prev_vp [4] = {};  glGetIntegerv (GL_VIEWPORT,                    skf1_prev_vp);
+      GLint skf1_prev_sc [4] = {};  glGetIntegerv (GL_SCISSOR_BOX,                 skf1_prev_sc);
+      GLint skf1_prev_bs  = 0, skf1_prev_bd = 0;
+      glGetIntegerv (GL_BLEND_SRC_RGB, &skf1_prev_bs);
+      glGetIntegerv (GL_BLEND_DST_RGB, &skf1_prev_bd);
+      GLboolean skf1_prev_scissor = glIsEnabled (GL_SCISSOR_TEST);
+      GLboolean skf1_prev_blend   = glIsEnabled (GL_BLEND);
+      GLboolean skf1_prev_cm [4]  = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+      glGetBooleanv (GL_COLOR_WRITEMASK, skf1_prev_cm);
+
+      // Bind FBO 0 = default framebuffer (the back buffer that wglSwapBuffers will present)
+      glBindFramebuffer (GL_FRAMEBUFFER, 0);
+      // Viewport sizing: use the game's saved GL viewport (physical pixels) when non-zero.
+      // GetClientRect returns LOGICAL pixels on DPI-scaled systems (e.g., 1280x720 when the
+      // physical drawable is 1920x1080 at 150% DPI), which would clip the overlay to a
+      // sub-region of the framebuffer. The game's pre-swap viewport is in physical pixels.
+
+      // B/C/D/E: about-to-composite + size-space audit — emitted once per overlay session.
+      // Mandatory per diagnostic spec. Goes to %TEMP%\SidecarK_Overlay.log (collected by host).
+      {
+        const long cl_w = (long)(rcWnd.right  - rcWnd.left);
+        const long cl_h = (long)(rcWnd.bottom - rcWnd.top);
+        const GLsizei vp_w_probe = (skf1_prev_vp[2] > 0)
+          ? (GLsizei)skf1_prev_vp[2]
+          : (GLsizei)std::max (1L, cl_w);
+        const GLsizei vp_h_probe = (skf1_prev_vp[3] > 0)
+          ? (GLsizei)skf1_prev_vp[3]
+          : (GLsizei)std::max (1L, cl_h);
+
+        static std::atomic<bool> s_logged_composite_once { false };
+        if (!s_logged_composite_once.exchange (true))
+        {
+          _GL_SKF1_Log (
+            L"GL-SKF1-PATH: reached-about-to-composite | ABOUT-TO-COMPOSITE path=OpenGL"
+            L" src=%ux%u stride=%u counter=%u"
+            L" fbo=%d vp_saved=%dx%d vp_used=%dx%d"
+            L" client=%ldx%ld dpi_mismatch=%d"
+            L" src_eq_vp=%d",
+            skf1_w, skf1_h, skf1_stride, skf1_last_counter,
+            skf1_prev_fbo, skf1_prev_vp[2], skf1_prev_vp[3],
+            (int)vp_w_probe, (int)vp_h_probe,
+            cl_w, cl_h,
+            (skf1_prev_vp[2] != (GLint)cl_w || skf1_prev_vp[3] != (GLint)cl_h) ? 1 : 0,
+            (skf1_w == (uint32_t)vp_w_probe && skf1_h == (uint32_t)vp_h_probe) ? 1 : 0);
+        }
+
+        // Also mirror to ODS for attaching debuggers.
+        static std::atomic<bool> s_logged_gl_vp_once = false;
+        if (!s_logged_gl_vp_once.exchange (true))
+        {
+          wchar_t glvpbuf [256] = {};
+          wsprintfW (glvpbuf,
+            L"SKF1 GL size-space: saved_vp=%dx%d client_rect=%ldx%ld skf1=%ux%u dpi_mismatch=%d\n",
+            skf1_prev_vp[2], skf1_prev_vp[3], cl_w, cl_h,
+            (unsigned)skf1_w, (unsigned)skf1_h,
+            (skf1_prev_vp[2] != (GLint)cl_w || skf1_prev_vp[3] != (GLint)cl_h) ? 1 : 0);
+          OutputDebugStringW (glvpbuf);
+        }
+      }
+
+      const GLsizei skf1_vp_w = (skf1_prev_vp[2] > 0)
+        ? (GLsizei)skf1_prev_vp[2]
+        : (GLsizei)std::max (1L, (long)(rcWnd.right  - rcWnd.left));
+      const GLsizei skf1_vp_h = (skf1_prev_vp[3] > 0)
+        ? (GLsizei)skf1_prev_vp[3]
+        : (GLsizei)std::max (1L, (long)(rcWnd.bottom - rcWnd.top));
+      glViewport (0, 0, skf1_vp_w, skf1_vp_h);
+
+      if (skf1_prev_scissor) glDisable  (GL_SCISSOR_TEST);
+      glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+      glEnable    (GL_BLEND);
+      glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+
+      glUseProgram    (skf1_prog);
+      glActiveTexture (GL_TEXTURE0);
+      glBindTexture   (GL_TEXTURE_2D, skf1_tex);
+      if (skf1_uTex >= 0) glUniform1i (skf1_uTex, 0);
+      glBindVertexArray (skf1_vao);
+      glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
+
+      // Restore GL state
+      glBindVertexArray (skf1_prev_vao);
+      glBindBuffer (GL_ARRAY_BUFFER,         (GLuint)skf1_prev_vbo2);
+      glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, (GLuint)skf1_prev_ibo2);
+      glUseProgram (skf1_prev_prog);
+      glActiveTexture  ((GLenum)skf1_prev_atex);
+      glBindTexture    (GL_TEXTURE_2D, (GLuint)skf1_prev_tex2d);
+      glBindFramebuffer (GL_FRAMEBUFFER, (GLuint)skf1_prev_fbo);
+      glViewport (skf1_prev_vp [0], skf1_prev_vp [1], skf1_prev_vp [2], skf1_prev_vp [3]);
+      if (skf1_prev_scissor)
+      {
+        glEnable  (GL_SCISSOR_TEST);
+        glScissor (skf1_prev_sc[0], skf1_prev_sc[1], skf1_prev_sc[2], skf1_prev_sc[3]);
+      }
+      else
+        glDisable (GL_SCISSOR_TEST);
+      if (skf1_prev_blend) glEnable (GL_BLEND); else glDisable (GL_BLEND);
+      glBlendFunc ((GLenum)skf1_prev_bs, (GLenum)skf1_prev_bd);
+      glColorMask (skf1_prev_cm[0], skf1_prev_cm[1], skf1_prev_cm[2], skf1_prev_cm[3]);
+
+      // F: stage correctness — composite happened before wglSwapBuffers
+      {
+        static std::atomic<bool> s_gl_draw_ok { false };
+        if (!s_gl_draw_ok.exchange (true))
+          _GL_SKF1_Log (
+            L"GL-SKF1-PATH: reached-draw glDrawElements vp=%dx%d tex=%u SK_GL_OnD3D11=%d",
+            (int)skf1_vp_w, (int)skf1_vp_h, (unsigned)skf1_tex,
+            SK_GL_OnD3D11 ? 1 : 0);
+      }
+      // Stage F OK: composite executed. Update Emit diagnostic variables so that
+      // sk_gl_present_{pid}.txt shows reached_draw=1 and reason=360 (R_COMPOSITE_HIT).
+      reached_draw = true;
+      reason       = R_COMPOSITE_HIT;
+    } while (0);  // end SKF1 pre-swap overlay block
+
     if (dx_gl_interop.d3d11.staging.colorBuffer == nullptr || (! SK_GL_OnD3D11))
     {
       if (! SK_GL_OnD3D11)
@@ -3423,6 +3914,11 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     {
       if (SK_GL_OnD3D11 && pSwapChain != nullptr)
       {
+        static std::atomic<bool> s_gl_d3d11_logged { false };
+        if (!s_gl_d3d11_logged.exchange (true))
+          _GL_SKF1_Log (
+            L"GL-SKF1-PATH: using-D3D11-interop-present SK_GL_OnD3D11=%d pSwapChain=%p",
+            SK_GL_OnD3D11 ? 1 : 0, (void *)pSwapChain.p);
         int present_interval =
           SK_GL_GetSwapInterval ();
 
@@ -3444,477 +3940,13 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         if (__SK_BFI)
           SK_GL_SwapInterval (0);
 
-        // SKF1 overlay: draw to default framebuffer (FBO 0) BEFORE wglSwapBuffers so
-        // the overlay appears in the frame being presented.  This block uses its own
-        // static state and targets the presentable back buffer unconditionally.
-        // It runs for ALL non-D3D11-interop games regardless of BFI / framerate config.
-        do
         {
-          // Write diagnostic lines to %TEMP%\SidecarK_Overlay.log (same sink as
-          // dxgi_swapchain.cpp _SidecarLog).  Gated by SidecarK_DiagnosticsEnabled()
-          // which is enabled unconditionally by SidecarKHost at attach time.
-          // Output is collected by SidecarKHost at session end and appended to --log.
-          auto _GL_SKF1_Log = [&](const wchar_t* fmt, ...)
-          {
-            if (! SidecarK_DiagnosticsEnabled ())
-              return;
-
-            wchar_t wpath [MAX_PATH] = {};
-            DWORD   cch = GetTempPathW (MAX_PATH, wpath);
-            if (cch == 0 || cch >= MAX_PATH)
-              return;
-
-            wcscat_s (wpath, L"SidecarK_Overlay.log");
-            FILE* f = nullptr;
-            _wfopen_s (&f, wpath, L"a+, ccs=UTF-8");
-            if (f == nullptr)
-              return;
-
-            SYSTEMTIME st = {};
-            GetLocalTime (&st);
-            fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu [GL] ",
-                      st.wYear, st.wMonth, st.wDay,
-                      st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-                      (unsigned long)GetCurrentProcessId ());
-
-            va_list args;
-            va_start (args, fmt);
-            vfwprintf (f, fmt, args);
-            va_end (args);
-
-            fwprintf (f, L"\n");
-            fclose (f);
-          };
-          (void)_GL_SKF1_Log; // used below; cast suppresses any potential unused-variable warning from aggressive optimizers
-
-          static std::atomic<bool> s_gl_path_logged { false };
-          if (!s_gl_path_logged.exchange (true))
-          {
-            _GL_SKF1_Log (L"SKDLL-GL-PATH-ENTERED pid=%lu hwnd=%p client=%ldx%ld",
-                          (unsigned long)GetCurrentProcessId (),
-                          (void *)hWnd,
-                          (long)(rcWnd.right  - rcWnd.left),
-                          (long)(rcWnd.bottom - rcWnd.top));
-            _GL_SKF1_Log (L"GL-path-entry: hwnd=%p client=%ldx%ld pid=%lu",
-                          (void *)hWnd,
-                          (long)(rcWnd.right  - rcWnd.left),
-                          (long)(rcWnd.bottom - rcWnd.top),
-                          (unsigned long)GetCurrentProcessId ());
-          }
-
-          // GL ownership will be claimed (see below) only AFTER the SKF1 mapping is
-          // successfully opened and the view is valid (Stage B OK). Claiming early
-          // (before OpenFileMappingW) would block DXGI even when GL cannot composite.
-
-          static HANDLE         skf1_hMap          = nullptr;
-          static uint8_t*       skf1_base          = nullptr;
-          static uint32_t       skf1_w             = 0;
-          static uint32_t       skf1_h             = 0;
-          static uint32_t       skf1_stride        = 0;
-          static uint32_t       skf1_last_counter  = 0;
-          static bool           skf1_has_frame     = false;
-          static bool           skf1_saw_zero      = false;
-          static ULONGLONG      skf1_stale_since   = 0;
-          static GLuint         skf1_tex           = 0;
-          static SIZE_T         skf1_view_bytes    = 0;
-          static uint32_t       skf1_fmt           = 0;
-          static std::vector <uint8_t> skf1_snapshot;
-          static GLuint         skf1_prog          = 0;
-          static GLuint         skf1_vs_obj        = 0;
-          static GLuint         skf1_fs_obj        = 0;
-          static GLint          skf1_uTex          = -1;
-          static GLuint         skf1_vbo           = 0;
-          static GLuint         skf1_ibo           = 0;
-          static GLuint         skf1_vao            = 0;
-
-          static constexpr ULONGLONG kSkf1StaleMs  = 2000ull;
-
-          // Stage A/B: open shared-memory mapping (once)
-          if (skf1_base == nullptr)
-          {
-            HANDLE hm = OpenFileMappingW (FILE_MAP_READ, FALSE, map_name);
-            if (hm == NULL)
-            {
-              const DWORD gle = GetLastError ();
-              open_gle = gle;
-              reason   = R_OPEN_FAIL;
-              // Log the first failure so the exact cause is visible in the log file.
-              // DXGI remains unblocked (g_skf1_composite_backend stays unchanged) so it
-              // can composite if it is the visible path.
-              static std::atomic<bool> s_gl_open_fail { false };
-              if (!s_gl_open_fail.exchange (true))
-                _GL_SKF1_Log (L"GL early-out: OPEN_FAIL name=%ls gle=%lu (DXGI not blocked; retrying next frame)",
-                              map_name, (unsigned long)gle);
-              break;
-            }
-
-            if (skf1_hMap != nullptr && skf1_hMap != hm)
-            {
-              CloseHandle (skf1_hMap);
-              skf1_hMap = nullptr;
-            }
-            skf1_hMap = hm;
-
-            skf1_base = (uint8_t *)MapViewOfFile (skf1_hMap, FILE_MAP_READ, 0, 0, 0);
-            if (skf1_base == nullptr)
-            {
-              CloseHandle (skf1_hMap);
-              skf1_hMap = nullptr;
-              break;
-            }
-
-            MEMORY_BASIC_INFORMATION mbi = {};
-            skf1_view_bytes = VirtualQuery (skf1_base, &mbi, sizeof (mbi)) ? mbi.RegionSize : 0;
-            if (skf1_view_bytes == 0)
-            {
-              UnmapViewOfFile (skf1_base);  skf1_base = nullptr;
-              CloseHandle     (skf1_hMap);  skf1_hMap = nullptr;
-              break;
-            }
-
-            // Stage B OK: mapping is open and view is valid.
-            // Only NOW is it safe to claim GL ownership: we know the mapping is
-            // accessible. Pure D3D11/D3D12 games never call wglSwapBuffers so this
-            // block never runs there. In D3D11+GL interop, SK_GL_OnD3D11 becomes true
-            // and routes wglSwapBuffers out of this else-branch entirely.
-            {
-              static std::atomic<bool> s_gl_claimed { false };
-              if (!s_gl_claimed.load (std::memory_order_relaxed))
-              {
-                const int prev =
-                  g_skf1_composite_backend.exchange (2, std::memory_order_release);
-                s_gl_claimed.store (true, std::memory_order_relaxed);
-                _GL_SKF1_Log (L"SKF1-BACKEND-CLAIM: GL owns SKF1 compositing (prev=%d)"
-                              L" mapping opened successfully name=%ls",
-                              prev, map_name);
-              }
-            }
-
-            // Update Emit diagnostic variables so sk_gl_present_{pid}.txt shows
-            // that the mapping was successfully opened from the fast-path.
-            hmap_dbg      = skf1_hMap;
-            created_mapping = 1;
-          }
-
-          // Stage C: read and validate header
-          const uint8_t* const b         = skf1_base;
-          const uint32_t magic           = *(const uint32_t *)(b + 0x00);
-          const uint32_t ver             = *(const uint32_t *)(b + 0x04);
-          if (magic != 0x31464B53u || ver != 1u)
-          {
-            // Bad header — reset and retry next frame
-            static std::atomic<bool> s_gl_bad_hdr { false };
-            if (!s_gl_bad_hdr.exchange (true))
-              _GL_SKF1_Log (L"GL early-out: BAD_HEADER magic=0x%08X ver=%u (expected 0x31464B53 ver=1)", magic, ver);
-            UnmapViewOfFile (skf1_base);  skf1_base = nullptr;
-            CloseHandle     (skf1_hMap);  skf1_hMap = nullptr;
-            break;
-          }
-
-          const uint32_t hdr_bytes2   = *(const uint32_t *)(b + 0x08);
-          const uint32_t data_off2    = *(const uint32_t *)(b + 0x0C);
-          const uint32_t pix_fmt2     = *(const uint32_t *)(b + 0x10);
-          const uint32_t width2       = *(const uint32_t *)(b + 0x14);
-          const uint32_t height2      = *(const uint32_t *)(b + 0x18);
-          const uint32_t stride2      = *(const uint32_t *)(b + 0x1C);
-          const uint64_t ctr_off2     = (uint64_t)data_off2 - 4ull;
-          const uint64_t pix_off2     = (uint64_t)data_off2;
-          const uint64_t bytes2       = (uint64_t)stride2 * (uint64_t)height2;
-          const uint64_t end2         = pix_off2 + bytes2;
-          const bool hdr_ok2          = (hdr_bytes2 == 0x20u && data_off2 == 0x24u &&
-                                         pix_fmt2 == 1u && width2 > 0u && height2 > 0u &&
-                                         stride2 == (uint32_t)((uint64_t)width2 * 4u) &&
-                                         end2 <= skf1_view_bytes);
-          if (! hdr_ok2)
-          {
-            static std::atomic<bool> s_gl_inv_hdr { false };
-            if (!s_gl_inv_hdr.exchange (true))
-              _GL_SKF1_Log (L"GL early-out: INVALID_HEADER hdr_bytes=%u data_off=%u fmt=%u w=%u h=%u stride=%u end=%llu view_bytes=%llu",
-                            hdr_bytes2, data_off2, pix_fmt2, width2, height2, stride2,
-                            (unsigned long long)end2, (unsigned long long)skf1_view_bytes);
-            break;  // invalid header - skip this frame
-          }
-
-          // Stage C OK: header is valid. Update Emit diagnostic variables so that
-          // sk_gl_present_{pid}.txt shows the header that the fast-path read.
-          hdr_ver    = ver;
-          hdr_bytes  = hdr_bytes2;
-          hdr_off    = data_off2;
-          hdr_fmt    = pix_fmt2;
-          hdr_w      = width2;
-          hdr_h      = height2;
-          hdr_stride = stride2;
-
-          // Stage D: counter stability check + texture upload
-          const uint32_t c1    = *(const uint32_t *)(b + (size_t)ctr_off2);
-          const bool     valid = (c1 != 0u);
-          if (! valid) skf1_saw_zero = true;
-
-          const bool changed    = (c1 != skf1_last_counter);
-          const ULONGLONG nowMs = GetTickCount64 ();
-
-          if (skf1_has_frame && valid && c1 == skf1_last_counter)
-          {
-            if (skf1_stale_since == 0) skf1_stale_since = nowMs;
-            else if (nowMs - skf1_stale_since >= kSkf1StaleMs) skf1_saw_zero = true;
-          }
-          else
-            skf1_stale_since = 0;
-
-          const bool regressed    = (skf1_has_frame && c1 < skf1_last_counter);
-          const bool restart_zero = (regressed && skf1_saw_zero);
-          const bool monotonic    = (! regressed || restart_zero || ! skf1_has_frame);
-
-          if (valid && changed && monotonic)
-          {
-            const size_t snap_bytes = (size_t)stride2 * (size_t)height2;
-            if (skf1_snapshot.size () != snap_bytes) skf1_snapshot.resize (snap_bytes);
-            const uint8_t* pixels = b + (size_t)pix_off2;
-            memcpy (skf1_snapshot.data (), pixels, snap_bytes);
-            const uint32_t c2 = *(const uint32_t *)(b + (size_t)ctr_off2);
-
-            if (c1 == c2)  // stable read
-            {
-              GLint prev_tex_up = 0;
-              glGetIntegerv (GL_TEXTURE_BINDING_2D, &prev_tex_up);
-
-              if (skf1_tex == 0) glGenTextures (1, &skf1_tex);
-              if (skf1_tex != 0)
-              {
-                glBindTexture (GL_TEXTURE_2D, skf1_tex);
-                glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
-                glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
-
-                GLint prev_unpack3 = 0;
-                glGetIntegerv (GL_UNPACK_ALIGNMENT, &prev_unpack3);
-                glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
-
-                if (skf1_w != width2 || skf1_h != height2 ||
-                    skf1_stride != stride2 || skf1_fmt != pix_fmt2)
-                {
-                  glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
-                                (GLsizei)width2, (GLsizei)height2, 0,
-                                GL_BGRA, GL_UNSIGNED_BYTE, skf1_snapshot.data ());
-                  skf1_w      = width2;   skf1_h      = height2;
-                  skf1_stride = stride2;  skf1_fmt    = pix_fmt2;
-                }
-                else
-                {
-                  glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
-                                   (GLsizei)width2, (GLsizei)height2,
-                                   GL_BGRA, GL_UNSIGNED_BYTE, skf1_snapshot.data ());
-                }
-
-                glPixelStorei (GL_UNPACK_ALIGNMENT, prev_unpack3);
-                skf1_last_counter = c1;
-                skf1_has_frame    = true;
-                skf1_saw_zero     = false;
-                skf1_stale_since  = 0;
-              }
-              glBindTexture (GL_TEXTURE_2D, (GLuint)prev_tex_up);
-            }
-          }
-          else if (! skf1_has_frame)
-          {
-            static std::atomic<bool> s_gl_no_frame { false };
-            if (!s_gl_no_frame.exchange (true))
-              _GL_SKF1_Log (L"GL early-out: NO_FRAME_YET (counter=%u valid=%d changed=%d)", c1, valid ? 1 : 0, changed ? 1 : 0);
-            break;  // no frame to draw yet — skip and proceed to swap
-          }
-
-          if (! (skf1_has_frame && skf1_tex != 0))
-          {
-            static std::atomic<bool> s_gl_no_tex { false };
-            if (!s_gl_no_tex.exchange (true))
-              _GL_SKF1_Log (L"GL early-out: NO_TEX has_frame=%d tex=%u", skf1_has_frame ? 1 : 0, (unsigned)skf1_tex);
-            break;
-          }
-
-          // Stage E: draw overlay to FBO 0 (default back buffer) with full viewport
-          if (skf1_prog == 0)
-          {
-            const char* vs_src =
-              "#version 130\n"
-              "in vec2 aPos;\n"
-              "in vec2 aUV;\n"
-              "out vec2 vUV;\n"
-              "void main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }\n";
-            const char* fs_src =
-              "#version 130\n"
-              "uniform sampler2D uTex;\n"
-              "in vec2 vUV;\n"
-              "out vec4 oColor;\n"
-              "void main(){ oColor = texture(uTex, vUV); }\n";
-
-            skf1_vs_obj = glCreateShader (GL_VERTEX_SHADER);
-            glShaderSource  (skf1_vs_obj, 1, &vs_src, nullptr);
-            glCompileShader (skf1_vs_obj);
-
-            skf1_fs_obj = glCreateShader (GL_FRAGMENT_SHADER);
-            glShaderSource  (skf1_fs_obj, 1, &fs_src, nullptr);
-            glCompileShader (skf1_fs_obj);
-
-            skf1_prog = glCreateProgram ();
-            glAttachShader       (skf1_prog, skf1_vs_obj);
-            glAttachShader       (skf1_prog, skf1_fs_obj);
-            glBindAttribLocation (skf1_prog, 0, "aPos");
-            glBindAttribLocation (skf1_prog, 1, "aUV");
-            glLinkProgram        (skf1_prog);
-            skf1_uTex = glGetUniformLocation (skf1_prog, "uTex");
-
-            const float verts [16] = {
-              -1.0f, -1.0f,  0.0f, 0.0f,
-               1.0f, -1.0f,  1.0f, 0.0f,
-               1.0f,  1.0f,  1.0f, 1.0f,
-              -1.0f,  1.0f,  0.0f, 1.0f
-            };
-            const uint16_t idx [6] = { 0, 1, 2, 0, 2, 3 };
-
-            glGenBuffers (1, &skf1_vbo);
-            glBindBuffer (GL_ARRAY_BUFFER, skf1_vbo);
-            glBufferData (GL_ARRAY_BUFFER, sizeof (verts), verts, GL_STATIC_DRAW);
-
-            glGenBuffers (1, &skf1_ibo);
-            glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, skf1_ibo);
-            glBufferData (GL_ELEMENT_ARRAY_BUFFER, sizeof (idx), idx, GL_STATIC_DRAW);
-
-            glGenVertexArrays (1, &skf1_vao);
-            glBindVertexArray (skf1_vao);
-            glBindBuffer (GL_ARRAY_BUFFER,         skf1_vbo);
-            glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, skf1_ibo);
-            glEnableVertexAttribArray (0);
-            glEnableVertexAttribArray (1);
-            glVertexAttribPointer (0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)0);
-            glVertexAttribPointer (1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)(2 * sizeof (float)));
-            glBindVertexArray (0);
-            glBindBuffer (GL_ARRAY_BUFFER, 0);
-            glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, 0);
-          }
-
-          if (skf1_prog == 0) break;
-
-          // Save GL state
-          GLint skf1_prev_prog   = 0;  glGetIntegerv (GL_CURRENT_PROGRAM,              &skf1_prev_prog);
-          GLint skf1_prev_atex   = 0;  glGetIntegerv (GL_ACTIVE_TEXTURE,               &skf1_prev_atex);
-          GLint skf1_prev_tex2d  = 0;  glGetIntegerv (GL_TEXTURE_BINDING_2D,           &skf1_prev_tex2d);
-          GLint skf1_prev_vao    = 0;  glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &skf1_prev_vao);
-          GLint skf1_prev_vbo2   = 0;  glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &skf1_prev_vbo2);
-          GLint skf1_prev_ibo2   = 0;  glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &skf1_prev_ibo2);
-          GLint skf1_prev_fbo    = 0;  glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &skf1_prev_fbo);
-          GLint skf1_prev_vp [4] = {};  glGetIntegerv (GL_VIEWPORT,                    skf1_prev_vp);
-          GLint skf1_prev_sc [4] = {};  glGetIntegerv (GL_SCISSOR_BOX,                 skf1_prev_sc);
-          GLint skf1_prev_bs  = 0, skf1_prev_bd = 0;
-          glGetIntegerv (GL_BLEND_SRC_RGB, &skf1_prev_bs);
-          glGetIntegerv (GL_BLEND_DST_RGB, &skf1_prev_bd);
-          GLboolean skf1_prev_scissor = glIsEnabled (GL_SCISSOR_TEST);
-          GLboolean skf1_prev_blend   = glIsEnabled (GL_BLEND);
-          GLboolean skf1_prev_cm [4]  = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
-          glGetBooleanv (GL_COLOR_WRITEMASK, skf1_prev_cm);
-
-          // Bind FBO 0 = default framebuffer (the back buffer that wglSwapBuffers will present)
-          glBindFramebuffer (GL_FRAMEBUFFER, 0);
-          // Viewport sizing: use the game's saved GL viewport (physical pixels) when non-zero.
-          // GetClientRect returns LOGICAL pixels on DPI-scaled systems (e.g., 1280x720 when the
-          // physical drawable is 1920x1080 at 150% DPI), which would clip the overlay to a
-          // sub-region of the framebuffer. The game's pre-swap viewport is in physical pixels.
-
-          // B/C/D/E: about-to-composite + size-space audit — emitted once per overlay session.
-          // Mandatory per diagnostic spec. Goes to %TEMP%\SidecarK_Overlay.log (collected by host).
-          {
-            const long cl_w = (long)(rcWnd.right  - rcWnd.left);
-            const long cl_h = (long)(rcWnd.bottom - rcWnd.top);
-            const GLsizei vp_w_probe = (skf1_prev_vp[2] > 0)
-              ? (GLsizei)skf1_prev_vp[2]
-              : (GLsizei)std::max (1L, cl_w);
-            const GLsizei vp_h_probe = (skf1_prev_vp[3] > 0)
-              ? (GLsizei)skf1_prev_vp[3]
-              : (GLsizei)std::max (1L, cl_h);
-
-            static std::atomic<bool> s_logged_composite_once { false };
-            if (!s_logged_composite_once.exchange (true))
-            {
-              _GL_SKF1_Log (
-                L"ABOUT-TO-COMPOSITE path=OpenGL method=GL-draw"
-                L" src=%ux%u stride=%u counter=%u"
-                L" fbo=%d vp_saved=%dx%d vp_used=%dx%d"
-                L" client=%ldx%ld dpi_mismatch=%d"
-                L" src_eq_vp=%d",
-                skf1_w, skf1_h, skf1_stride, skf1_last_counter,
-                skf1_prev_fbo, skf1_prev_vp[2], skf1_prev_vp[3],
-                (int)vp_w_probe, (int)vp_h_probe,
-                cl_w, cl_h,
-                (skf1_prev_vp[2] != (GLint)cl_w || skf1_prev_vp[3] != (GLint)cl_h) ? 1 : 0,
-                (skf1_w == (uint32_t)vp_w_probe && skf1_h == (uint32_t)vp_h_probe) ? 1 : 0);
-            }
-
-            // Also mirror to ODS for attaching debuggers.
-            static std::atomic<bool> s_logged_gl_vp_once = false;
-            if (!s_logged_gl_vp_once.exchange (true))
-            {
-              wchar_t glvpbuf [256] = {};
-              wsprintfW (glvpbuf,
-                L"SKF1 GL size-space: saved_vp=%dx%d client_rect=%ldx%ld skf1=%ux%u dpi_mismatch=%d\n",
-                skf1_prev_vp[2], skf1_prev_vp[3], cl_w, cl_h,
-                (unsigned)skf1_w, (unsigned)skf1_h,
-                (skf1_prev_vp[2] != (GLint)cl_w || skf1_prev_vp[3] != (GLint)cl_h) ? 1 : 0);
-              OutputDebugStringW (glvpbuf);
-            }
-          }
-
-          const GLsizei skf1_vp_w = (skf1_prev_vp[2] > 0)
-            ? (GLsizei)skf1_prev_vp[2]
-            : (GLsizei)std::max (1L, (long)(rcWnd.right  - rcWnd.left));
-          const GLsizei skf1_vp_h = (skf1_prev_vp[3] > 0)
-            ? (GLsizei)skf1_prev_vp[3]
-            : (GLsizei)std::max (1L, (long)(rcWnd.bottom - rcWnd.top));
-          glViewport (0, 0, skf1_vp_w, skf1_vp_h);
-
-          if (skf1_prev_scissor) glDisable  (GL_SCISSOR_TEST);
-          glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-          glEnable    (GL_BLEND);
-          glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-
-          glUseProgram    (skf1_prog);
-          glActiveTexture (GL_TEXTURE0);
-          glBindTexture   (GL_TEXTURE_2D, skf1_tex);
-          if (skf1_uTex >= 0) glUniform1i (skf1_uTex, 0);
-          glBindVertexArray (skf1_vao);
-          glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
-
-          // Restore GL state
-          glBindVertexArray (skf1_prev_vao);
-          glBindBuffer (GL_ARRAY_BUFFER,         (GLuint)skf1_prev_vbo2);
-          glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, (GLuint)skf1_prev_ibo2);
-          glUseProgram (skf1_prev_prog);
-          glActiveTexture  ((GLenum)skf1_prev_atex);
-          glBindTexture    (GL_TEXTURE_2D, (GLuint)skf1_prev_tex2d);
-          glBindFramebuffer (GL_FRAMEBUFFER, (GLuint)skf1_prev_fbo);
-          glViewport (skf1_prev_vp [0], skf1_prev_vp [1], skf1_prev_vp [2], skf1_prev_vp [3]);
-          if (skf1_prev_scissor)
-          {
-            glEnable  (GL_SCISSOR_TEST);
-            glScissor (skf1_prev_sc[0], skf1_prev_sc[1], skf1_prev_sc[2], skf1_prev_sc[3]);
-          }
-          else
-            glDisable (GL_SCISSOR_TEST);
-          if (skf1_prev_blend) glEnable (GL_BLEND); else glDisable (GL_BLEND);
-          glBlendFunc ((GLenum)skf1_prev_bs, (GLenum)skf1_prev_bd);
-          glColorMask (skf1_prev_cm[0], skf1_prev_cm[1], skf1_prev_cm[2], skf1_prev_cm[3]);
-
-          // F: stage correctness — composite happened before wglSwapBuffers
-          {
-            static std::atomic<bool> s_gl_draw_ok { false };
-            if (!s_gl_draw_ok.exchange (true))
-              _GL_SKF1_Log (L"GL Stage-F OK: glDrawElements executed before wglSwapBuffers vp=%dx%d tex=%u",
-                            (int)skf1_vp_w, (int)skf1_vp_h, (unsigned)skf1_tex);
-          }
-          // Stage F OK: composite executed. Update Emit diagnostic variables so that
-          // sk_gl_present_{pid}.txt shows reached_draw=1 and reason=360 (R_COMPOSITE_HIT).
-          reached_draw = true;
-          reason       = R_COMPOSITE_HIT;
-        } while (0);  // end SKF1 pre-swap overlay block
+          static std::atomic<bool> s_gl_wgl_logged { false };
+          if (!s_gl_wgl_logged.exchange (true))
+            _GL_SKF1_Log (
+              L"GL-SKF1-PATH: using-GL-wglSwapBuffers-present SK_GL_OnD3D11=%d",
+              SK_GL_OnD3D11 ? 1 : 0);
+        }
 
         status =
           static_cast_pfn <wglSwapBuffers_pfn> (pfnSwapFunc)(hDC);
@@ -4476,8 +4508,20 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
   }
 
   // Swap happening on a context we don't care about
+  // (compatible_dc=false AND config.apis.dxgi.d3d11.hook=false)
+  // Reason stays at R_ENTER=301 in this path; logged once to identify the branch.
   else
   {
+    static std::atomic<bool> s_gl_outer_gate_skip { false };
+    if (!s_gl_outer_gate_skip.exchange (true))
+    {
+      wchar_t _msg [256] = {};
+      wsprintfW (_msg,
+        L"GL-SKF1-PATH: outer-gate-not-passed compatible_dc=? d3d11_hook=%d pid=%lu\n",
+        config.apis.dxgi.d3d11.hook ? 1 : 0,
+        (unsigned long)GetCurrentProcessId ());
+      OutputDebugStringW (_msg);
+    }
     status =
       static_cast_pfn <wglSwapBuffers_pfn> (pfnSwapFunc)(hDC);
   }
