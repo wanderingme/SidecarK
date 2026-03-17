@@ -104,7 +104,7 @@ void SK_GL_SetInteropPresentSwapChain (IDXGISwapChain* pSwapChain)
   if (pSwapChain != nullptr) pSwapChain->AddRef ();
   IDXGISwapChain* prev =
     (IDXGISwapChain*)InterlockedExchangePointer (
-      reinterpret_cast<void * volatile *>(&s_gl_interop_nominated_swapchain), pSwapChain);
+      reinterpret_cast<void **>(&s_gl_interop_nominated_swapchain), pSwapChain);
   if (prev != nullptr) prev->Release ();
   SK_LOGi0 (L"SK_GL_SetInteropPresentSwapChain: nominated=%p", pSwapChain);
 }
