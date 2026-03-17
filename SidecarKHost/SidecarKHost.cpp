@@ -12,8 +12,10 @@
 #include <dwmapi.h>
 
 static constexpr bool kEnableLegacySKOF_DebugOnly = false;
-// User-editable: set true to enable SidecarK diagnostics token creation.
-static constexpr bool kEnableSidecarKDiagnosticsToken = false;
+// Always-on: create the diagnostics token so the injected SidecarK DLL
+// writes its in-process render/composite logs to %TEMP%\SidecarK_Overlay.log.
+// Those logs are appended to the --log file at session end (see wmain).
+static constexpr bool kEnableSidecarKDiagnosticsToken = true;
 
 static HANDLE g_diag_enable_map = nullptr;
 
@@ -2665,5 +2667,88 @@ int wmain(int argc, wchar_t** argv)
   AppendLog(logPath, L"exiting");
   HostLogAppendMilestone(L"end");
   WriteStatusAtomic(statusPath, L"exiting", targetPid, L"none");
+
+  // Collect the injected-DLL render/composite diagnostics from %TEMP%\SidecarK_Overlay.log
+  // and append them to the --log file so they appear in the same collected runtime output.
+  // This is the only cross-process bridge for in-process DLL logs.
+  if (!logPath.empty())
+  {
+    wchar_t wszTempPath[MAX_PATH]{};
+    wchar_t wszOverlayLog[MAX_PATH]{};
+    DWORD cchTemp = GetTempPathW((DWORD)_countof(wszTempPath), wszTempPath);
+    if (cchTemp > 0 && cchTemp < (DWORD)_countof(wszTempPath))
+    {
+      if (wszTempPath[cchTemp - 1] != L'\\')
+      {
+        wszTempPath[cchTemp]     = L'\\';
+        wszTempPath[cchTemp + 1] = L'\0';
+      }
+      wsprintfW(wszOverlayLog, L"%sSidecarK_Overlay.log", wszTempPath);
+
+      HANDLE hSrc = CreateFileW(wszOverlayLog, GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (hSrc != INVALID_HANDLE_VALUE)
+      {
+        AppendLog(logPath, L"--- injected-dll diagnostics begin (SidecarK_Overlay.log) ---");
+
+        wchar_t lineBuf[2048]{};
+        char    rawBuf[4096]{};
+        DWORD   cbRead = 0;
+        std::wstring partial;
+
+        // Read the file as UTF-8 lines and emit each one via AppendLog.
+        // Limit to 64 KB to prevent log flooding on repeated runs (diagnostic data
+        // only, not a data file). The full log remains in %TEMP% for deep inspection.
+        DWORD totalRead = 0;
+        static constexpr DWORD kMaxReadBytes = 65536;
+
+        while (totalRead < kMaxReadBytes &&
+               ReadFile(hSrc, rawBuf, (DWORD)sizeof(rawBuf) - 1, &cbRead, nullptr) &&
+               cbRead > 0)
+        {
+          totalRead += cbRead;
+          rawBuf[cbRead] = '\0';
+
+          // Convert UTF-8 chunk to wide string, then split on newlines.
+          int wlen = MultiByteToWideChar(CP_UTF8, 0, rawBuf, (int)cbRead, nullptr, 0);
+          if (wlen > 0)
+          {
+            std::wstring wchunk((size_t)wlen, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, rawBuf, (int)cbRead, &wchunk[0], wlen);
+
+            for (wchar_t wc : wchunk)
+            {
+              if (wc == L'\r') continue;
+              if (wc == L'\n')
+              {
+                if (!partial.empty())
+                  AppendLog(logPath, partial.c_str());
+                partial.clear();
+              }
+              else
+              {
+                partial += wc;
+              }
+            }
+          }
+        }
+
+        if (!partial.empty())
+          AppendLog(logPath, partial.c_str());
+
+        if (totalRead >= kMaxReadBytes)
+          AppendLog(logPath, L"(SidecarK_Overlay.log truncated at 64 KB; full log in %TEMP%)");
+
+        CloseHandle(hSrc);
+        AppendLog(logPath, L"--- injected-dll diagnostics end ---");
+      }
+      else
+      {
+        AppendLog(logPath, L"injected-dll diagnostics: SidecarK_Overlay.log not found (diagnostics disabled or no composite attempt)");
+      }
+    }
+  }
+
   return OK;
 }
