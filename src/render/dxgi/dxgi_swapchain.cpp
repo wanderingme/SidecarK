@@ -2548,10 +2548,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                         pReal, (int)bbDescF.Format, (UINT)s_skf1.width, (UINT)s_skf1.height);
           }
         }
-
-        bbF->Release ();
       }
 
+      if (bbF  != nullptr) bbF->Release ();
       if (ctxF != nullptr) ctxF->Release ();
       devF->Release ();
     }
