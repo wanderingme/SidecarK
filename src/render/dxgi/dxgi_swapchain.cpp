@@ -1659,12 +1659,28 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           IDXGISwapChain* const nominated = SK_GL_GetInteropPresentSwapChain ();
           const bool is_nominated_target  =
             (nominated != nullptr) && ((IDXGISwapChain*)this == nominated);
+          static ULONGLONG s_last_gl_route_ms = 0;
+          const ULONGLONG nowGlRouteMs = GetTickCount64 ();
+          if (nowGlRouteMs - s_last_gl_route_ms >= 1000ULL)
+          {
+            s_last_gl_route_ms = nowGlRouteMs;
+            _SidecarLog (L"SKF1 D3D11 GL-route: this=%p real=%p nominated=%p bb=%ux%u hdr=%ux%u copy=%ux%u",
+                         (void*)this, (void*)pReal, (void*)nominated,
+                         bbDesc.Width, bbDesc.Height,
+                         s_skf1.width, s_skf1.height,
+                         copyW, copyH);
+          }
 
           if (nominated == nullptr)
           {
-            static std::atomic<bool> s_logged_gl_no_nominated = false;
-            if (!s_logged_gl_no_nominated.exchange (true))
-              _SidecarLog (L"SKF1 D3D11 GL-skip: no nominated interop swapchain yet");
+            static ULONGLONG s_last_gl_no_nominated_ms = 0;
+            const ULONGLONG nowGLNoNomMs = GetTickCount64 ();
+            if (nowGLNoNomMs - s_last_gl_no_nominated_ms >= 1000ULL)
+            {
+              s_last_gl_no_nominated_ms = nowGLNoNomMs;
+              _SidecarLog (L"SKF1 D3D11 GL-skip: this=%p real=%p nominated=(null) reason=no_nominated",
+                           (void*)this, (void*)pReal);
+            }
             bb->Release ();
             ctx->Release ();
             dev->Release ();
@@ -1679,7 +1695,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             if (nowGLMs - s_last_gl_mismatch_ms >= 1000ULL)
             {
               s_last_gl_mismatch_ms = nowGLMs;
-              _SidecarLog (L"SKF1 D3D11 GL-skip: this=%p is not nominated interop swapchain", (void*)this);
+              _SidecarLog (L"SKF1 D3D11 GL-skip: this=%p real=%p nominated=%p reason=target_mismatch",
+                           (void*)this, (void*)pReal, (void*)nominated);
             }
             bb->Release ();
             ctx->Release ();
@@ -1690,9 +1707,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           }
           else
           {
-            static std::atomic<bool> s_logged_gl_match = false;
-            if (!s_logged_gl_match.exchange (true))
-              _SidecarLog (L"SKF1 D3D11 GL-match: compositing on nominated interop swapchain=%p", (void*)this);
+            static ULONGLONG s_last_gl_match_ms = 0;
+            const ULONGLONG nowGLMatchMs = GetTickCount64 ();
+            if (nowGLMatchMs - s_last_gl_match_ms >= 1000ULL)
+            {
+              s_last_gl_match_ms = nowGLMatchMs;
+              _SidecarLog (L"SKF1 D3D11 GL-allow: this=%p real=%p nominated=%p reason=target_match",
+                           (void*)this, (void*)pReal, (void*)nominated);
+            }
           }
         }
         else
@@ -1967,6 +1989,17 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           {
             if (s_skf1.texFmt == bbDesc.Format)
             {
+              static ULONGLONG s_last_gl_composite_exec_ms = 0;
+              const ULONGLONG nowGlCompositeMs = GetTickCount64 ();
+              if (nowGlCompositeMs - s_last_gl_composite_exec_ms >= 1000ULL)
+              {
+                s_last_gl_composite_exec_ms = nowGlCompositeMs;
+                _SidecarLog (L"SKF1 D3D11 GL-composite-exec: this=%p real=%p nominated=%p bb=%ux%u hdr=%ux%u copy=%ux%u fmt=%u",
+                             (void*)this, (void*)pReal, (void*)SK_GL_GetInteropPresentSwapChain (),
+                             bbDesc.Width, bbDesc.Height, s_skf1.width, s_skf1.height,
+                             copyW, copyH, bbDesc.Format);
+              }
+
               // Formats match - safe to use CopySubresourceRegion.
               // Use clamped copy rect (copyW×copyH), not full header dims.
               D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
