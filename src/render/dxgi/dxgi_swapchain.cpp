@@ -956,7 +956,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   // to avoid double compositing.  The flag is set before Present() and
   // cleared after Present() returns, so it is always read on the same
   // thread that set it.
-  if (InterlockedCompareExchange (&g_skf1_interop_overlay_done, 1, 1) != 0)
+  if (ReadAcquire (&g_skf1_interop_overlay_done) != 0)
   {
     // PresentBase() still needs to run for flip-model proxy copies
     if (0 == PresentBase ())
