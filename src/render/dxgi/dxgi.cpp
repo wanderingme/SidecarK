@@ -2215,6 +2215,12 @@ SK_ImGui_WaitD3D11 (void)
 #endif
 }
 
+// Flag set by the GL→D3D11 interop present thread (opengl.cpp) after it
+// composites the SKF1 overlay onto the backbuffer.  While the flag is set
+// the downstream vtable-hooked Present path must not overwrite that overlay
+// with ImGui / OSD rendering.
+extern volatile LONG g_skf1_interop_overlay_done;
+
 void
 SK_ImGui_DrawD3D11 (IDXGISwapChain* This)
 {
@@ -2222,6 +2228,12 @@ SK_ImGui_DrawD3D11 (IDXGISwapChain* This)
     return;
 
   if (! This)
+    return;
+
+  // The GL→D3D11 interop present thread has already composited the SKF1
+  // overlay onto this backbuffer.  Skip the ImGui / OSD pass so the
+  // overlay is not overwritten before the real Present_Original call.
+  if (ReadAcquire (&g_skf1_interop_overlay_done) != 0)
     return;
 
   SK_RenderBackend& rb =
