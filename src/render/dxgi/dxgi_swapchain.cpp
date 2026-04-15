@@ -30,6 +30,9 @@
 
 extern bool SidecarK_DiagnosticsEnabled ();
 
+// GL-on-D3D11 interop swapchain nomination (defined in opengl.cpp, declared in backend.h)
+extern IDXGISwapChain* SK_GL_GetInteropPresentSwapChain (void);
+
 static constexpr bool kEnableSKF1_PresentHitCounter = true;
 static constexpr bool kEnableSKF1_SkipCounters      = true;
 static constexpr ULONGLONG kSKF1_StaleCounterTimeoutMs = 2000ull;
@@ -1646,9 +1649,77 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                         nullptr, SK_DXGI_PresentSource::Wrapper );
         }
 
-        // Target-swapchain gate: claim if unclaimed, skip if another swapchain is already
-        // the target. Uses a single CAS to avoid races between concurrent presents.
+        // Target-swapchain gate.
+        // GL-on-D3D11: route compositing only to the nominated interop swapchain.
+        // Non-GL: use the existing first-claimant CAS gate.
+        if (SK_GL_OnD3D11)
         {
+          // SK_GL_GetInteropPresentSwapChain returns a raw pointer for address comparison.
+          // Do not call methods on it; it is used only to check if this swapchain is nominated.
+          IDXGISwapChain* const nominated = SK_GL_GetInteropPresentSwapChain ();
+          const bool is_nominated_target  =
+            (nominated != nullptr) && ((IDXGISwapChain*)this == nominated);
+          static ULONGLONG s_last_gl_route_ms = 0;
+          const ULONGLONG nowGlRouteMs = GetTickCount64 ();
+          if (nowGlRouteMs - s_last_gl_route_ms >= 1000ULL)
+          {
+            s_last_gl_route_ms = nowGlRouteMs;
+            _SidecarLog (L"SKF1 D3D11 GL-route: this=%p real=%p nominated=%p bb=%ux%u hdr=%ux%u copy=%ux%u",
+                         (void*)this, (void*)pReal, (void*)nominated,
+                         bbDesc.Width, bbDesc.Height,
+                         s_skf1.width, s_skf1.height,
+                         copyW, copyH);
+          }
+
+          if (nominated == nullptr)
+          {
+            static ULONGLONG s_last_gl_no_nominated_ms = 0;
+            const ULONGLONG nowGLNoNomMs = GetTickCount64 ();
+            if (nowGLNoNomMs - s_last_gl_no_nominated_ms >= 1000ULL)
+            {
+              s_last_gl_no_nominated_ms = nowGLNoNomMs;
+              _SidecarLog (L"SKF1 D3D11 GL-skip: this=%p real=%p nominated=(null) reason=no_nominated",
+                           (void*)this, (void*)pReal);
+            }
+            bb->Release ();
+            ctx->Release ();
+            dev->Release ();
+            return
+              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+          }
+          else if (!is_nominated_target)
+          {
+            static ULONGLONG s_last_gl_mismatch_ms = 0;
+            const ULONGLONG nowGLMs = GetTickCount64 ();
+            if (nowGLMs - s_last_gl_mismatch_ms >= 1000ULL)
+            {
+              s_last_gl_mismatch_ms = nowGLMs;
+              _SidecarLog (L"SKF1 D3D11 GL-skip: this=%p real=%p nominated=%p reason=target_mismatch",
+                           (void*)this, (void*)pReal, (void*)nominated);
+            }
+            bb->Release ();
+            ctx->Release ();
+            dev->Release ();
+            return
+              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+          }
+          else
+          {
+            static ULONGLONG s_last_gl_match_ms = 0;
+            const ULONGLONG nowGLMatchMs = GetTickCount64 ();
+            if (nowGLMatchMs - s_last_gl_match_ms >= 1000ULL)
+            {
+              s_last_gl_match_ms = nowGLMatchMs;
+              _SidecarLog (L"SKF1 D3D11 GL-allow: this=%p real=%p nominated=%p reason=target_match",
+                           (void*)this, (void*)pReal, (void*)nominated);
+            }
+          }
+        }
+        else
+        {
+          // Non-GL: first-claimant CAS gate.
           void* const prev =
             InterlockedCompareExchangePointer (
               reinterpret_cast<void * volatile *> (&s_target_swapchain),
@@ -1918,6 +1989,18 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           {
             if (s_skf1.texFmt == bbDesc.Format)
             {
+              static ULONGLONG s_last_gl_composite_exec_ms = 0;
+              const ULONGLONG nowGlCompositeMs = GetTickCount64 ();
+              if (nowGlCompositeMs - s_last_gl_composite_exec_ms >= 1000ULL)
+              {
+                s_last_gl_composite_exec_ms = nowGlCompositeMs;
+                IDXGISwapChain* const nominated_exec = SK_GL_GetInteropPresentSwapChain ();
+                _SidecarLog (L"SKF1 D3D11 GL-composite-exec: this=%p real=%p nominated=%p bb=%ux%u hdr=%ux%u copy=%ux%u fmt=%u",
+                             (void*)this, (void*)pReal, (void*)nominated_exec,
+                             bbDesc.Width, bbDesc.Height, s_skf1.width, s_skf1.height,
+                             copyW, copyH, bbDesc.Format);
+              }
+
               // Formats match - safe to use CopySubresourceRegion.
               // Use clamped copy rect (copyW×copyH), not full header dims.
               D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };

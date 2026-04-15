@@ -948,6 +948,12 @@ extern int  SK_GL_ContextCount;
 extern bool SK_GL_OnD3D11;
 extern bool SK_GL_OnD3D11_Reset; // This one especially, this has a signal
 
+// GL-on-D3D11 interop swapchain nomination bridge.
+// opengl.cpp owns the storage; dxgi_swapchain.cpp queries via Get.
+void             SK_GL_SetInteropPresentSwapChain   (IDXGISwapChain* pSwapChain);
+void             SK_GL_ClearInteropPresentSwapChain (void);
+IDXGISwapChain*  SK_GL_GetInteropPresentSwapChain   (void);
+
 extern volatile LONG __SK_NVAPI_UpdateGSync;
 
 #endif /* __SK__RENDER_BACKEND__H__ */
