@@ -46,6 +46,11 @@ std::atomic_bool g_dxgi_present_seen{ false };
 
 std::atomic_bool g_dxgi_overlay_owner{ false };
 
+// Set by the GL→D3D11 interop present thread when it has already composited
+// the SKF1 overlay onto the backbuffer.  When true, IWrapDXGISwapChain::Present()
+// skips its own SKF1 pipeline to avoid double compositing.
+extern volatile LONG g_skf1_interop_overlay_done;
+
 #define SK_LOG_ONCE(x) { static bool logged = false; if (! logged) \
                        { dll_log->Log ((x)); logged = true; } }
 
@@ -945,6 +950,22 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   g_dxgi_present_seen.store (true, std::memory_order_relaxed);
 
   g_dxgi_overlay_owner.exchange (true, std::memory_order_relaxed);
+
+  // When the GL→D3D11 interop present thread has already composited the
+  // SKF1 overlay onto the backbuffer, skip the entire SKF1 pipeline here
+  // to avoid double compositing.  The flag is set before Present() and
+  // cleared after Present() returns, so it is always read on the same
+  // thread that set it.
+  if (InterlockedCompareExchange (&g_skf1_interop_overlay_done, 1, 1) != 0)
+  {
+    // PresentBase() still needs to run for flip-model proxy copies
+    if (0 == PresentBase ())
+      SyncInterval = 0;
+
+    return
+      SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                  nullptr, SK_DXGI_PresentSource::Wrapper );
+  }
 
   // SidecarK proof-of-life: copy an existing overlay pixel buffer from shared
   // memory into the game backbuffer every Present (dimensions from SKF1 header).
