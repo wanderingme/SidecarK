@@ -1994,8 +1994,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               if (nowGlCompositeMs - s_last_gl_composite_exec_ms >= 1000ULL)
               {
                 s_last_gl_composite_exec_ms = nowGlCompositeMs;
+                IDXGISwapChain* const nominated_exec = SK_GL_GetInteropPresentSwapChain ();
                 _SidecarLog (L"SKF1 D3D11 GL-composite-exec: this=%p real=%p nominated=%p bb=%ux%u hdr=%ux%u copy=%ux%u fmt=%u",
-                             (void*)this, (void*)pReal, (void*)SK_GL_GetInteropPresentSwapChain (),
+                             (void*)this, (void*)pReal, (void*)nominated_exec,
                              bbDesc.Width, bbDesc.Height, s_skf1.width, s_skf1.height,
                              copyW, copyH, bbDesc.Format);
               }

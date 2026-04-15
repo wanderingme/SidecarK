@@ -106,15 +106,12 @@ void SK_GL_SetInteropPresentSwapChain (IDXGISwapChain* pSwapChain)
     (IDXGISwapChain*)InterlockedExchangePointer (
       reinterpret_cast<void **>(&s_gl_interop_nominated_swapchain), pSwapChain);
   if (prev != nullptr) prev->Release ();
-  SK_LOGi0 (L"SK_GL_SetInteropPresentSwapChain: nominated=%p", pSwapChain);
+  SK_LOGi0 (L"SK_GL_SetInteropPresentSwapChain: new=%p prev=%p", pSwapChain, prev);
 }
 
 void SK_GL_ClearInteropPresentSwapChain (void)
 {
-  IDXGISwapChain* const prev =
-    (IDXGISwapChain*)InterlockedCompareExchangePointer (
-      reinterpret_cast<void * volatile *>(&s_gl_interop_nominated_swapchain), nullptr, nullptr);
-  SK_LOGi0 (L"SK_GL_ClearInteropPresentSwapChain: prev=%p", prev);
+  SK_LOGi0 (L"SK_GL_ClearInteropPresentSwapChain: requested");
   SK_GL_SetInteropPresentSwapChain (nullptr);
 }
 
@@ -2206,9 +2203,11 @@ SK_IndirectX_PresentManager::Start (SK_IndirectX_InteropCtx *pCtx)
 
             static ULONGLONG s_last_pm_present_log_ms = 0;
             const ULONGLONG nowPmMs = GetTickCount64 ();
+            bool log_post_pm_present = false;
             if (nowPmMs - s_last_pm_present_log_ms >= 1000ULL)
             {
               s_last_pm_present_log_ms = nowPmMs;
+              log_post_pm_present = true;
               SK_LOGi0 (L"SK_GL PresentMgr pre-DXGI Present: sc=%p interval=%u tearing=%d",
                         pSwapChain, (unsigned)pCtx->present_man.interval,
                         (pCtx->output.caps.tearing && pCtx->present_man.interval == 0) ? 1 : 0);
@@ -2219,7 +2218,7 @@ SK_IndirectX_PresentManager::Start (SK_IndirectX_InteropCtx *pCtx)
                   (pCtx->output.caps.tearing && pCtx->present_man.interval == 0) ? DXGI_PRESENT_ALLOW_TEARING
                                                                                   : 0x0 ) );
 
-            if (nowPmMs - s_last_pm_present_log_ms <= 50ULL)
+            if (log_post_pm_present)
             {
               SK_LOGi0 (L"SK_GL PresentMgr post-DXGI Present: sc=%p success=%d post_stage=ack_only_no_blit_copy_resolve_swap",
                         pSwapChain, bSuccess ? 1 : 0);
@@ -2989,10 +2988,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
     if (SK_GL_OnD3D11 && (std::exchange (dx_gl_interop.stale, false) || pSwapChain == nullptr))
     {
-      const bool stale_recovery = true;
       const bool had_swapchain_before_clear = (pSwapChain != nullptr);
       SK_LOGi0 (L"SK_GL interop stale recovery: clear begin swapchain=%p stale_recovery=%d reset=%d",
-                pSwapChain.p, stale_recovery ? 1 : 0, stale_reset ? 1 : 0);
+                pSwapChain.p, 1, stale_reset ? 1 : 0);
 
       // Clear the nominated interop swapchain before tearing down / recreating.
       // The DXGI side must not composite on a stale pointer during recovery.
@@ -3079,7 +3077,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                                            &desc1, &pSwapChain.p );
         SK_LOGi0 (L"SK_GL interop swapchain %ls: sc=%p size=%ldx%ld stale_recovery=%d reset=%d",
                   had_swapchain_before_clear ? L"recreated" : L"created",
-                  pSwapChain.p, w, h, stale_recovery ? 1 : 0, stale_reset ? 1 : 0);
+                  pSwapChain.p, w, h, 1, stale_reset ? 1 : 0);
 
         pFactory->MakeWindowAssociation ( dx_gl_interop.output.hWnd,
                                             DXGI_MWA_NO_ALT_ENTER |
@@ -3097,7 +3095,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                     desc1.Format, dx_gl_interop.output.swapchain_flags
         );
         SK_LOGi0 (L"SK_GL interop swapchain resized: sc=%p size=%ldx%ld stale_recovery=%d reset=%d",
-                  pSwapChain.p, w, h, stale_recovery ? 1 : 0, stale_reset ? 1 : 0);
+                  pSwapChain.p, w, h, 1, stale_reset ? 1 : 0);
       }
 
       pSwapChain->GetDesc1 (&desc1);
@@ -3107,7 +3105,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       SK_GL_SetInteropPresentSwapChain (pSwapChain.p);
       SK_LOGi0 (L"SK_GL interop swapchain nominated: sc=%p size=%ux%u stale_recovery=%d reset=%d",
                 pSwapChain.p, (unsigned)desc1.Width, (unsigned)desc1.Height,
-                stale_recovery ? 1 : 0, stale_reset ? 1 : 0);
+                1, stale_reset ? 1 : 0);
 
       dx_gl_interop.output.viewport = { 0.0f, 0.0f,
                      static_cast <float> (desc1.Width),
@@ -3509,9 +3507,11 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
         static ULONGLONG s_last_gl_final_path_log_ms = 0;
         const ULONGLONG nowFinalPathMs = GetTickCount64 ();
+        bool log_post_final_path = false;
         if (nowFinalPathMs - s_last_gl_final_path_log_ms >= 1000ULL)
         {
           s_last_gl_final_path_log_ms = nowFinalPathMs;
+          log_post_final_path = true;
           SK_LOGi0 (L"SK_GL final path: interop_present_begin sc=%p fullscreen=%d post_stage=dxgi_present_only",
                     pSwapChain.p, dx_gl_interop.gl.fullscreen ? 1 : 0);
         }
@@ -3519,7 +3519,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
         dx_gl_interop.present_man.Present (&dx_gl_interop, present_interval);
 
-        if (nowFinalPathMs - s_last_gl_final_path_log_ms <= 50ULL)
+        if (log_post_final_path)
         {
           SK_LOGi0 (L"SK_GL final path: interop_present_end sc=%p post_stage=no_extra_gl_blit_copy_resolve_swap_no_wglSwapBuffers",
                     pSwapChain.p);
