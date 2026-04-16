@@ -93,6 +93,14 @@ int  SK_GL_ContextCount  = 0;
 bool SK_GL_OnD3D11       = false;
 bool SK_GL_OnD3D11_Reset = false;
 
+// When the GL→D3D11 interop present thread composites the SKF1 overlay
+// directly onto the backbuffer, it sets this flag so that the downstream
+// IWrapDXGISwapChain::Present() can skip its own SKF1 Stage A-F pipeline.
+// The flag is set before Present() and cleared after Present() returns.
+// Thread-safe: the present thread calls Present() synchronously, so the
+// flag is always read on the same thread that set it.
+volatile LONG g_skf1_interop_overlay_done = 0;
+
 unsigned int SK_GL_SwapHook = 0;
 volatile LONG __gl_ready = FALSE;
 
@@ -1969,6 +1977,296 @@ SK_Overlay_DrawGL (void)
 
 static auto constexpr _DXBackBuffers = 3;
 
+// ---------------------------------------------------------------------------
+// SKF1 Overlay Composite for GL→D3D11 Interop Present Thread
+//
+// Reads the SidecarK overlay from shared memory and blits it onto the D3D11
+// backbuffer using CopySubresourceRegion.  Called from the present manager
+// thread AFTER the fullscreen quad draw (GL→D3D11 blit) and BEFORE
+// pSwapChain->Present().  This is the correct insertion point for the interop
+// path because the DXGI wrapper's Stage F was proven unreliable for fullscreen
+// (early-exit paths in Stage E can skip Stage F, and dimension-change resets
+// during fullscreen transitions cause frame drops).
+//
+// Returns TRUE if the overlay was successfully composited.
+// ---------------------------------------------------------------------------
+static BOOL
+SKF1_InteropCompositeOverlay (
+  ID3D11Device        *pDevice,
+  ID3D11DeviceContext *pDevCtx,
+  ID3D11Texture2D     *pBackbuffer)
+{
+  if (pDevice == nullptr || pDevCtx == nullptr || pBackbuffer == nullptr)
+    return FALSE;
+
+  // --- Control Channel ---
+  static HANDLE          s_ctrlMap     = nullptr;
+  static volatile LONG  *s_ctrlFlag   = nullptr;
+  static DWORD           s_ctrlPid    = 0;
+  static ULONGLONG       s_ctrlRetry  = 0;
+
+  const DWORD pid = GetCurrentProcessId ();
+
+  if (s_ctrlPid != pid)
+  {
+    if (s_ctrlMap != nullptr) { CloseHandle (s_ctrlMap); s_ctrlMap = nullptr; }
+    s_ctrlFlag  = nullptr;
+    s_ctrlPid   = pid;
+    s_ctrlRetry = 0;
+  }
+
+  if (s_ctrlFlag == nullptr)
+  {
+    const ULONGLONG now = GetTickCount64 ();
+    if (now - s_ctrlRetry < 1000ull) return FALSE;
+    s_ctrlRetry = now;
+
+    wchar_t name [64] = { };
+    wsprintfW (name, L"Local\\SidecarK_Control_%lu", (unsigned long)pid);
+
+    HANDLE hMap = OpenFileMappingW (FILE_MAP_READ, FALSE, name);
+    if (hMap == nullptr) return FALSE;
+
+    uint8_t *base = (uint8_t *)MapViewOfFile (hMap, FILE_MAP_READ, 0, 0, 0);
+    if (base == nullptr) { CloseHandle (hMap); return FALSE; }
+
+    if (memcmp (base, "SKC1", 4) != 0 ||
+        *(const uint32_t *)(base + 4) != 1u)
+    {
+      UnmapViewOfFile (base);
+      CloseHandle     (hMap);
+      return FALSE;
+    }
+
+    s_ctrlMap  = hMap;
+    s_ctrlFlag = reinterpret_cast<volatile LONG *>(base + 0x08);
+  }
+
+  // Overlay disabled by control channel
+  if (*s_ctrlFlag == 0)
+    return FALSE;
+
+  // --- Frame Mapping ---
+  static HANDLE   s_frameMap   = nullptr;
+  static uint8_t *s_frameBase  = nullptr;
+  static size_t   s_frameBytes = 0;
+  static DWORD    s_framePid   = 0;
+  static ULONGLONG s_frameRetry = 0;
+
+  if (s_framePid != pid)
+  {
+    if (s_frameBase != nullptr) { UnmapViewOfFile (s_frameBase); s_frameBase = nullptr; }
+    if (s_frameMap  != nullptr) { CloseHandle     (s_frameMap);  s_frameMap  = nullptr; }
+    s_framePid   = pid;
+    s_frameRetry = 0;
+    s_frameBytes = 0;
+  }
+
+  if (s_frameBase == nullptr)
+  {
+    const ULONGLONG now = GetTickCount64 ();
+    if (now - s_frameRetry < 1000ull) return FALSE;
+    s_frameRetry = now;
+
+    wchar_t name [64] = { };
+    wsprintfW (name, L"Local\\SidecarK_Frame_v1_%lu", (unsigned long)pid);
+
+    HANDLE hMap = OpenFileMappingW (FILE_MAP_READ, FALSE, name);
+    if (hMap == nullptr) return FALSE;
+
+    uint8_t *base = (uint8_t *)MapViewOfFile (hMap, FILE_MAP_READ, 0, 0, 0);
+    if (base == nullptr) { CloseHandle (hMap); return FALSE; }
+
+    MEMORY_BASIC_INFORMATION mbi = { };
+    if (VirtualQuery (base, &mbi, sizeof (mbi)))
+      s_frameBytes = mbi.RegionSize;
+
+    s_frameMap  = hMap;
+    s_frameBase = base;
+  }
+
+  // --- Read Header ---
+  if (s_frameBytes < 0x24)
+    return FALSE;
+
+  const uint8_t *p = s_frameBase;
+
+  const uint32_t magic        = *(const uint32_t *)(p + 0x00);
+  const uint32_t version      = *(const uint32_t *)(p + 0x04);
+  const uint32_t header_bytes = *(const uint32_t *)(p + 0x08);
+  const uint32_t data_offset  = *(const uint32_t *)(p + 0x0C);
+  const uint32_t pixel_format = *(const uint32_t *)(p + 0x10);
+  const uint32_t width        = *(const uint32_t *)(p + 0x14);
+  const uint32_t height       = *(const uint32_t *)(p + 0x18);
+  const uint32_t stride       = *(const uint32_t *)(p + 0x1C);
+
+  (void)version;
+
+  if (magic != 0x31464B53u /* "SKF1" little-endian */ ||
+      header_bytes != 0x20u || data_offset != 0x24u ||
+      pixel_format != 1u /* BGRA */ ||
+      width == 0u || height == 0u || stride != width * 4u)
+    return FALSE;
+
+  const size_t pixel_off    = (size_t)data_offset;
+  const size_t needed_bytes = pixel_off + (size_t)stride * height;
+  if (needed_bytes > s_frameBytes)
+    return FALSE;
+
+  // --- Stable Read ---
+  if (data_offset < 4u)
+    return FALSE;
+
+  volatile const LONG *counter_ptr =
+    reinterpret_cast<volatile const LONG *>(s_frameBase + data_offset - 4u);
+
+  static LONG s_lastCounter = 0;
+
+  const LONG c1 = *counter_ptr;
+  if (c1 == 0) return FALSE;   // No frame published yet
+
+  // --- Backbuffer Info ---
+  D3D11_TEXTURE2D_DESC bbDesc = { };
+  pBackbuffer->GetDesc (&bbDesc);
+
+  const UINT copyW = std::min ((UINT)bbDesc.Width,  width);
+  const UINT copyH = std::min ((UINT)bbDesc.Height, height);
+  if (copyW < 1u || copyH < 1u)
+    return FALSE;
+
+  // --- Overlay Staging Texture ---
+  static ID3D11Texture2D *s_tex     = nullptr;
+  static DXGI_FORMAT      s_texFmt  = DXGI_FORMAT_UNKNOWN;
+  static UINT             s_texW    = 0;
+  static UINT             s_texH    = 0;
+
+  // Only accept formats we know how to convert
+  if (bbDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+      bbDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+      bbDesc.Format != DXGI_FORMAT_R10G10B10A2_UNORM)
+    return FALSE;
+
+  // Recreate if dimensions or format changed
+  if (s_tex == nullptr || s_texFmt != bbDesc.Format ||
+      s_texW != copyW  || s_texH  != copyH)
+  {
+    if (s_tex != nullptr) { s_tex->Release (); s_tex = nullptr; }
+
+    D3D11_TEXTURE2D_DESC td = { };
+    td.Width              = copyW;
+    td.Height             = copyH;
+    td.MipLevels          = 1;
+    td.ArraySize          = 1;
+    td.Format             = bbDesc.Format;
+    td.SampleDesc.Count   = 1;
+    td.SampleDesc.Quality = 0;
+    td.Usage              = D3D11_USAGE_DEFAULT;
+    td.BindFlags          = D3D11_BIND_SHADER_RESOURCE;
+    td.CPUAccessFlags     = 0;
+    td.MiscFlags          = 0;
+
+    if (FAILED (pDevice->CreateTexture2D (&td, nullptr, &s_tex)))
+      return FALSE;
+
+    s_texFmt = bbDesc.Format;
+    s_texW   = copyW;
+    s_texH   = copyH;
+  }
+
+  // --- Upload frame data (only if counter changed) ---
+  static bool         s_hasFrame = false;
+  static std::vector<uint8_t> s_snapshot;
+
+  if (c1 != s_lastCounter)
+  {
+    const size_t snapshot_bytes = (size_t)stride * height;
+    if (s_snapshot.size () < snapshot_bytes)
+        s_snapshot.resize (snapshot_bytes);
+
+    memcpy (s_snapshot.data (), s_frameBase + pixel_off, snapshot_bytes);
+
+    const LONG c2 = *counter_ptr;
+    if (c1 != c2) return s_hasFrame ? TRUE : FALSE;  // Torn read, use last good frame
+
+    // Convert BGRA pixels to backbuffer format and upload
+    if (bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM)
+    {
+      // Source is already BGRA — direct upload
+      pDevCtx->UpdateSubresource (s_tex, 0, nullptr,
+                                  s_snapshot.data (), stride, 0);
+    }
+    else if (bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
+    {
+      // BGRA → RGBA: swap B and R
+      static std::vector<uint8_t> s_converted;
+      const size_t row_bytes = (size_t)copyW * 4u;
+      if (s_converted.size () < row_bytes * copyH)
+          s_converted.resize (row_bytes * copyH);
+
+      for (UINT y = 0; y < copyH; ++y)
+      {
+        const uint8_t *src = s_snapshot.data () + (size_t)y * stride;
+              uint8_t *dst = s_converted.data () + (size_t)y * row_bytes;
+
+        for (UINT x = 0; x < copyW; ++x)
+        {
+          dst[x*4+0] = src[x*4+2]; // R
+          dst[x*4+1] = src[x*4+1]; // G
+          dst[x*4+2] = src[x*4+0]; // B
+          dst[x*4+3] = src[x*4+3]; // A
+        }
+      }
+
+      pDevCtx->UpdateSubresource (s_tex, 0, nullptr,
+                                  s_converted.data (), (UINT)row_bytes, 0);
+    }
+    else if (bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
+    {
+      // BGRA 8-bit → R10G10B10A2: scale and pack
+      static std::vector<uint32_t> s_packed;
+      if (s_packed.size () < (size_t)copyW * copyH)
+          s_packed.resize ((size_t)copyW * copyH);
+
+      for (UINT y = 0; y < copyH; ++y)
+      {
+        const uint8_t *src = s_snapshot.data () + (size_t)y * stride;
+              uint32_t *dst = s_packed.data () + (size_t)y * copyW;
+
+        for (UINT x = 0; x < copyW; ++x)
+        {
+          const uint8_t b8 = src[x*4+0];
+          const uint8_t g8 = src[x*4+1];
+          const uint8_t r8 = src[x*4+2];
+          const uint8_t a8 = src[x*4+3];
+
+          const uint32_t r10 = (uint32_t)(r8 * 1023 + 127) / 255;
+          const uint32_t g10 = (uint32_t)(g8 * 1023 + 127) / 255;
+          const uint32_t b10 = (uint32_t)(b8 * 1023 + 127) / 255;
+          const uint32_t a2  = (uint32_t)(a8 *    3 + 127) / 255;
+
+          dst[x] = (r10) | (g10 << 10) | (b10 << 20) | (a2 << 30);
+        }
+      }
+
+      pDevCtx->UpdateSubresource (s_tex, 0, nullptr,
+                                  s_packed.data (), copyW * 4u, 0);
+    }
+
+    s_lastCounter = c1;
+    s_hasFrame    = true;
+  }
+
+  if (! s_hasFrame)
+    return FALSE;
+
+  // --- Blit overlay onto backbuffer ---
+  D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
+  pDevCtx->CopySubresourceRegion (pBackbuffer, 0, 0, 0, 0, s_tex, 0, &srcBox);
+
+  return TRUE;
+}
+
+
 struct SK_IndirectX_InteropCtx;
 struct SK_IndirectX_PresentManager {
   HANDLE          hThread         = INVALID_HANDLE_VALUE;
@@ -2164,6 +2462,26 @@ SK_IndirectX_PresentManager::Start (SK_IndirectX_InteropCtx *pCtx)
 
             pDevCtx->Flush ();
 
+            // Composite the SKF1 overlay onto the backbuffer BEFORE
+            // calling Present().  This is the correct insertion point
+            // because the downstream IWrapDXGISwapChain::Present()
+            // runs the full SKF1 pipeline, but its Stage E has multiple
+            // early-exit paths that skip Stage F (the actual blit).
+            // By compositing here we guarantee the overlay reaches the
+            // screen regardless of those gating conditions.
+            //
+            // g_skf1_interop_overlay_done tells the DXGI wrapper's
+            // Present() to skip its own SKF1 pipeline for this frame.
+            if (pCtx->output.backbuffer.image.p != nullptr)
+            {
+              if (SKF1_InteropCompositeOverlay (
+                    pCtx->d3d11.pDevice.p,
+                    pDevCtx,
+                    pCtx->output.backbuffer.image.p))
+              {
+                InterlockedExchange (&g_skf1_interop_overlay_done, 1);
+              }
+            }
 
             auto pSwapChain =
               pCtx->output.pSwapChain.p;
@@ -2172,6 +2490,9 @@ SK_IndirectX_PresentManager::Start (SK_IndirectX_InteropCtx *pCtx)
               SUCCEEDED ( pSwapChain->Present ( pCtx->present_man.interval,
                   (pCtx->output.caps.tearing && pCtx->present_man.interval == 0) ? DXGI_PRESENT_ALLOW_TEARING
                                                                                  : 0x0 ) );
+
+            // Clear the interop overlay flag after Present() returns
+            InterlockedExchange (&g_skf1_interop_overlay_done, 0);
 
 
             SK_ReleaseAssert (bSuccess);

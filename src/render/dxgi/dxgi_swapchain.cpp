@@ -46,6 +46,11 @@ std::atomic_bool g_dxgi_present_seen{ false };
 
 std::atomic_bool g_dxgi_overlay_owner{ false };
 
+// Set by the GL→D3D11 interop present thread when it has already composited
+// the SKF1 overlay onto the backbuffer.  When true, IWrapDXGISwapChain::Present()
+// skips its own SKF1 pipeline to avoid double compositing.
+extern volatile LONG g_skf1_interop_overlay_done;
+
 #define SK_LOG_ONCE(x) { static bool logged = false; if (! logged) \
                        { dll_log->Log ((x)); logged = true; } }
 
@@ -946,6 +951,22 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
   g_dxgi_overlay_owner.exchange (true, std::memory_order_relaxed);
 
+  // When the GL→D3D11 interop present thread has already composited the
+  // SKF1 overlay onto the backbuffer, skip the entire SKF1 pipeline here
+  // to avoid double compositing.  The flag is set before Present() and
+  // cleared after Present() returns, so it is always read on the same
+  // thread that set it.
+  if (ReadAcquire (&g_skf1_interop_overlay_done) != 0)
+  {
+    // PresentBase() still needs to run for flip-model proxy copies
+    if (0 == PresentBase ())
+      SyncInterval = 0;
+
+    return
+      SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                  nullptr, SK_DXGI_PresentSource::Wrapper );
+  }
+
   // SidecarK proof-of-life: copy an existing overlay pixel buffer from shared
   // memory into the game backbuffer every Present (dimensions from SKF1 header).
   #pragma pack(push, 1)
@@ -1572,9 +1593,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     // STAGE E: Stable read protocol - read c1, validate/upload, read c2
     const LONG c1 = *counter_ptr;
 
-    static std::atomic<ULONG64> s_last_overlay_log_frame = 0;
-    const  ULONG64              frame                    = SK_GetFramesDrawn ();
-
     ID3D11Device*        dev = nullptr;
     ID3D11DeviceContext* ctx = nullptr;
 
@@ -1905,60 +1923,13 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             }
           }
 
-          // STAGE F: EPILOGUE - Always blit if we have a valid frame (last-good draw)
-          static std::atomic<bool> s_logged_blit_check = false;
-          if (!s_logged_blit_check.exchange(true))
-          {
-            wchar_t msg[256];
-            wsprintfW(msg, L"→ Blit check: has_frame=%d tex=%p", s_skf1.has_frame ? 1 : 0, s_skf1.tex);
-            _SidecarLog(msg);
-          }
-
-          if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
-          {
-            if (s_skf1.texFmt == bbDesc.Format)
-            {
-              // Formats match - safe to use CopySubresourceRegion.
-              // Use clamped copy rect (copyW×copyH), not full header dims.
-              D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
-              static std::atomic<bool> s_logged_blit_details = false;
-              if (!s_logged_blit_details.exchange(true))
-              {
-                _SidecarLog(L"→ Blit destination: bb=%p (backbuffer from GetBuffer(0))", bb);
-                _SidecarLog(L"→ Backbuffer format: %u, Overlay format: %u", bbDesc.Format, s_skf1.texFmt);
-                _SidecarLog(L"→ No backbuffer clear performed (composite only)");
-                _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
-              }
-              if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
-              const ULONGLONG tCopySub11 = GetTickCount64 ();
-              ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
-              _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
-
-              // STAGE F OK
-              if (!s_skf1.logged_stage_f_ok.exchange(true))
-              {
-                _SidecarLog(L"SKF1 Stage F OK: Blit executed");
-              }
-            }
-            else
-            {
-              static std::atomic<bool> s_logged_format_mismatch = false;
-              if (!s_logged_format_mismatch.exchange(true))
-              {
-                _SidecarLog(L"→ FORMAT MISMATCH: overlay tex=%u backbuffer=%u", s_skf1.texFmt, bbDesc.Format);
-              }
-            }
-
-            // Health signal: log successful composite periodically
-
-              // Health signal: log successful composite periodically
-            if (s_last_overlay_log_frame.load () + 120 < frame)
-            {
-              s_last_overlay_log_frame.store (frame);
-              _SidecarLog (L"SKF1 composite: swapchain=%p bbfmt=%d w=%u h=%u counter=%ld", 
-                          pReal, (int)bbDesc.Format, (UINT)s_skf1.width, (UINT)s_skf1.height, (long)c1);
-            }
-          }
+          // STAGE F is deferred until after PresentBase() so the overlay is
+          // composited onto the FINAL backbuffer content.  PresentBase() may
+          // copy a proxy backbuffer onto the real one (flip-model override),
+          // which would overwrite any overlay drawn before it.
+          //
+          // We just record that a D3D11 composite is pending; the actual blit
+          // happens below, after PresentBase().
         }
         else
         {
@@ -2511,13 +2482,100 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   s_skf1.view_ptr, s_skf1.width, s_skf1.height, s_skf1.stride, s_skf1.pixel_format);
   }
 
-  // Now that overlay is composited, do the actual Present
+  // PresentBase() may copy a proxy backbuffer onto the real one (flip-model
+  // override).  It MUST run before the overlay blit so the overlay is not
+  // overwritten.
   const ULONGLONG tPresentBase = GetTickCount64 ();
   if (0 == PresentBase ())
   {
     SyncInterval = 0;
   }
   _LogSlowStage (L"PresentBase", tPresentBase);
+
+  // --------------------------------------------------------------------------
+  // DEFERRED STAGE F (D3D11): Composite overlay onto the REAL backbuffer AFTER
+  // PresentBase() has finished its proxy→real copy.  This ensures the overlay
+  // is the last thing drawn before the actual Present dispatch.
+  // --------------------------------------------------------------------------
+  if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
+  {
+    ID3D11Device*        devF = nullptr;
+    ID3D11DeviceContext* ctxF = nullptr;
+    HRESULT hrDevF =
+      pReal->GetDevice (__uuidof (ID3D11Device), (void **)&devF);
+
+    if (SUCCEEDED (hrDevF) && devF != nullptr)
+    {
+      devF->GetImmediateContext (&ctxF);
+
+      ID3D11Texture2D* bbF = nullptr;
+      HRESULT hrBufF =
+        pReal->GetBuffer (0, __uuidof (ID3D11Texture2D), (void **)&bbF);
+
+      if (SUCCEEDED (hrBufF) && bbF != nullptr && ctxF != nullptr)
+      {
+        D3D11_TEXTURE2D_DESC bbDescF = { };
+        bbF->GetDesc (&bbDescF);
+
+        const UINT copyWF = (s_skf1.width  > 0u) ? std::min ((UINT)bbDescF.Width,  s_skf1.width)  : 0u;
+        const UINT copyHF = (s_skf1.height > 0u) ? std::min ((UINT)bbDescF.Height, s_skf1.height) : 0u;
+
+        if (copyWF >= 64u && copyHF >= 64u)
+        {
+          static std::atomic<bool> s_logged_blit_check = false;
+          if (!s_logged_blit_check.exchange (true))
+          {
+            wchar_t msg[256];
+            wsprintfW (msg, L"→ Deferred blit check: has_frame=%d tex=%p", s_skf1.has_frame ? 1 : 0, s_skf1.tex);
+            _SidecarLog (msg);
+          }
+
+          if (s_skf1.texFmt == bbDescF.Format)
+          {
+            D3D11_BOX srcBox = { 0, 0, 0, copyWF, copyHF, 1 };
+            static std::atomic<bool> s_logged_blit_details = false;
+            if (!s_logged_blit_details.exchange (true))
+            {
+              _SidecarLog (L"→ Deferred blit destination: bb=%p (backbuffer from GetBuffer(0) post-PresentBase)", bbF);
+              _SidecarLog (L"→ Backbuffer format: %u, Overlay format: %u", bbDescF.Format, s_skf1.texFmt);
+              _SidecarLog (L"→ Using CopySubresourceRegion (formats match, after PresentBase)");
+            }
+            if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
+            const ULONGLONG tCopySubF = GetTickCount64 ();
+            ctxF->CopySubresourceRegion (bbF, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
+            _LogSlowStage (L"D3D11.CopySubresourceRegion(deferred)", tCopySubF);
+
+            if (!s_skf1.logged_stage_f_ok.exchange (true))
+            {
+              _SidecarLog (L"SKF1 Stage F OK: Deferred blit executed (after PresentBase)");
+            }
+          }
+          else
+          {
+            static std::atomic<bool> s_logged_format_mismatch = false;
+            if (!s_logged_format_mismatch.exchange (true))
+            {
+              _SidecarLog (L"→ FORMAT MISMATCH: overlay tex=%u backbuffer=%u", s_skf1.texFmt, bbDescF.Format);
+            }
+          }
+
+          // Health signal: log successful composite periodically
+          static std::atomic<ULONG64> s_last_overlay_log_frame_f = 0;
+          const ULONG64 frameF = SK_GetFramesDrawn ();
+          if (s_last_overlay_log_frame_f.load () + 120 < frameF)
+          {
+            s_last_overlay_log_frame_f.store (frameF);
+            _SidecarLog (L"SKF1 composite(deferred): swapchain=%p bbfmt=%d w=%u h=%u",
+                        pReal, (int)bbDescF.Format, (UINT)s_skf1.width, (UINT)s_skf1.height);
+          }
+        }
+      }
+
+      if (bbF  != nullptr) bbF->Release ();
+      if (ctxF != nullptr) ctxF->Release ();
+      devF->Release ();
+    }
+  }
 
   return
     SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
