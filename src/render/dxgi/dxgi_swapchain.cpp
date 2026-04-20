@@ -1351,6 +1351,24 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                   nullptr, SK_DXGI_PresentSource::Wrapper );
   }
 
+  // Run PresentBase BEFORE any SKF1 backbuffer writes.
+  //
+  // When flip-model zero-copy is active (flip_model.isOverrideActive() or HDR),
+  // PresentBase() copies _backbuffers[0] onto the real backbuffer (GetBuffer(0)).
+  // If we let SKF1 composite first and call PresentBase() afterwards, that
+  // copy-back overwrites the overlay, making it invisible in fullscreen.
+  // By calling PresentBase() here we ensure the copy-back is already done when
+  // Stage E/F writes the overlay pixels on top of it.
+  // PresentBase() is a no-op for D3D12 (guarded by !d3d12_ internally) and
+  // returns -1 (no copy performed) for non-flip-model D3D11, so the move is safe
+  // across all paths.
+  const ULONGLONG tPresentBase = GetTickCount64 ();
+  if (0 == PresentBase ())
+  {
+    SyncInterval = 0;
+  }
+  _LogSlowStage (L"PresentBase", tPresentBase);
+
   // ============================================================================
   // SKF1 SELF-AUDITING PIPELINE
   // Every stage has explicit OK/FAIL markers with GetLastError() capture
@@ -1553,7 +1571,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
   // --------------------------------------------------------------------------
   // STAGE E/F: Upload (if stable) + Always Blit (last-good frame)
-  // CRITICAL: This MUST happen BEFORE PresentBase() so overlay is visible!
+  // PresentBase() has already been called above; Stage E/F writes the overlay
+  // on top of the copy-back result, before the final DispatchPresent call.
   // --------------------------------------------------------------------------
   const bool skf1_stage_ef_ready =
     (s_skf1.view_ptr != nullptr && s_skf1.width > 0 && s_skf1.height > 0 &&
@@ -2511,14 +2530,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   s_skf1.view_ptr, s_skf1.width, s_skf1.height, s_skf1.stride, s_skf1.pixel_format);
   }
 
-  // Now that overlay is composited, do the actual Present
-  const ULONGLONG tPresentBase = GetTickCount64 ();
-  if (0 == PresentBase ())
-  {
-    SyncInterval = 0;
-  }
-  _LogSlowStage (L"PresentBase", tPresentBase);
-
+  // PresentBase() has already run above (before Stage A-F).
+  // The overlay is now composited on top of the copy-back result; hand off to the real Present.
   return
     SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
                                 nullptr, SK_DXGI_PresentSource::Wrapper );

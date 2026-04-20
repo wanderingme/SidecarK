@@ -13,7 +13,7 @@
 
 static constexpr bool kEnableLegacySKOF_DebugOnly = false;
 // User-editable: set true to enable SidecarK diagnostics token creation.
-static constexpr bool kEnableSidecarKDiagnosticsToken = false;
+static constexpr bool kEnableSidecarKDiagnosticsToken = true;
 
 static HANDLE g_diag_enable_map = nullptr;
 
