@@ -1337,15 +1337,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static LONG s_overlayEnabledLast = -1;
   static bool s_logged_overlay_disabled_skip = false;
 
-  if (g_ctrlBase != nullptr)
-  {
-      g_overlayEnabled =
-      reinterpret_cast<volatile LONG *> (g_ctrlBase + kSidecarKControlOverlayEnabledOffset);
-  }
+  const volatile LONG* overlay_enabled_ptr =
+    (g_ctrlBase != nullptr)
+      ? reinterpret_cast<volatile LONG *> (g_ctrlBase + kSidecarKControlOverlayEnabledOffset)
+      : g_overlayEnabled;
 
-  if (g_overlayEnabled != nullptr)
+  if (overlay_enabled_ptr != nullptr)
   {
-    overlay_value = *g_overlayEnabled;
+    overlay_value = *overlay_enabled_ptr;
     overlay_value_valid = true;
     overlay_enabled = (overlay_value != 0);
 

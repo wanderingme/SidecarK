@@ -1561,7 +1561,7 @@ static void WriteSidecarKOverlayEnabled(volatile LONG* overlayEnabled, LONG valu
     writtenValue = *overlayEnabled;
 
     SetLastError(ERROR_SUCCESS);
-    flushOk = (g_control_view != nullptr) ? FlushViewOfFile(g_control_view, 0) : FALSE;
+    flushOk = FlushViewOfFile(g_control_view, 0);
     flushGle = flushOk ? ERROR_SUCCESS : GetLastError();
   }
 
