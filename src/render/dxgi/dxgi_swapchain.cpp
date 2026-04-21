@@ -1658,8 +1658,58 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           // prev == nullptr  → we just claimed it (first match)
           // prev == pReal    → we are the cached target (keep going)
           // prev == other    → another swapchain owns this slot (skip)
+          if (prev == nullptr)
+          {
+            UINT glInteropMarker     = 0;
+            UINT glInteropMarkerSize = sizeof (glInteropMarker);
+            BOOL bTargetFullscreen   = FALSE;
+
+            _SidecarLog (
+              L"SKF1 target cache assign: tid=%lu frame=%llu sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=first_matching_swapchain_d3d11",
+                (unsigned long)GetCurrentThreadId (),
+                (unsigned long long)frame,
+                pReal,
+                bbDesc.Width,
+                bbDesc.Height,
+                s_skf1.width,
+                s_skf1.height,
+                copyW,
+                copyH,
+                (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
+                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                                   &glInteropMarkerSize,
+                                                    &glInteropMarker )) &&
+                  glInteropMarkerSize == sizeof (glInteropMarker) &&
+                  glInteropMarker      == 1) ? 1 : 0
+            );
+          }
+
           if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
           {
+            UINT glInteropMarker     = 0;
+            UINT glInteropMarkerSize = sizeof (glInteropMarker);
+            BOOL bTargetFullscreen   = FALSE;
+
+            _SidecarLog (
+              L"SKF1 target cache skip: tid=%lu frame=%llu sc=%p cached_sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=other_swapchain_already_cached_d3d11",
+                (unsigned long)GetCurrentThreadId (),
+                (unsigned long long)frame,
+                pReal,
+                prev,
+                bbDesc.Width,
+                bbDesc.Height,
+                s_skf1.width,
+                s_skf1.height,
+                copyW,
+                copyH,
+                (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
+                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                                   &glInteropMarkerSize,
+                                                    &glInteropMarker )) &&
+                  glInteropMarkerSize == sizeof (glInteropMarker) &&
+                  glInteropMarker      == 1) ? 1 : 0
+            );
+
             bb->Release ();
             ctx->Release ();
             dev->Release ();
@@ -1930,14 +1980,34 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
               }
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
-              const ULONGLONG tCopySub11 = GetTickCount64 ();
-              ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
-              _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
+               const ULONGLONG tCopySub11 = GetTickCount64 ();
+               ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
+               _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
 
-              // STAGE F OK
-              if (!s_skf1.logged_stage_f_ok.exchange(true))
-              {
-                _SidecarLog(L"SKF1 Stage F OK: Blit executed");
+               UINT glInteropMarker     = 0;
+               UINT glInteropMarkerSize = sizeof (glInteropMarker);
+               BOOL bStageFFullscreen   = FALSE;
+
+               _SidecarLog (
+                 L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=%d backend=d3d11",
+                   (unsigned long)GetCurrentThreadId (),
+                   (unsigned long long)frame,
+                   (long)c1,
+                   pReal,
+                   bbDesc.Width,
+                   bbDesc.Height,
+                   (SUCCEEDED (pReal->GetFullscreenState (&bStageFFullscreen, nullptr)) && bStageFFullscreen) ? 1 : 0,
+                   (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                                      &glInteropMarkerSize,
+                                                       &glInteropMarker )) &&
+                     glInteropMarkerSize == sizeof (glInteropMarker) &&
+                     glInteropMarker      == 1) ? 1 : 0
+               );
+
+               // STAGE F OK
+               if (!s_skf1.logged_stage_f_ok.exchange(true))
+               {
+                 _SidecarLog(L"SKF1 Stage F OK: Blit executed");
               }
             }
             else
@@ -2055,6 +2125,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       if (SUCCEEDED(hr12) && bb12 != nullptr && cmdQueue != nullptr)
       {
         D3D12_RESOURCE_DESC bbDesc = bb12->GetDesc();
+        const ULONG64 frame12 = SK_GetFramesDrawn ();
 
         // copyW12/copyH12: clamp copy rect to min(backbuffer, header).
         // When header dims are 0 (not yet published), copyW12/copyH12 will be 0
@@ -2109,8 +2180,58 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               reinterpret_cast<void *>(pReal),
               nullptr
             );
+          if (prev == nullptr)
+          {
+            UINT glInteropMarker     = 0;
+            UINT glInteropMarkerSize = sizeof (glInteropMarker);
+            BOOL bTargetFullscreen   = FALSE;
+
+            _SidecarLog (
+              L"SKF1 target cache assign: tid=%lu frame=%llu sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=first_matching_swapchain_d3d12",
+                (unsigned long)GetCurrentThreadId (),
+                (unsigned long long)frame12,
+                pReal,
+                (UINT)bbDesc.Width,
+                bbDesc.Height,
+                s_skf1.width,
+                s_skf1.height,
+                copyW12,
+                copyH12,
+                (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
+                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                                   &glInteropMarkerSize,
+                                                    &glInteropMarker )) &&
+                  glInteropMarkerSize == sizeof (glInteropMarker) &&
+                  glInteropMarker      == 1) ? 1 : 0
+            );
+          }
+
           if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
           {
+            UINT glInteropMarker     = 0;
+            UINT glInteropMarkerSize = sizeof (glInteropMarker);
+            BOOL bTargetFullscreen   = FALSE;
+
+            _SidecarLog (
+              L"SKF1 target cache skip: tid=%lu frame=%llu sc=%p cached_sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=other_swapchain_already_cached_d3d12",
+                (unsigned long)GetCurrentThreadId (),
+                (unsigned long long)frame12,
+                pReal,
+                prev,
+                (UINT)bbDesc.Width,
+                bbDesc.Height,
+                s_skf1.width,
+                s_skf1.height,
+                copyW12,
+                copyH12,
+                (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
+                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                                   &glInteropMarkerSize,
+                                                    &glInteropMarker )) &&
+                  glInteropMarkerSize == sizeof (glInteropMarker) &&
+                  glInteropMarker      == 1) ? 1 : 0
+            );
+
             bb12->Release ();
             dev12->Release ();
             return
@@ -2468,6 +2589,26 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 const UINT64 nextFence =
                   (UINT64)InterlockedIncrement64 (&s_d3d12_fence_value);
                 cmdQueue->Signal(s_d3d12_fence, nextFence);
+
+                UINT glInteropMarker     = 0;
+                UINT glInteropMarkerSize = sizeof (glInteropMarker);
+                BOOL bStageFFullscreen   = FALSE;
+
+                _SidecarLog (
+                  L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=%d backend=d3d12",
+                    (unsigned long)GetCurrentThreadId (),
+                    (unsigned long long)frame12,
+                    (long)c1_12,
+                    pReal,
+                    (UINT)bbDesc.Width,
+                    bbDesc.Height,
+                    (SUCCEEDED (pReal->GetFullscreenState (&bStageFFullscreen, nullptr)) && bStageFFullscreen) ? 1 : 0,
+                    (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                                       &glInteropMarkerSize,
+                                                        &glInteropMarker )) &&
+                      glInteropMarkerSize == sizeof (glInteropMarker) &&
+                      glInteropMarker      == 1) ? 1 : 0
+                );
 
                 if (!s_skf1.logged_stage_f_ok.exchange(true))
                 {

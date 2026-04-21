@@ -2999,6 +2999,51 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
   const bool bDLSS3OnVRRDisplay =
     (__SK_IsDLSSGActive && display.nvapi.vrr_enabled);
 
+  auto _LogPresentCorrelation = [&](const wchar_t *wszPresentPath) noexcept
+  {
+    if (! SidecarK_DiagnosticsEnabled ())
+      return;
+
+    BOOL bDXGIFullscreen = FALSE;
+
+    wchar_t path [MAX_PATH] = { };
+    DWORD cch = GetTempPathW (MAX_PATH, path);
+    if (cch == 0 || cch >= MAX_PATH)
+      return;
+
+    wcscat_s (path, L"SidecarK_Overlay.log");
+
+    FILE* f = nullptr;
+    _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+    if (f == nullptr)
+      return;
+
+    SYSTEMTIME st = { };
+    GetLocalTime (&st);
+
+    fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu ",
+              st.wYear, st.wMonth, st.wDay,
+              st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+              (unsigned long)GetCurrentProcessId ());
+
+    fwprintf (
+      f,
+      L"SKF1 Present correlate: tid=%lu frame=%llu sc=%p source=%ws true_fs=%d dxgi_fs=%d gl_interop=%d present_path=%ws sync=%u flags=0x%08x\n",
+        (unsigned long)GetCurrentThreadId (),
+        (unsigned long long)SK_GetFramesDrawn (),
+        This,
+        Source == SK_DXGI_PresentSource::Wrapper ? L"wrapper" : L"hook",
+        rb.isTrueFullscreen () ? 1 : 0,
+        SK_DXGI_GetFullscreenState (This, bDXGIFullscreen) ? 1 : 0,
+        SK_DXGI_IsGLInteropSwapChain (This) ? 1 : 0,
+        wszPresentPath != nullptr ? wszPresentPath : L"<unknown>",
+        SyncInterval,
+        Flags
+    );
+
+    fclose (f);
+  };
+
   auto _Present = [&](UINT _SyncInterval,
                       UINT _Flags) ->
   HRESULT
@@ -3188,6 +3233,8 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     {
       if (DXGISwapChain1_Present1 != nullptr)
       {
+        _LogPresentCorrelation (L"DXGISwapChain1_Present1");
+
         return
           _Ret (
             DXGISwapChain1_Present1 ( (IDXGISwapChain1 *)This,
@@ -3196,6 +3243,8 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
                                             pPresentParameters )
           );
       }
+
+      _LogPresentCorrelation (L"DXGISwapChain_Present");
 
       return
         _Ret (
@@ -3207,11 +3256,15 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
 
     if (DXGISwapChain1_Present1 != nullptr)
     {
+      _LogPresentCorrelation (L"IDXGISwapChain1::Present1");
+
       return
         _Ret (
           ((IDXGISwapChain1 *)This)->Present1 (_SyncInterval, _Flags, pPresentParameters)
         );
     }
+
+    _LogPresentCorrelation (L"IDXGISwapChain::Present");
 
     return
       _Ret (
