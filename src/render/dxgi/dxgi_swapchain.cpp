@@ -2054,34 +2054,36 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
           {
+            if (SK_DXGI_ZeroCopy == -1)
+                SK_DXGI_ZeroCopy = (__SK_HDR_16BitSwap || __SK_HDR_10BitSwap);
+
             BOOL bSkipCopy = FALSE;
             SK_DXGI_GetPrivateData ( pReal,
               SKID_DXGI_SwapChainSkipBackbufferCopy_D3D11, sizeof (BOOL), &bSkipCopy
             );
 
-            const bool wrapped_forward_expected =
-              ((flip_model.isOverrideActive () || SK_DXGI_ZeroCopy == TRUE) &&
-               (! d3d12_) && (! bSkipCopy));
+            ID3D11Texture2D* presentbase_src     = nullptr;
+            D3D11_TEXTURE2D_DESC compositeDesc   = bbDesc;
 
-            ID3D11Texture2D* composite_dst      = bb;
-            bool             composite_dst_refs = false;
-            D3D11_TEXTURE2D_DESC compositeDesc  = bbDesc;
-            const wchar_t* composite_dst_kind   = L"real";
-
-            if (wrapped_forward_expected)
+            if ((flip_model.isOverrideActive () || SK_DXGI_ZeroCopy == TRUE) &&
+                (! d3d12_) && (! bSkipCopy))
             {
               std::scoped_lock lock (_backbufferLock);
 
               if (_backbuffers.contains (0) &&
                   _backbuffers          [0].p != nullptr)
               {
-                composite_dst = _backbuffers [0].p;
-                composite_dst->AddRef ();
-                composite_dst_refs = true;
-                composite_dst->GetDesc (&compositeDesc);
-                composite_dst_kind = L"proxy";
+                presentbase_src = _backbuffers [0].p;
+                presentbase_src->AddRef ();
+                presentbase_src->GetDesc (&compositeDesc);
               }
             }
+
+            ID3D11Texture2D* composite_dst    = (presentbase_src != nullptr) ? presentbase_src : bb;
+            const wchar_t*   composite_dst_kind =
+              (presentbase_src != nullptr) ? L"proxy" : L"real";
+            const bool wrapped_forward_expected =
+              (presentbase_src != nullptr);
 
             const UINT compositeCopyW = std::min (copyW, compositeDesc.Width);
             const UINT compositeCopyH = std::min (copyH, compositeDesc.Height);
@@ -2140,8 +2142,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               }
             }
 
-            if (composite_dst_refs && composite_dst != nullptr)
-              composite_dst->Release ();
+            if (presentbase_src != nullptr)
+              presentbase_src->Release ();
 
             // Health signal: log successful composite periodically
 
