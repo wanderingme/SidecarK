@@ -458,6 +458,7 @@ static void* g_control_view = nullptr;
 static volatile LONG* g_control_overlay_enabled = nullptr;
 static HANDLE g_control_pipe_thread = nullptr;
 static HANDLE g_input_pipe_thread   = nullptr;
+static constexpr size_t kSidecarKControlOverlayEnabledOffset = 0x08u;
 
 static HANDLE g_frame_host_map = nullptr;
 static void* g_frame_host_view = nullptr;
@@ -1525,7 +1526,7 @@ static bool InitSidecarKControlPlaneForPid(DWORD pid)
 
   BYTE* base = reinterpret_cast<BYTE*>(g_control_view);
   uint32_t* ver = reinterpret_cast<uint32_t*>(base + 0x04);
-  LONG* overlay_enabled = reinterpret_cast<LONG*>(base + 0x08);
+  LONG* overlay_enabled = reinterpret_cast<LONG*>(base + kSidecarKControlOverlayEnabledOffset);
 
   if (memcmp(base + 0x00, "SKC1", 4) != 0 || *ver != 1u)
   {
@@ -1556,7 +1557,7 @@ static void WriteSidecarKOverlayEnabled(volatile LONG* overlayEnabled, LONG valu
 
   if (overlayEnabled != nullptr)
   {
-    writtenValue = InterlockedExchange(overlayEnabled, value);
+    InterlockedExchange(overlayEnabled, value);
     writtenValue = *overlayEnabled;
 
     SetLastError(ERROR_SUCCESS);

@@ -1046,6 +1046,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static DWORD    g_ctrlPid = 0;
   static ULONGLONG g_ctrlLastAttemptMs = 0;
   static bool      g_ctrlLogged = false;
+  static constexpr size_t kSidecarKControlOverlayEnabledOffset = 0x08u;
 
   // D3D12 resources
   static ID3D12CommandAllocator*      s_d3d12_cmd_allocator     = nullptr;
@@ -1300,17 +1301,18 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           {
             g_ctrlMap  = hMap;
             g_ctrlBase = base;
-            g_overlayEnabled = reinterpret_cast<volatile LONG *> (base + 0x08);
+            g_overlayEnabled = reinterpret_cast<volatile LONG *> (base + kSidecarKControlOverlayEnabledOffset);
 
             if (!g_ctrlLogged)
             {
               g_ctrlLogged = true;
               const LONG initial_value = *g_overlayEnabled;
-              _SidecarLog (L"SKF1 ctrl map: base=%p sig=%c%c%c%c ver=%u overlay=%ld offset=0x08",
+              _SidecarLog (L"SKF1 ctrl map: base=%p sig=%c%c%c%c ver=%u overlay=%ld offset=0x%X",
                            g_ctrlBase,
                            sig[0], sig[1], sig[2], sig[3],
                            version,
-                           (long)initial_value);
+                           (long)initial_value,
+                           (unsigned)kSidecarKControlOverlayEnabledOffset);
             }
           }
           else
@@ -1337,8 +1339,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
   if (g_ctrlBase != nullptr)
   {
-    g_overlayEnabled =
-      reinterpret_cast<volatile LONG *> (g_ctrlBase + 0x08);
+      g_overlayEnabled =
+      reinterpret_cast<volatile LONG *> (g_ctrlBase + kSidecarKControlOverlayEnabledOffset);
   }
 
   if (g_overlayEnabled != nullptr)
