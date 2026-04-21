@@ -1330,15 +1330,30 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   }
 
   bool overlay_enabled = false;
+  LONG overlay_value = 0;
+  bool overlay_value_valid = false;
   static LONG s_overlayEnabledLast = -1;
+  static bool s_logged_overlay_disabled_skip = false;
+
+  if (g_ctrlBase != nullptr)
+  {
+    g_overlayEnabled =
+      reinterpret_cast<volatile LONG *> (g_ctrlBase + 0x08);
+  }
+
   if (g_overlayEnabled != nullptr)
   {
-    const LONG value = *g_overlayEnabled;
-    overlay_enabled = (value != 0);
-    if (value != s_overlayEnabledLast)
+    overlay_value = *g_overlayEnabled;
+    overlay_value_valid = true;
+    overlay_enabled = (overlay_value != 0);
+
+    if (overlay_value != s_overlayEnabledLast)
     {
-      s_overlayEnabledLast = value;
-      _SidecarLog (L"SKF1 ctrl overlayEnabled=%ld", (long)value);
+      _SidecarLog (L"SKF1 ctrl overlayEnabled transition old=%ld new=%ld tid=%lu",
+                   (long)s_overlayEnabledLast,
+                   (long)overlay_value,
+                   (unsigned long)GetCurrentThreadId ());
+      s_overlayEnabledLast = overlay_value;
     }
   }
 
@@ -1346,10 +1361,20 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   // no memcpy, no texture ops). Reuses the same dispatch path used everywhere.
   if (!overlay_enabled)
   {
+    if (!s_logged_overlay_disabled_skip)
+    {
+      _SidecarLog (L"SKF1 composite skipped overlay_disabled=%ld valid=%d tid=%lu",
+                   (long)overlay_value,
+                   overlay_value_valid ? 1 : 0,
+                   (unsigned long)GetCurrentThreadId ());
+      s_logged_overlay_disabled_skip = true;
+    }
     return
       SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
                                   nullptr, SK_DXGI_PresentSource::Wrapper );
   }
+
+  s_logged_overlay_disabled_skip = false;
 
   // ============================================================================
   // SKF1 SELF-AUDITING PIPELINE

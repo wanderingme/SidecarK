@@ -455,7 +455,7 @@ static DWORD g_host_pid = 0;
 
 static HANDLE g_control_map = nullptr;
 static void* g_control_view = nullptr;
-static volatile uint32_t* g_control_overlay_enabled = nullptr;
+static volatile LONG* g_control_overlay_enabled = nullptr;
 static HANDLE g_control_pipe_thread = nullptr;
 static HANDLE g_input_pipe_thread   = nullptr;
 
@@ -1525,17 +1525,53 @@ static bool InitSidecarKControlPlaneForPid(DWORD pid)
 
   BYTE* base = reinterpret_cast<BYTE*>(g_control_view);
   uint32_t* ver = reinterpret_cast<uint32_t*>(base + 0x04);
-  uint32_t* overlay_enabled = reinterpret_cast<uint32_t*>(base + 0x08);
+  LONG* overlay_enabled = reinterpret_cast<LONG*>(base + 0x08);
 
   if (memcmp(base + 0x00, "SKC1", 4) != 0 || *ver != 1u)
   {
     memcpy(base + 0x00, "SKC1", 4);
     *ver = 1u;
-    *overlay_enabled = 0u;
+    *overlay_enabled = 0;
   }
 
-  g_control_overlay_enabled = reinterpret_cast<volatile uint32_t*>(overlay_enabled);
+  g_control_overlay_enabled = reinterpret_cast<volatile LONG*>(overlay_enabled);
   return true;
+}
+
+static void WriteSidecarKOverlayEnabled(volatile LONG* overlayEnabled, LONG value, DWORD targetPid, const char* cmd)
+{
+  const ULONGLONG ts = GetTickCount64();
+  const DWORD tid = GetCurrentThreadId();
+
+  HostLogAppendf(L"ctrl_cmd_received ts=%llu pid=%lu tid=%lu cmd=%hs requested_overlay=%ld",
+    (unsigned long long)ts,
+    (unsigned long)targetPid,
+    (unsigned long)tid,
+    (cmd != nullptr) ? cmd : "",
+    (long)value);
+
+  LONG writtenValue = -1;
+  BOOL flushOk = FALSE;
+  DWORD flushGle = ERROR_SUCCESS;
+
+  if (overlayEnabled != nullptr)
+  {
+    writtenValue = InterlockedExchange(overlayEnabled, value);
+    writtenValue = *overlayEnabled;
+
+    SetLastError(ERROR_SUCCESS);
+    flushOk = (g_control_view != nullptr) ? FlushViewOfFile(g_control_view, 0) : FALSE;
+    flushGle = flushOk ? ERROR_SUCCESS : GetLastError();
+  }
+
+  HostLogAppendf(L"ctrl_block_written ts=%llu pid=%lu tid=%lu cmd=%hs overlay=%ld flush_ok=%d gle=%lu",
+    (unsigned long long)GetTickCount64(),
+    (unsigned long)targetPid,
+    (unsigned long)tid,
+    (cmd != nullptr) ? cmd : "",
+    (long)writtenValue,
+    flushOk ? 1 : 0,
+    (unsigned long)flushGle);
 }
 
 static void ShutdownSidecarKControlPlane()
@@ -1562,7 +1598,7 @@ static void ShutdownSidecarKControlPlane()
   }
 }
 
-static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t* overlayEnabled, DWORD targetPid)
+static void RunControlPipeServer(const std::wstring& pipeName, volatile LONG* overlayEnabled, DWORD targetPid)
 {
   while (!g_shutdown.load())
   {
@@ -1643,12 +1679,12 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
     {
       if (_stricmp(cmd, "overlay on") == 0)
       {
-        if (overlayEnabled) *overlayEnabled = 1u;
+        WriteSidecarKOverlayEnabled(overlayEnabled, 1, targetPid, cmd);
         resp = "ok\n"; respLen = 3;
       }
       else if (_stricmp(cmd, "overlay off") == 0)
       {
-        if (overlayEnabled) *overlayEnabled = 0u;
+        WriteSidecarKOverlayEnabled(overlayEnabled, 0, targetPid, cmd);
         resp = "ok\n"; respLen = 3;
       }
       else if (_stricmp(cmd, "ping") == 0)
@@ -2269,12 +2305,12 @@ int wmain(int argc, wchar_t** argv)
     g_control_pipe_thread = CreateThread(
       nullptr, 0,
       [](LPVOID p) -> DWORD {
-        auto* ctx = reinterpret_cast<std::tuple<std::wstring, volatile uint32_t*, DWORD>*>(p);
+        auto* ctx = reinterpret_cast<std::tuple<std::wstring, volatile LONG*, DWORD>*>(p);
         RunControlPipeServer(std::get<0>(*ctx), std::get<1>(*ctx), std::get<2>(*ctx));
         delete ctx;
         return 0;
       },
-      new std::tuple<std::wstring, volatile uint32_t*, DWORD>(controlPipeName, g_control_overlay_enabled, targetPid),
+      new std::tuple<std::wstring, volatile LONG*, DWORD>(controlPipeName, g_control_overlay_enabled, targetPid),
       0, nullptr
     );
   }
