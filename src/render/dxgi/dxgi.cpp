@@ -3291,11 +3291,41 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
       //   finish the flip model swapchain resize on the next call to Present (...).
     };
 
+    auto _LogPresentDispatch = [&](const wchar_t *wszEvent) noexcept
+    {
+      BOOL bDispatchDXGIFullscreen = FALSE;
+
+      const bool bDispatchGLInterop =
+        SK_DXGI_IsGLInteropSwapChain (This);
+      const bool bDispatchDXGIFullscreenState =
+        SK_DXGI_GetFullscreenState (This, bDispatchDXGIFullscreen);
+      const bool bDispatchRecursivePassthrough =
+        SK_DXGI_ShouldPassthroughRecursiveGLInteropPresent (
+          Source,
+          SK_DXGI_IsWrapperSubmitGuardActive (),
+          bDispatchGLInterop,
+          _IsBackendD3D11 (rb.api),
+          rb.isTrueFullscreen () || bDispatchDXGIFullscreenState
+        );
+
+      _LogPresentCorrelation (
+        wszEvent,
+        Source == SK_DXGI_PresentSource::Wrapper ? L"wrapper_dispatch"
+                                                 : L"hook_dispatch",
+        Source == SK_DXGI_PresentSource::Wrapper,
+        bDispatchGLInterop,
+        bDispatchDXGIFullscreenState,
+        bDispatchRecursivePassthrough,
+        _SyncInterval,
+        _Flags
+      );
+    };
+
     if (Source == SK_DXGI_PresentSource::Hook)
     {
       if (DXGISwapChain1_Present1 != nullptr)
       {
-        _LogPresentCorrelation (L"DXGISwapChain1_Present1", _SyncInterval, _Flags);
+        _LogPresentDispatch (L"DXGISwapChain1_Present1");
 
         return
           _Ret (
@@ -3306,7 +3336,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
           );
       }
 
-      _LogPresentCorrelation (L"DXGISwapChain_Present", _SyncInterval, _Flags);
+      _LogPresentDispatch (L"DXGISwapChain_Present");
 
       return
         _Ret (
@@ -3318,7 +3348,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
 
     if (DXGISwapChain1_Present1 != nullptr)
     {
-      _LogPresentCorrelation (L"IDXGISwapChain1::Present1", _SyncInterval, _Flags);
+      _LogPresentDispatch (L"IDXGISwapChain1::Present1");
 
       return
         _Ret (
@@ -3326,7 +3356,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
         );
     }
 
-    _LogPresentCorrelation (L"IDXGISwapChain::Present", _SyncInterval, _Flags);
+    _LogPresentDispatch (L"IDXGISwapChain::Present");
 
     return
       _Ret (
