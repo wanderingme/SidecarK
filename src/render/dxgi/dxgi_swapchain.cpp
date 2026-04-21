@@ -2054,22 +2054,55 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
           {
-            if (s_skf1.texFmt == bbDesc.Format)
+            BOOL bSkipCopy = FALSE;
+            SK_DXGI_GetPrivateData ( pReal,
+              SKID_DXGI_SwapChainSkipBackbufferCopy_D3D11, sizeof (BOOL), &bSkipCopy
+            );
+
+            const bool wrapped_forward_expected =
+              ((flip_model.isOverrideActive () || SK_DXGI_ZeroCopy == TRUE) &&
+               (! d3d12_) && (! bSkipCopy));
+
+            ID3D11Texture2D* composite_dst      = bb;
+            bool             composite_dst_refs = false;
+            D3D11_TEXTURE2D_DESC compositeDesc  = bbDesc;
+            const wchar_t* composite_dst_kind   = L"real";
+
+            if (wrapped_forward_expected)
+            {
+              std::scoped_lock lock (_backbufferLock);
+
+              if (_backbuffers.contains (0) &&
+                  _backbuffers          [0].p != nullptr)
+              {
+                composite_dst = _backbuffers [0].p;
+                composite_dst->AddRef ();
+                composite_dst_refs = true;
+                composite_dst->GetDesc (&compositeDesc);
+                composite_dst_kind = L"proxy";
+              }
+            }
+
+            const UINT compositeCopyW = std::min (copyW, compositeDesc.Width);
+            const UINT compositeCopyH = std::min (copyH, compositeDesc.Height);
+
+            if (s_skf1.texFmt == compositeDesc.Format &&
+                compositeCopyW > 0u && compositeCopyH > 0u)
             {
               // Formats match - safe to use CopySubresourceRegion.
               // Use clamped copy rect (copyW×copyH), not full header dims.
-              D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
+              D3D11_BOX srcBox = { 0, 0, 0, compositeCopyW, compositeCopyH, 1 };
               static std::atomic<bool> s_logged_blit_details = false;
               if (!s_logged_blit_details.exchange(true))
               {
-                _SidecarLog(L"→ Blit destination: bb=%p (backbuffer from GetBuffer(0))", bb);
-                _SidecarLog(L"→ Backbuffer format: %u, Overlay format: %u", bbDesc.Format, s_skf1.texFmt);
+                _SidecarLog(L"→ Stage F destination: kind=%ls ptr=%p wrapped_forward=%d", composite_dst_kind, composite_dst, wrapped_forward_expected ? 1 : 0);
+                _SidecarLog(L"→ Backbuffer format: %u, Overlay format: %u", compositeDesc.Format, s_skf1.texFmt);
                 _SidecarLog(L"→ No backbuffer clear performed (composite only)");
                 _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
               }
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
                const ULONGLONG tCopySub11 = GetTickCount64 ();
-               ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
+               ctx->CopySubresourceRegion (composite_dst, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
                _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
 
                UINT glInteropMarker     = 0;
@@ -2077,7 +2110,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                BOOL bStageFFullscreen   = FALSE;
 
                _SidecarLog (
-                 L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=%d backend=d3d11",
+                  L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=%d backend=d3d11",
                    (unsigned long)GetCurrentThreadId (),
                    (unsigned long long)frame,
                    (long)c1,
@@ -2103,9 +2136,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               static std::atomic<bool> s_logged_format_mismatch = false;
               if (!s_logged_format_mismatch.exchange(true))
               {
-                _SidecarLog(L"→ FORMAT MISMATCH: overlay tex=%u backbuffer=%u", s_skf1.texFmt, bbDesc.Format);
+                _SidecarLog(L"→ FORMAT MISMATCH: overlay tex=%u backbuffer=%u", s_skf1.texFmt, compositeDesc.Format);
               }
             }
+
+            if (composite_dst_refs && composite_dst != nullptr)
+              composite_dst->Release ();
 
             // Health signal: log successful composite periodically
 
