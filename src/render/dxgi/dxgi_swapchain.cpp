@@ -1831,7 +1831,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
           {
-            
             bb->Release ();
             ctx->Release ();
             dev->Release ();
@@ -2416,7 +2415,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
           {
-            
             bb12->Release ();
             dev12->Release ();
             return
