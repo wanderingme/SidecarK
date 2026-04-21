@@ -3013,9 +3013,9 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
 
     const bool bRelevantSwapChain =
       Source == SK_DXGI_PresentSource::Wrapper ||
-      bGLInteropSwapChain                       ||
-      rb.isTrueFullscreen ()                   ||
-      bDXGIFullscreen                          ||
+      bGLInteropSwapChain                      ||
+      rb.isTrueFullscreen ()                  ||
+      bDXGIFullscreen                         ||
       bRecursiveGLInteropPassthrough;
 
     if (! bRelevantSwapChain)

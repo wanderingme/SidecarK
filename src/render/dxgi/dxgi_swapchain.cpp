@@ -1648,7 +1648,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         // Gate: only composite if clamped region is at least 64×64 and we have header dims.
         if (copyW < 64u || copyH < 64u)
         {
-          static constexpr int kDiagnosticUnavailable = -1;
+          static constexpr int kDiagnosticNotApplicable = -1;
 
           _SidecarLog (
             L"SKF1 d3d11 gate: decision=skip_small_copyrect sc=%p cached_sc=%p gl_interop=%d true_fs=%d dxgi_fs=%d bb=%ux%u hdr=%ux%u copy=%ux%u copy_gate=%d",
@@ -1656,9 +1656,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               static_cast<IDXGISwapChain*>(
                 InterlockedCompareExchangePointer (
                   reinterpret_cast<void * volatile *> (&s_target_swapchain), nullptr, nullptr)),
-              kDiagnosticUnavailable,
-              kDiagnosticUnavailable,
-              kDiagnosticUnavailable,
+              kDiagnosticNotApplicable,
+              kDiagnosticNotApplicable,
+              kDiagnosticNotApplicable,
               bbDesc.Width,
               bbDesc.Height,
               s_skf1.width,
