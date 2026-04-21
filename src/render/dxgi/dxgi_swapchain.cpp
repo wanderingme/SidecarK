@@ -1659,6 +1659,59 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         // Target-swapchain gate: claim if unclaimed, skip if another swapchain is already
         // the target. Uses a single CAS to avoid races between concurrent presents.
         {
+          auto& rb =
+            SK_GetCurrentRenderBackend ();
+
+          UINT glInteropMarker     = 0;
+          UINT glInteropMarkerSize = sizeof (glInteropMarker);
+          BOOL bTargetFullscreen   = FALSE;
+
+          const bool is_gl_interop_swapchain =
+            (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                               &glInteropMarkerSize,
+                                                &glInteropMarker )) &&
+             glInteropMarkerSize == sizeof (glInteropMarker) &&
+             glInteropMarker      == 1);
+
+          const bool dxgi_target_fullscreen =
+            (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) &&
+             bTargetFullscreen);
+
+          const bool suppress_gl_interop_fullscreen_claim =
+            (is_gl_interop_swapchain && rb.isTrueFullscreen () &&
+             (! dxgi_target_fullscreen));
+
+          if (suppress_gl_interop_fullscreen_claim)
+          {
+            InterlockedCompareExchangePointer (
+              reinterpret_cast<void * volatile *> (&s_target_swapchain),
+              nullptr,
+              reinterpret_cast<void *>(pReal)
+            );
+
+            _SidecarLog (
+              L"SKF1 target cache skip: tid=%lu frame=%llu sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=gl_interop_not_dxgi_fullscreen_in_true_fullscreen",
+                (unsigned long)GetCurrentThreadId (),
+                (unsigned long long)frame,
+                pReal,
+                bbDesc.Width,
+                bbDesc.Height,
+                s_skf1.width,
+                s_skf1.height,
+                copyW,
+                copyH,
+                dxgi_target_fullscreen ? 1 : 0,
+                is_gl_interop_swapchain ? 1 : 0
+            );
+
+            bb->Release ();
+            ctx->Release ();
+            dev->Release ();
+            return
+              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+          }
+
           void* const prev =
             InterlockedCompareExchangePointer (
               reinterpret_cast<void * volatile *> (&s_target_swapchain),
@@ -1670,10 +1723,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           // prev == other    → another swapchain owns this slot (skip)
           if (prev == nullptr)
           {
-            UINT glInteropMarker     = 0;
-            UINT glInteropMarkerSize = sizeof (glInteropMarker);
-            BOOL bTargetFullscreen   = FALSE;
-
             _SidecarLog (
               L"SKF1 target cache assign: tid=%lu frame=%llu sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=first_matching_swapchain_d3d11",
                 (unsigned long)GetCurrentThreadId (),
@@ -1696,10 +1745,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
           {
-            UINT glInteropMarker     = 0;
-            UINT glInteropMarkerSize = sizeof (glInteropMarker);
-            BOOL bTargetFullscreen   = FALSE;
-
             _SidecarLog (
               L"SKF1 target cache skip: tid=%lu frame=%llu sc=%p cached_sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=other_swapchain_already_cached_d3d11",
                 (unsigned long)GetCurrentThreadId (),
