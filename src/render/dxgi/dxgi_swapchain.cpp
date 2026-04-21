@@ -2055,7 +2055,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
           {
             if (SK_DXGI_ZeroCopy == -1)
+            {
                 SK_DXGI_ZeroCopy = (__SK_HDR_16BitSwap || __SK_HDR_10BitSwap);
+            }
 
             BOOL bSkipCopy = FALSE;
             SK_DXGI_GetPrivateData ( pReal,
@@ -2079,11 +2081,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               }
             }
 
-            ID3D11Texture2D* composite_dst    = (presentbase_src != nullptr) ? presentbase_src : bb;
-            const wchar_t*   composite_dst_kind =
-              (presentbase_src != nullptr) ? L"proxy" : L"real";
             const bool wrapped_forward_expected =
               (presentbase_src != nullptr);
+            ID3D11Texture2D* composite_dst    = wrapped_forward_expected ? presentbase_src : bb;
+            const wchar_t*   composite_dst_kind =
+              wrapped_forward_expected ? L"proxy" : L"real";
 
             const UINT compositeCopyW = std::min (copyW, compositeDesc.Width);
             const UINT compositeCopyH = std::min (copyH, compositeDesc.Height);
