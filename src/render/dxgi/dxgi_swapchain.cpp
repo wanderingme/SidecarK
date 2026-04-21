@@ -2054,20 +2054,18 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
           {
-            if (SK_DXGI_ZeroCopy == -1)
-            {
-                SK_DXGI_ZeroCopy = (__SK_HDR_16BitSwap || __SK_HDR_10BitSwap);
-            }
-
             BOOL bSkipCopy = FALSE;
             SK_DXGI_GetPrivateData ( pReal,
               SKID_DXGI_SwapChainSkipBackbufferCopy_D3D11, sizeof (BOOL), &bSkipCopy
             );
 
+            const bool zero_copy_active =
+              (SK_DXGI_ZeroCopy == TRUE) ||
+              (SK_DXGI_ZeroCopy == -1 && (__SK_HDR_16BitSwap || __SK_HDR_10BitSwap));
             ID3D11Texture2D* presentbase_src     = nullptr;
             D3D11_TEXTURE2D_DESC compositeDesc   = bbDesc;
 
-            if ((flip_model.isOverrideActive () || SK_DXGI_ZeroCopy == TRUE) &&
+            if ((flip_model.isOverrideActive () || zero_copy_active) &&
                 (! d3d12_) && (! bSkipCopy))
             {
               std::scoped_lock lock (_backbufferLock);
@@ -2075,9 +2073,13 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               if (_backbuffers.contains (0) &&
                   _backbuffers          [0].p != nullptr)
               {
-                presentbase_src = _backbuffers [0].p;
-                presentbase_src->AddRef ();
-                presentbase_src->GetDesc (&compositeDesc);
+                auto* const backbuffer0 = _backbuffers [0].p;
+                if (backbuffer0 != nullptr)
+                {
+                  presentbase_src = backbuffer0;
+                  presentbase_src->AddRef ();
+                  presentbase_src->GetDesc (&compositeDesc);
+                }
               }
             }
 
