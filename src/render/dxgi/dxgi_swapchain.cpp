@@ -1567,11 +1567,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   // Treat sub-threshold header dims as "not ready" so sentinel / provisional
   // sizes (for example 1x1) never advance into the D3D11 claim/composite path.
   // --------------------------------------------------------------------------
-  static constexpr UINT kSKF1_MinCompositeDim = 64u;
+  static constexpr UINT kSKF1MinReadyDimension = 64u;
   const bool skf1_stage_ef_ready =
     (s_skf1.view_ptr != nullptr &&
-     s_skf1.width  >= kSKF1_MinCompositeDim &&
-     s_skf1.height >= kSKF1_MinCompositeDim &&
+     s_skf1.width  >= kSKF1MinReadyDimension &&
+     s_skf1.height >= kSKF1MinReadyDimension &&
      s_skf1.stride > 0 && s_skf1.pixel_format == 1);
 
   if (skf1_stage_ef_ready)
@@ -2755,7 +2755,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     if (!s_logged_ef_precond_fail.exchange(true))
       _SidecarLog(L"SKF1 skip: reason=STAGE_EF_PRECONDITION_FAIL view=%p w=%u h=%u stride=%u fmt=%u min_ready=%ux%u",
                   s_skf1.view_ptr, s_skf1.width, s_skf1.height, s_skf1.stride, s_skf1.pixel_format,
-                  kSKF1_MinCompositeDim, kSKF1_MinCompositeDim);
+                  kSKF1MinReadyDimension, kSKF1MinReadyDimension);
   }
 
   // Now that overlay is composited, do the actual Present
