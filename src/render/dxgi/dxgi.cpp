@@ -3013,10 +3013,10 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     if (cch == 0 || cch >= MAX_PATH)
       return;
 
-    wcscat_s (path, L"SidecarK_Overlay.log");
+    wcsncat_s (path, _countof (path), L"SidecarK_Overlay.log", _TRUNCATE);
 
     FILE* f = nullptr;
-    _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+    _wfopen_s (&f, path, L"a+,ccs=UTF-8");
     if (f == nullptr)
       return;
 
