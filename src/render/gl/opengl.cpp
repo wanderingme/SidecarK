@@ -146,6 +146,55 @@ static volatile LONG s_gl_gate_present_not_ready_hits = 0;
 static volatile LONG s_gl_gate_ready_logged = 0;
 static volatile LONG s_gl_suppressed_by_dxgi_owner_hits = 0;
 
+static void
+SK_GL_LogInteropPresentDiagnostic ( const wchar_t  *wszEvent,
+                                    IDXGISwapChain *pSwapChain,
+                                    UINT            width,
+                                    UINT            height,
+                                    bool            bTrueFullscreen,
+                                    bool            bDXGIFullscreen ) noexcept
+{
+  if (! SidecarK_DiagnosticsEnabled ())
+    return;
+
+  const ULONGLONG now = GetTickCount64 ();
+  const UINT signature =
+    (bTrueFullscreen ? 0x0001u : 0x0000u) |
+    (bDXGIFullscreen ? 0x0002u : 0x0000u) |
+    (((UINT)(wszEvent != nullptr && wszEvent [0] != L'\0' ? wszEvent [0] : L'?')) << 8);
+
+  static std::atomic<UINT_PTR>  s_last_sc  { 0 };
+  static std::atomic<UINT>      s_last_sig { 0 };
+  static std::atomic<ULONGLONG> s_last_ms  { 0 };
+
+  const UINT_PTR  last_sc  = s_last_sc .load (std::memory_order_relaxed);
+  const UINT      last_sig = s_last_sig.load (std::memory_order_relaxed);
+  const ULONGLONG last_ms  = s_last_ms .load (std::memory_order_relaxed);
+
+  if (last_sc == reinterpret_cast<UINT_PTR> (pSwapChain) &&
+      last_sig == signature                               &&
+      now - last_ms < 1000ULL)
+  {
+    return;
+  }
+
+  s_last_sc .store (reinterpret_cast<UINT_PTR> (pSwapChain), std::memory_order_relaxed);
+  s_last_sig.store (signature,                               std::memory_order_relaxed);
+  s_last_ms .store (now,                                     std::memory_order_relaxed);
+
+  SK_LOGi0 (
+    L"SKF1 gl interop present: event=%ws tid=%lu sc=%p bb=%ux%u true_fs=%d dxgi_fs=%d fullscreen_active=%d",
+      wszEvent != nullptr ? wszEvent : L"<unknown>",
+      (unsigned long)GetCurrentThreadId (),
+      pSwapChain,
+      width,
+      height,
+      bTrueFullscreen ? 1 : 0,
+      bDXGIFullscreen ? 1 : 0,
+      (bTrueFullscreen || bDXGIFullscreen) ? 1 : 0
+  );
+}
+
 static bool TryWriteTerminalMarker (const char* token)
 {
   if (! SidecarK_DiagnosticsEnabled ())
@@ -2167,6 +2216,21 @@ SK_IndirectX_PresentManager::Start (SK_IndirectX_InteropCtx *pCtx)
 
             auto pSwapChain =
               pCtx->output.pSwapChain.p;
+
+            BOOL bDXGIFullscreen = FALSE;
+            const auto& rb =
+              SK_GetCurrentRenderBackend ();
+
+            SK_GL_LogInteropPresentDiagnostic (
+              L"present_submit",
+              pSwapChain,
+              (UINT)pCtx->output.viewport.Width,
+              (UINT)pCtx->output.viewport.Height,
+              rb.isTrueFullscreen (),
+              pSwapChain != nullptr &&
+              SUCCEEDED (pSwapChain->GetFullscreenState (&bDXGIFullscreen, nullptr)) &&
+              bDXGIFullscreen
+            );
 
             BOOL bSuccess =
               SUCCEEDED ( pSwapChain->Present ( pCtx->present_man.interval,

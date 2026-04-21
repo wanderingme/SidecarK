@@ -1648,6 +1648,21 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         // Gate: only composite if clamped region is at least 64×64 and we have header dims.
         if (copyW < 64u || copyH < 64u)
         {
+          _SidecarLog (
+            L"SKF1 d3d11 gate: decision=skip_small_copyrect sc=%p cached_sc=%p gl_interop=-1 true_fs=-1 dxgi_fs=-1 bb=%ux%u hdr=%ux%u copy=%ux%u copy_gate=%d",
+              pReal,
+              static_cast<IDXGISwapChain*>(
+                InterlockedCompareExchangePointer (
+                  reinterpret_cast<void * volatile *> (&s_target_swapchain), nullptr, nullptr)),
+              bbDesc.Width,
+              bbDesc.Height,
+              s_skf1.width,
+              s_skf1.height,
+              copyW,
+              copyH,
+              (copyW < 64u || copyH < 64u) ? 1 : 0
+          );
+
           bb->Release ();
           ctx->Release ();
           dev->Release ();
@@ -1681,27 +1696,38 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             (is_gl_interop_swapchain && rb.isTrueFullscreen () &&
              (! dxgi_target_fullscreen));
 
+          void* const cached_before =
+            InterlockedCompareExchangePointer (
+              reinterpret_cast<void * volatile *> (&s_target_swapchain),
+              nullptr,
+              nullptr
+            );
+
           if (suppress_gl_interop_fullscreen_claim)
           {
-            InterlockedCompareExchangePointer (
+            void* const stale_clear_prev =
+              InterlockedCompareExchangePointer (
               reinterpret_cast<void * volatile *> (&s_target_swapchain),
               nullptr,
               reinterpret_cast<void *>(pReal)
             );
 
             _SidecarLog (
-              L"SKF1 target cache skip: tid=%lu frame=%llu sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=gl_interop_claim_blocked_fullscreen",
-                (unsigned long)GetCurrentThreadId (),
-                (unsigned long long)frame,
+              L"SKF1 d3d11 claim: decision=skip_gl_interop_fullscreen sc=%p cached_sc=%p gl_interop=%d true_fs=%d dxgi_fs=%d bb=%ux%u hdr=%ux%u copy=%ux%u claim=0 skipped=1 stale_clear=%d tid=%lu frame=%llu",
                 pReal,
+                cached_before,
+                is_gl_interop_swapchain ? 1 : 0,
+                rb.isTrueFullscreen () ? 1 : 0,
+                dxgi_target_fullscreen ? 1 : 0,
                 bbDesc.Width,
                 bbDesc.Height,
                 s_skf1.width,
                 s_skf1.height,
                 copyW,
                 copyH,
-                dxgi_target_fullscreen ? 1 : 0,
-                is_gl_interop_swapchain ? 1 : 0
+                stale_clear_prev == reinterpret_cast<void *>(pReal) ? 1 : 0,
+                (unsigned long)GetCurrentThreadId (),
+                (unsigned long long)frame
             );
 
             bb->Release ();
@@ -1724,45 +1750,40 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           if (prev == nullptr)
           {
             _SidecarLog (
-              L"SKF1 target cache assign: tid=%lu frame=%llu sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=first_matching_swapchain_d3d11",
-                (unsigned long)GetCurrentThreadId (),
-                (unsigned long long)frame,
+              L"SKF1 d3d11 claim: decision=claim sc=%p cached_sc=%p gl_interop=%d true_fs=%d dxgi_fs=%d bb=%ux%u hdr=%ux%u copy=%ux%u claim=1 skipped=0 stale_clear=0 tid=%lu frame=%llu",
                 pReal,
+                cached_before,
+                is_gl_interop_swapchain ? 1 : 0,
+                rb.isTrueFullscreen () ? 1 : 0,
+                dxgi_target_fullscreen ? 1 : 0,
                 bbDesc.Width,
                 bbDesc.Height,
                 s_skf1.width,
                 s_skf1.height,
                 copyW,
                 copyH,
-                (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
-                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
-                                                   &glInteropMarkerSize,
-                                                    &glInteropMarker )) &&
-                  glInteropMarkerSize == sizeof (glInteropMarker) &&
-                  glInteropMarker      == 1) ? 1 : 0
+                (unsigned long)GetCurrentThreadId (),
+                (unsigned long long)frame
             );
           }
 
           if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
           {
             _SidecarLog (
-              L"SKF1 target cache skip: tid=%lu frame=%llu sc=%p cached_sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=other_swapchain_already_cached_d3d11",
-                (unsigned long)GetCurrentThreadId (),
-                (unsigned long long)frame,
+              L"SKF1 d3d11 claim: decision=skip_cached_owner sc=%p cached_sc=%p gl_interop=%d true_fs=%d dxgi_fs=%d bb=%ux%u hdr=%ux%u copy=%ux%u claim=0 skipped=1 stale_clear=0 tid=%lu frame=%llu",
                 pReal,
                 prev,
+                is_gl_interop_swapchain ? 1 : 0,
+                rb.isTrueFullscreen () ? 1 : 0,
+                dxgi_target_fullscreen ? 1 : 0,
                 bbDesc.Width,
                 bbDesc.Height,
                 s_skf1.width,
                 s_skf1.height,
                 copyW,
                 copyH,
-                (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
-                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
-                                                   &glInteropMarkerSize,
-                                                    &glInteropMarker )) &&
-                  glInteropMarkerSize == sizeof (glInteropMarker) &&
-                  glInteropMarker      == 1) ? 1 : 0
+                (unsigned long)GetCurrentThreadId (),
+                (unsigned long long)frame
             );
 
             bb->Release ();

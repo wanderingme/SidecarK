@@ -2999,14 +2999,58 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
   const bool bDLSS3OnVRRDisplay =
     (__SK_IsDLSSGActive && display.nvapi.vrr_enabled);
 
-  auto _LogPresentCorrelation = [&](const wchar_t *wszPresentPath,
+  auto _LogPresentCorrelation = [&](const wchar_t *wszEvent,
+                                    const wchar_t *wszPrePresentWork,
+                                    bool           bPrePresentWorkExecuted,
+                                    bool           bGLInteropSwapChain,
+                                    bool           bDXGIFullscreen,
+                                    bool           bRecursiveGLInteropPassthrough,
                                     UINT           _SyncInterval,
                                     UINT           _Flags) noexcept
   {
     if (! SidecarK_DiagnosticsEnabled ())
       return;
 
-    BOOL bDXGIFullscreen = FALSE;
+    const bool bRelevantSwapChain =
+      Source == SK_DXGI_PresentSource::Wrapper ||
+      bGLInteropSwapChain                       ||
+      rb.isTrueFullscreen ()                   ||
+      bDXGIFullscreen                          ||
+      bRecursiveGLInteropPassthrough;
+
+    if (! bRelevantSwapChain)
+      return;
+
+    const UINT signature =
+      (Source == SK_DXGI_PresentSource::Wrapper ? 0x0001u : 0x0000u) |
+      (bGLInteropSwapChain                      ? 0x0002u : 0x0000u) |
+      (rb.isTrueFullscreen ()                  ? 0x0004u : 0x0000u) |
+      (bDXGIFullscreen                         ? 0x0008u : 0x0000u) |
+      (bRecursiveGLInteropPassthrough          ? 0x0010u : 0x0000u) |
+      (bPrePresentWorkExecuted                 ? 0x0020u : 0x0000u) |
+      (((UINT)(wszEvent          != nullptr && wszEvent [0] != L'\0' ? wszEvent [0] : L'?')) << 8) |
+      (((UINT)(wszPrePresentWork != nullptr && wszPrePresentWork [0] != L'\0' ? wszPrePresentWork [0] : L'?')) << 16);
+
+    const ULONGLONG now = GetTickCount64 ();
+
+    static std::atomic<UINT_PTR>  s_last_sc  { 0 };
+    static std::atomic<UINT>      s_last_sig { 0 };
+    static std::atomic<ULONGLONG> s_last_ms  { 0 };
+
+    const UINT_PTR  last_sc  = s_last_sc .load (std::memory_order_relaxed);
+    const UINT      last_sig = s_last_sig.load (std::memory_order_relaxed);
+    const ULONGLONG last_ms  = s_last_ms .load (std::memory_order_relaxed);
+
+    if (last_sc == reinterpret_cast<UINT_PTR> (This) &&
+        last_sig == signature                         &&
+        now - last_ms < 1000ULL)
+    {
+      return;
+    }
+
+    s_last_sc .store (reinterpret_cast<UINT_PTR> (This), std::memory_order_relaxed);
+    s_last_sig.store (signature,                       std::memory_order_relaxed);
+    s_last_ms .store (now,                             std::memory_order_relaxed);
 
     wchar_t path [MAX_PATH] = { };
     DWORD cch = GetTempPathW (MAX_PATH, path);
@@ -3030,15 +3074,18 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
 
     fwprintf (
       f,
-      L"SKF1 Present correlate: tid=%lu frame=%llu sc=%p source=%ws true_fs=%d dxgi_fs=%d gl_interop=%d present_path=%ws sync=%u flags=0x%08x\n",
+      L"SKF1 dxgi present: event=%ws tid=%lu frame=%llu sc=%p source=%ws gl_interop=%d recursive_passthrough=%d pre_present_work=%d pre_present_kind=%ws true_fs=%d dxgi_fs=%d sync=%u flags=0x%08x\n",
+        wszEvent != nullptr ? wszEvent : L"<unknown>",
         (unsigned long)GetCurrentThreadId (),
         (unsigned long long)SK_GetFramesDrawn (),
         This,
         Source == SK_DXGI_PresentSource::Wrapper ? L"wrapper" : L"hook",
-        rb.isTrueFullscreen () ? 1 : 0,
-        SK_DXGI_GetFullscreenState (This, bDXGIFullscreen) ? 1 : 0,
-        SK_DXGI_IsGLInteropSwapChain (This) ? 1 : 0,
-        wszPresentPath != nullptr ? wszPresentPath : L"<unknown>",
+        bGLInteropSwapChain                  ? 1 : 0,
+        bRecursiveGLInteropPassthrough       ? 1 : 0,
+        bPrePresentWorkExecuted              ? 1 : 0,
+        wszPrePresentWork != nullptr ? wszPrePresentWork : L"none",
+        rb.isTrueFullscreen ()               ? 1 : 0,
+        bDXGIFullscreen                      ? 1 : 0,
         _SyncInterval,
         _Flags
     );
@@ -3330,6 +3377,15 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
   {
     // The wrapper path already composited SKF1 and is now submitting the real
     // swapchain, so recursive hook re-entry must bypass second-frame handling.
+    _LogPresentCorrelation ( L"recursive_passthrough",
+                             L"wrapper_recursive_passthrough",
+                             true,
+                             is_gl_interop_swapchain,
+                             dxgi_fullscreen_state,
+                             recursive_gl_interop_passthrough,
+                             SyncInterval,
+                             Flags );
+
     return
       _Present (SyncInterval, Flags);
   }
@@ -3339,6 +3395,15 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
   //
   if (! SK_DXGI_TestPresentFlags (Flags))
   {
+    _LogPresentCorrelation ( L"test_present",
+                             Source == SK_DXGI_PresentSource::Wrapper ? L"wrapper_source" : L"none",
+                             Source == SK_DXGI_PresentSource::Wrapper,
+                             is_gl_interop_swapchain,
+                             dxgi_fullscreen_state,
+                             recursive_gl_interop_passthrough,
+                             SyncInterval,
+                             Flags );
+
     HRESULT hrPresent =
              _Present ( SyncInterval, Flags );
 
@@ -3830,12 +3895,28 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     }
 
     HRESULT hr =
+      (_LogPresentCorrelation (
+         L"before_present",
+         Source == SK_DXGI_PresentSource::Wrapper ? L"wrapper_source" :
+         (_IsBackendD3D12 (rb.api)                ? L"hook_osd_d3d12" :
+          _IsBackendD3D11 (rb.api)                ? L"hook_osd_d3d11" :
+                                                    L"none"),
+         Source == SK_DXGI_PresentSource::Wrapper ||
+         _IsBackendD3D12 (rb.api)                 ||
+         _IsBackendD3D11 (rb.api),
+         is_gl_interop_swapchain,
+         dxgi_fullscreen_state,
+         recursive_gl_interop_passthrough,
+         _SkipThisFrame ? (rb.d3d11.immediate_ctx != nullptr ? 0 : 1) : interval,
+         _SkipThisFrame ? (DXGI_PRESENT_RESTART | DXGI_PRESENT_DO_NOT_WAIT |
+                          ((rb.d3d11.immediate_ctx != nullptr) ? DXGI_PRESENT_ALLOW_TEARING : 0))
+                        : flags ),
       _SkipThisFrame ? _Present ( rb.d3d11.immediate_ctx != nullptr ?
                                                                   0 : 1,
                                                         DXGI_PRESENT_RESTART | DXGI_PRESENT_DO_NOT_WAIT |
-                                ( ( rb.d3d11.immediate_ctx != nullptr) ? DXGI_PRESENT_ALLOW_TEARING
-                                                                       : 0 ) ) :
-                       _Present ( interval, flags );
+                                 ( ( rb.d3d11.immediate_ctx != nullptr) ? DXGI_PRESENT_ALLOW_TEARING
+                                                                        : 0 ) ) :
+                       _Present ( interval, flags ));
 
     if (_SkipThisFrame)
       hr = S_OK;
