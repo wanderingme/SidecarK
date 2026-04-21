@@ -63,6 +63,142 @@ DXGI_SWAP_CHAIN_DESC  _ORIGINAL_SWAP_CHAIN_DESC  = { };
 DXGI_SWAP_CHAIN_DESC1 _ORIGINAL_SWAP_CHAIN_DESC1 = { };
 
 extern bool SidecarK_DiagnosticsEnabled();
+enum class SK_DXGI_PresentSource : int
+{
+  Wrapper = 0,
+  Hook    = 1
+};
+
+namespace
+{
+  thread_local UINT SK_DXGI_WrapperSubmitGuardDepth = 0;
+
+  bool
+  SK_DXGI_IsWrapperSubmitGuardActive (void) noexcept
+  {
+    return
+      SK_DXGI_WrapperSubmitGuardDepth > 0;
+  }
+
+  bool
+  SK_DXGI_IsGLInteropSwapChain (IDXGISwapChain *pSwapChain) noexcept
+  {
+    if (pSwapChain == nullptr)
+      return false;
+
+    UINT interop_marker      = 0;
+    UINT interop_marker_size = sizeof (interop_marker);
+
+    return
+      SUCCEEDED (pSwapChain->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                             &interop_marker_size,
+                                              &interop_marker )) &&
+      interop_marker_size == sizeof (interop_marker) &&
+      interop_marker      == 1;
+  }
+
+  bool
+  SK_DXGI_GetFullscreenState (IDXGISwapChain *pSwapChain, BOOL& bFullscreen) noexcept
+  {
+    bFullscreen = FALSE;
+
+    return
+      pSwapChain != nullptr                                  &&
+      SUCCEEDED (pSwapChain->GetFullscreenState (&bFullscreen, nullptr)) &&
+      bFullscreen;
+  }
+
+  void
+  SK_DXGI_LogWrapperSubmitDiagnostic (
+    const wchar_t          *wszEvent,
+    IDXGISwapChain         *pSwapChain,
+    SK_DXGI_PresentSource   Source,
+    bool                    guard_active,
+    bool                    is_gl_interop,
+    bool                    is_d3d11_backend,
+    bool                    true_fullscreen,
+    bool                    dxgi_fullscreen,
+    bool                    passthrough_fast_path
+  )
+  {
+    if (! SidecarK_DiagnosticsEnabled ())
+      return;
+
+    SK_LOGi0 (
+      L"SKF1 recursion: event=%ws tid=%lu sc=%p source=%ws guard=%d gl_interop=%d d3d11=%d true_fs=%d dxgi_fs=%d passthrough=%d",
+        wszEvent != nullptr ? wszEvent : L"<null>",
+          (unsigned long)GetCurrentThreadId (),
+            pSwapChain,
+              Source == SK_DXGI_PresentSource::Wrapper ? L"wrapper" : L"hook",
+                guard_active          ? 1 : 0,
+                is_gl_interop         ? 1 : 0,
+                is_d3d11_backend      ? 1 : 0,
+                true_fullscreen       ? 1 : 0,
+                dxgi_fullscreen       ? 1 : 0,
+                passthrough_fast_path ? 1 : 0
+    );
+  }
+
+  class SK_DXGI_WrapperSubmitScope
+  {
+  public:
+    SK_DXGI_WrapperSubmitScope (IDXGISwapChain *pSwapChain,
+                                SK_DXGI_PresentSource Source) noexcept :
+      pSwapChain_ (pSwapChain),
+      Source_     (Source),
+      active_     (Source == SK_DXGI_PresentSource::Wrapper)
+    {
+      if (! active_)
+        return;
+
+      ++SK_DXGI_WrapperSubmitGuardDepth;
+
+      BOOL bDXGIFullscreen = FALSE;
+      const auto& rb =
+        SK_GetCurrentRenderBackend ();
+
+      SK_DXGI_LogWrapperSubmitDiagnostic (
+        L"wrapper-submit-guard-set",
+          pSwapChain_, Source_,
+            SK_DXGI_IsWrapperSubmitGuardActive (),
+            SK_DXGI_IsGLInteropSwapChain      (pSwapChain_),
+            _IsBackendD3D11                   (rb.api),
+            rb.isTrueFullscreen (),
+            SK_DXGI_GetFullscreenState        (pSwapChain_, bDXGIFullscreen),
+            false
+      );
+    }
+
+    ~SK_DXGI_WrapperSubmitScope (void) noexcept
+    {
+      if (! active_)
+        return;
+
+      if (SK_DXGI_WrapperSubmitGuardDepth > 0)
+        --SK_DXGI_WrapperSubmitGuardDepth;
+
+      BOOL bDXGIFullscreen = FALSE;
+      const auto& rb =
+        SK_GetCurrentRenderBackend ();
+
+      SK_DXGI_LogWrapperSubmitDiagnostic (
+        L"wrapper-submit-guard-clear",
+          pSwapChain_, Source_,
+            SK_DXGI_IsWrapperSubmitGuardActive (),
+            SK_DXGI_IsGLInteropSwapChain      (pSwapChain_),
+            _IsBackendD3D11                   (rb.api),
+            rb.isTrueFullscreen (),
+            SK_DXGI_GetFullscreenState        (pSwapChain_, bDXGIFullscreen),
+            false
+      );
+    }
+
+  private:
+    IDXGISwapChain       *pSwapChain_ = nullptr;
+    SK_DXGI_PresentSource Source_     = SK_DXGI_PresentSource::Hook;
+    bool                  active_     = false;
+  };
+}
 
 static void SK_DXGI_WriteDetourHitMarker (const wchar_t* wszEventName, void* pSwapChainThis, void* pDetourFn)
 {
@@ -2423,12 +2559,6 @@ SK_DXGI_Present1 ( IDXGISwapChain1         *This,
 
 static bool first_frame = true;
 
-enum class SK_DXGI_PresentSource
-{
-  Wrapper = 0,
-  Hook    = 1
-};
-
 bool
 SK_DXGI_TestSwapChainCreationFlags (DWORD dwFlags)
 {
@@ -3070,6 +3200,45 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     }
   }
 
+  const bool wrapper_submit_guard_active =
+    SK_DXGI_IsWrapperSubmitGuardActive ();
+
+  BOOL bRecursiveDXGIFullscreen = FALSE;
+  const bool is_gl_interop_swapchain =
+    SK_DXGI_IsGLInteropSwapChain (This);
+  const bool dxgi_recursive_fullscreen =
+    SK_DXGI_GetFullscreenState (This, bRecursiveDXGIFullscreen);
+  const bool recursive_fullscreen =
+    rb.isTrueFullscreen () || dxgi_recursive_fullscreen;
+  const bool recursive_gl_interop_passthrough =
+    Source == SK_DXGI_PresentSource::Hook &&
+    wrapper_submit_guard_active           &&
+    is_gl_interop_swapchain               &&
+    _IsBackendD3D11 (rb.api)              &&
+    recursive_fullscreen;
+
+  if (Source == SK_DXGI_PresentSource::Hook && wrapper_submit_guard_active)
+  {
+    SK_DXGI_LogWrapperSubmitDiagnostic (
+      recursive_gl_interop_passthrough ?
+        L"hook-recursion-passthrough"  :
+        L"hook-recursion-detected",
+          This, Source,
+            wrapper_submit_guard_active,
+            is_gl_interop_swapchain,
+            _IsBackendD3D11 (rb.api),
+            rb.isTrueFullscreen (),
+            dxgi_recursive_fullscreen,
+            recursive_gl_interop_passthrough
+    );
+  }
+
+  if (recursive_gl_interop_passthrough)
+  {
+    return
+      _Present (SyncInterval, Flags);
+  }
+
   //
   // Early-out for games that use testing to minimize blocking
   //
@@ -3193,34 +3362,6 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
           DWORD   dwLastCheck         = SK_timeGetTime    ();
     const DWORD         CheckInterval = 250;
   } static _osd;
-
-  UINT gl_interop = 0;
-  UINT gl_interop_size = sizeof (gl_interop);
-  const bool is_gl_interop_swapchain =
-    SUCCEEDED (This->GetPrivateData (SKID_DXGI_GL_InteropSwapChain, &gl_interop_size, &gl_interop)) &&
-    gl_interop_size == sizeof (gl_interop) &&
-    gl_interop == 1;
-
-  const bool skip_hook_source_d3d11_post =
-    [&]()
-    {
-      if (Source != SK_DXGI_PresentSource::Hook ||
-          (! is_gl_interop_swapchain)          ||
-          (! _IsBackendD3D11 (rb.api)))
-      {
-        return false;
-      }
-
-      if (rb.isTrueFullscreen ())
-        return true;
-
-      // The wrapped GL interop swapchain can transiently report fullscreen
-      // through DXGI before rb.fullscreen_exclusive catches up.
-      BOOL bFullscreen = FALSE;
-      return
-        SUCCEEDED (This->GetFullscreenState (&bFullscreen, nullptr)) &&
-                   bFullscreen;
-    }();
 
   if ( SK_timeGetTime () > _osd.dwLastCheck + _osd.CheckInterval )
   {
@@ -3523,8 +3664,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     if (interval != 0 || rb.isTrueFullscreen ()) // FSE can't use this flag
       flags &= ~DXGI_PRESENT_ALLOW_TEARING;
     if (     _IsBackendD3D12 (rb.api)) SK_ImGui_DrawD3D12 (This);
-    else if (_IsBackendD3D11 (rb.api) && (! skip_hook_source_d3d11_post))
-      SK_ImGui_DrawD3D11 (This);
+    else if (_IsBackendD3D11 (rb.api)) SK_ImGui_DrawD3D11 (This);
 
     if ( pDev != nullptr || pDev12 != nullptr )
     {
@@ -3698,6 +3838,8 @@ SK_DXGI_DispatchPresent1 (IDXGISwapChain1         *This,
                           Present1SwapChain1_pfn  DXGISwapChain1_Present1,
                           SK_DXGI_PresentSource   Source)
 {
+  SK_DXGI_WrapperSubmitScope submit_scope ((IDXGISwapChain *)This, Source);
+
   return
     SK_DXGI_PresentBase ( This, SyncInterval, Flags, Source,
                             nullptr, DXGISwapChain1_Present1,
@@ -3726,6 +3868,8 @@ SK_DXGI_DispatchPresent (IDXGISwapChain        *This,
                          PresentSwapChain_pfn   DXGISwapChain_Present,
                          SK_DXGI_PresentSource  Source)
 {
+  SK_DXGI_WrapperSubmitScope submit_scope (This, Source);
+
   if ( (Flags & DXGI_PRESENT_TEST           ) ||
        (Flags & DXGI_PRESENT_DO_NOT_SEQUENCE) )
   {
