@@ -3025,6 +3025,15 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     static constexpr UINT      kPrePresentCharShift = 16u;
     static constexpr ULONGLONG kDiagnosticThrottleMs = 1000ULL;
 
+    const auto _PackChar = [](const wchar_t *wszValue, UINT shift) noexcept
+    {
+      const wchar_t ch =
+        (wszValue != nullptr && wszValue [0] != L'\0') ? wszValue [0] : L'?';
+
+      return
+        static_cast<UINT> (ch) << shift;
+    };
+
     const UINT signature =
       (Source == SK_DXGI_PresentSource::Wrapper ? 0x0001u : 0x0000u) |
       (bGLInteropSwapChain                      ? 0x0002u : 0x0000u) |
@@ -3032,8 +3041,8 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
       (bDXGIFullscreen                         ? 0x0008u : 0x0000u) |
       (bRecursiveGLInteropPassthrough          ? 0x0010u : 0x0000u) |
       (bPrePresentWorkExecuted                 ? 0x0020u : 0x0000u) |
-      (((UINT)(wszEvent          != nullptr && wszEvent [0] != L'\0' ? wszEvent [0] : L'?')) << kEventCharShift) |
-      (((UINT)(wszPrePresentWork != nullptr && wszPrePresentWork [0] != L'\0' ? wszPrePresentWork [0] : L'?')) << kPrePresentCharShift);
+      _PackChar (wszEvent,          kEventCharShift) |
+      _PackChar (wszPrePresentWork, kPrePresentCharShift);
 
     const ULONGLONG now = GetTickCount64 ();
 
@@ -3898,29 +3907,38 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
       SK::Framerate::TickEx (false, 0.0, { 0,0 }, rb.swapchain.p);
     }
 
+    const UINT effective_present_interval =
+      _SkipThisFrame ? (rb.d3d11.immediate_ctx != nullptr ? 0 : 1) : interval;
+    const UINT effective_present_flags =
+      _SkipThisFrame ? (DXGI_PRESENT_RESTART | DXGI_PRESENT_DO_NOT_WAIT |
+                       ((rb.d3d11.immediate_ctx != nullptr) ? DXGI_PRESENT_ALLOW_TEARING : 0))
+                     : flags;
+    const wchar_t* const wszPrePresentKind =
+      Source == SK_DXGI_PresentSource::Wrapper ? L"wrapper_source" :
+      (_IsBackendD3D12 (rb.api)                ? L"hook_osd_d3d12" :
+       _IsBackendD3D11 (rb.api)                ? L"hook_osd_d3d11" :
+                                                 L"none");
+    const bool bPrePresentWorkExecuted =
+      Source == SK_DXGI_PresentSource::Wrapper ||
+      _IsBackendD3D12 (rb.api)                 ||
+      _IsBackendD3D11 (rb.api);
+
+    _LogPresentCorrelation ( L"before_present",
+                             wszPrePresentKind,
+                             bPrePresentWorkExecuted,
+                             is_gl_interop_swapchain,
+                             dxgi_fullscreen_state,
+                             recursive_gl_interop_passthrough,
+                             effective_present_interval,
+                             effective_present_flags );
+
     HRESULT hr =
-      (_LogPresentCorrelation (
-         L"before_present",
-         Source == SK_DXGI_PresentSource::Wrapper ? L"wrapper_source" :
-         (_IsBackendD3D12 (rb.api)                ? L"hook_osd_d3d12" :
-          _IsBackendD3D11 (rb.api)                ? L"hook_osd_d3d11" :
-                                                    L"none"),
-         Source == SK_DXGI_PresentSource::Wrapper ||
-         _IsBackendD3D12 (rb.api)                 ||
-         _IsBackendD3D11 (rb.api),
-         is_gl_interop_swapchain,
-         dxgi_fullscreen_state,
-         recursive_gl_interop_passthrough,
-         _SkipThisFrame ? (rb.d3d11.immediate_ctx != nullptr ? 0 : 1) : interval,
-         _SkipThisFrame ? (DXGI_PRESENT_RESTART | DXGI_PRESENT_DO_NOT_WAIT |
-                          ((rb.d3d11.immediate_ctx != nullptr) ? DXGI_PRESENT_ALLOW_TEARING : 0))
-                        : flags ),
       _SkipThisFrame ? _Present ( rb.d3d11.immediate_ctx != nullptr ?
                                                                   0 : 1,
                                                         DXGI_PRESENT_RESTART | DXGI_PRESENT_DO_NOT_WAIT |
                                  ( ( rb.d3d11.immediate_ctx != nullptr) ? DXGI_PRESENT_ALLOW_TEARING
                                                                         : 0 ) ) :
-                       _Present ( interval, flags ));
+                       _Present ( interval, flags );
 
     if (_SkipThisFrame)
       hr = S_OK;

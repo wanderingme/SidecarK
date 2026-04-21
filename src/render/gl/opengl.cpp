@@ -160,11 +160,20 @@ SK_GL_LogInteropPresentDiagnostic ( const wchar_t  *wszEvent,
   static constexpr UINT      kEventCharShift       = 8u;
   static constexpr ULONGLONG kDiagnosticThrottleMs = 1000ULL;
 
+  const auto _PackChar = [](const wchar_t *wszValue, UINT shift) noexcept
+  {
+    const wchar_t ch =
+      (wszValue != nullptr && wszValue [0] != L'\0') ? wszValue [0] : L'?';
+
+    return
+      static_cast<UINT> (ch) << shift;
+  };
+
   const ULONGLONG now = GetTickCount64 ();
   const UINT signature =
     (bTrueFullscreen ? 0x0001u : 0x0000u) |
     (bDXGIFullscreen ? 0x0002u : 0x0000u) |
-    (((UINT)(wszEvent != nullptr && wszEvent [0] != L'\0' ? wszEvent [0] : L'?')) << kEventCharShift);
+    _PackChar (wszEvent, kEventCharShift);
 
   static std::atomic<UINT_PTR>  s_last_sc  { 0 };
   static std::atomic<UINT>      s_last_sig { 0 };
