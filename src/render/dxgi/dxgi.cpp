@@ -71,13 +71,13 @@ enum class SK_DXGI_PresentSource : int
 
 namespace
 {
-  thread_local UINT SK_DXGI_WrapperSubmitGuardDepth = 0;
+  thread_local UINT SK_DXGI_WrapperSubmitNestingLevel = 0;
 
   bool
   SK_DXGI_IsWrapperSubmitGuardActive (void) noexcept
   {
     return
-      SK_DXGI_WrapperSubmitGuardDepth > 0;
+      SK_DXGI_WrapperSubmitNestingLevel > 0;
   }
 
   bool
@@ -168,7 +168,9 @@ namespace
       if (! active_)
         return;
 
-      ++SK_DXGI_WrapperSubmitGuardDepth;
+      // Only wrapper-originated submits should advertise recursive ownership;
+      // hook-originated nested entries only observe this state.
+      ++SK_DXGI_WrapperSubmitNestingLevel;
 
       BOOL bDXGIFullscreen = FALSE;
       const auto& rb =
@@ -191,8 +193,8 @@ namespace
       if (! active_)
         return;
 
-      if (SK_DXGI_WrapperSubmitGuardDepth > 0)
-        --SK_DXGI_WrapperSubmitGuardDepth;
+      if (SK_DXGI_WrapperSubmitNestingLevel > 0)
+        --SK_DXGI_WrapperSubmitNestingLevel;
 
       BOOL bDXGIFullscreen = FALSE;
       const auto& rb =
@@ -3254,6 +3256,8 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
 
   if (recursive_gl_interop_passthrough)
   {
+    // The wrapper path already composited SKF1 and is now submitting the real
+    // swapchain, so recursive hook re-entry must bypass second-frame handling.
     return
       _Present (SyncInterval, Flags);
   }
