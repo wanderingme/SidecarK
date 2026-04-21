@@ -2999,7 +2999,9 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
   const bool bDLSS3OnVRRDisplay =
     (__SK_IsDLSSGActive && display.nvapi.vrr_enabled);
 
-  auto _LogPresentCorrelation = [&](const wchar_t *wszPresentPath) noexcept
+  auto _LogPresentCorrelation = [&](const wchar_t *wszPresentPath,
+                                    UINT           _SyncInterval,
+                                    UINT           _Flags) noexcept
   {
     if (! SidecarK_DiagnosticsEnabled ())
       return;
@@ -3037,8 +3039,8 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
         SK_DXGI_GetFullscreenState (This, bDXGIFullscreen) ? 1 : 0,
         SK_DXGI_IsGLInteropSwapChain (This) ? 1 : 0,
         wszPresentPath != nullptr ? wszPresentPath : L"<unknown>",
-        SyncInterval,
-        Flags
+        _SyncInterval,
+        _Flags
     );
 
     fclose (f);
@@ -3233,7 +3235,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     {
       if (DXGISwapChain1_Present1 != nullptr)
       {
-        _LogPresentCorrelation (L"DXGISwapChain1_Present1");
+        _LogPresentCorrelation (L"DXGISwapChain1_Present1", _SyncInterval, _Flags);
 
         return
           _Ret (
@@ -3244,7 +3246,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
           );
       }
 
-      _LogPresentCorrelation (L"DXGISwapChain_Present");
+      _LogPresentCorrelation (L"DXGISwapChain_Present", _SyncInterval, _Flags);
 
       return
         _Ret (
@@ -3256,7 +3258,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
 
     if (DXGISwapChain1_Present1 != nullptr)
     {
-      _LogPresentCorrelation (L"IDXGISwapChain1::Present1");
+      _LogPresentCorrelation (L"IDXGISwapChain1::Present1", _SyncInterval, _Flags);
 
       return
         _Ret (
@@ -3264,7 +3266,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
         );
     }
 
-    _LogPresentCorrelation (L"IDXGISwapChain::Present");
+    _LogPresentCorrelation (L"IDXGISwapChain::Present", _SyncInterval, _Flags);
 
     return
       _Ret (
