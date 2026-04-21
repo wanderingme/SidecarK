@@ -3194,6 +3194,21 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     const DWORD         CheckInterval = 250;
   } static _osd;
 
+  UINT gl_interop = 0;
+  UINT gl_interop_size = sizeof (gl_interop);
+  const bool is_gl_interop_swapchain =
+    SUCCEEDED (This->GetPrivateData (SKID_DXGI_GL_InteropSwapChain, &gl_interop_size, &gl_interop)) &&
+    gl_interop_size == sizeof (gl_interop) &&
+    gl_interop == 1;
+
+  BOOL bHookSourceFullscreen = FALSE;
+  const bool skip_hook_source_d3d11_post =
+    Source == SK_DXGI_PresentSource::Hook &&
+    is_gl_interop_swapchain                 &&
+    _IsBackendD3D11 (rb.api)                &&
+    ( rb.isTrueFullscreen () ||
+      (SUCCEEDED (This->GetFullscreenState (&bHookSourceFullscreen, nullptr)) && bHookSourceFullscreen) );
+
   if ( SK_timeGetTime () > _osd.dwLastCheck + _osd.CheckInterval )
   {
     if (config.render.osd._last_vidcap_frame == _osd.last_frame                &&
@@ -3495,7 +3510,8 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     if (interval != 0 || rb.isTrueFullscreen ()) // FSE can't use this flag
       flags &= ~DXGI_PRESENT_ALLOW_TEARING;
     if (     _IsBackendD3D12 (rb.api)) SK_ImGui_DrawD3D12 (This);
-    else if (_IsBackendD3D11 (rb.api)) SK_ImGui_DrawD3D11 (This);
+    else if (_IsBackendD3D11 (rb.api) && (! skip_hook_source_d3d11_post))
+      SK_ImGui_DrawD3D11 (This);
 
     if ( pDev != nullptr || pDev12 != nullptr )
     {

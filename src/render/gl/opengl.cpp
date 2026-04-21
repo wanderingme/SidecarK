@@ -2331,6 +2331,12 @@ SK_GL_CreateInteropSwapChain ( IDXGIFactory2         *pFactory,
                                        desc1,   nullptr,
                                                 nullptr, ppSwapChain );
 
+  if (SUCCEEDED (hr) && ppSwapChain != nullptr && *ppSwapChain != nullptr)
+  {
+    static constexpr UINT uiInterop = 1;
+    (*ppSwapChain)->SetPrivateData (SKID_DXGI_GL_InteropSwapChain, sizeof (uiInterop), &uiInterop);
+  }
+
   return hr;
 }
 
