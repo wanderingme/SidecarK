@@ -193,8 +193,7 @@ namespace
       if (! active_)
         return;
 
-      if (SK_DXGI_WrapperSubmitNestingLevel > 0)
-        --SK_DXGI_WrapperSubmitNestingLevel;
+      --SK_DXGI_WrapperSubmitNestingLevel;
 
       BOOL bDXGIFullscreen = FALSE;
       const auto& rb =
@@ -3225,10 +3224,10 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
   BOOL bDXGIFullscreen = FALSE;
   const bool is_gl_interop_swapchain =
     SK_DXGI_IsGLInteropSwapChain (This);
-  const bool dxgi_recursive_fullscreen =
+  const bool dxgi_fullscreen_state =
     SK_DXGI_GetFullscreenState (This, bDXGIFullscreen);
   const bool fullscreen_active =
-    rb.isTrueFullscreen () || dxgi_recursive_fullscreen;
+    rb.isTrueFullscreen () || dxgi_fullscreen_state;
   const bool recursive_gl_interop_passthrough =
     SK_DXGI_ShouldPassthroughRecursiveGLInteropPresent (
       Source,
@@ -3249,7 +3248,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
             is_gl_interop_swapchain,
             _IsBackendD3D11 (rb.api),
             rb.isTrueFullscreen (),
-            dxgi_recursive_fullscreen,
+            dxgi_fullscreen_state,
             recursive_gl_interop_passthrough
     );
   }
