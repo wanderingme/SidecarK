@@ -2125,7 +2125,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       if (SUCCEEDED(hr12) && bb12 != nullptr && cmdQueue != nullptr)
       {
         D3D12_RESOURCE_DESC bbDesc = bb12->GetDesc();
-        const ULONG64 frame12 = SK_GetFramesDrawn ();
+        const ULONG64 frame = SK_GetFramesDrawn ();
 
         // copyW12/copyH12: clamp copy rect to min(backbuffer, header).
         // When header dims are 0 (not yet published), copyW12/copyH12 will be 0
@@ -2189,7 +2189,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             _SidecarLog (
               L"SKF1 target cache assign: tid=%lu frame=%llu sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=first_matching_swapchain_d3d12",
                 (unsigned long)GetCurrentThreadId (),
-                (unsigned long long)frame12,
+                (unsigned long long)frame,
                 pReal,
                 (UINT)bbDesc.Width,
                 bbDesc.Height,
@@ -2215,7 +2215,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             _SidecarLog (
               L"SKF1 target cache skip: tid=%lu frame=%llu sc=%p cached_sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=other_swapchain_already_cached_d3d12",
                 (unsigned long)GetCurrentThreadId (),
-                (unsigned long long)frame12,
+                (unsigned long long)frame,
                 pReal,
                 prev,
                 (UINT)bbDesc.Width,
@@ -2597,7 +2597,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 _SidecarLog (
                   L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=%d backend=d3d12",
                     (unsigned long)GetCurrentThreadId (),
-                    (unsigned long long)frame12,
+                    (unsigned long long)frame,
                     (long)c1_12,
                     pReal,
                     (UINT)bbDesc.Width,
