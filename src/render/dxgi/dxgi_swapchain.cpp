@@ -1124,6 +1124,67 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                  stackBuf);
   };
 
+  auto _ReadTargetSwapChain = [&]() -> IDXGISwapChain *
+  {
+    return
+      static_cast <IDXGISwapChain *> (
+        InterlockedCompareExchangePointer (
+          reinterpret_cast <void * volatile *> (&s_target_swapchain),
+          nullptr,
+          nullptr
+        )
+      );
+  };
+
+  auto _GetStageFTargetState = [&](
+    IDXGISwapChain *pSwapChain,
+    BOOL&           bFullscreen,
+    bool&           bGLInterop
+  ) -> void
+  {
+    bFullscreen = FALSE;
+    bGLInterop  = false;
+
+    if (pSwapChain == nullptr)
+      return;
+
+    bFullscreen =
+      SUCCEEDED (pSwapChain->GetFullscreenState (&bFullscreen, nullptr)) &&
+      bFullscreen;
+
+    UINT interopMarker     = 0;
+    UINT interopMarkerSize = sizeof (interopMarker);
+
+    bGLInterop =
+      SUCCEEDED (pSwapChain->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                             &interopMarkerSize,
+                                              &interopMarker )) &&
+      interopMarkerSize == sizeof (interopMarker) &&
+      interopMarker      == 1;
+  };
+
+  auto _LogStageFTargetCacheEvent = [&](
+    const wchar_t *wszEvent,
+    const wchar_t *wszBackend,
+    IDXGISwapChain *pSwapChain,
+    IDXGISwapChain *pCachedSwapChain,
+    BOOL            bFullscreen,
+    bool            bGLInterop,
+    bool            bCacheChanged
+  ) -> void
+  {
+    _SidecarLog (
+      L"SKF1 target cache %ls: backend=%ls sc=%p cached_sc=%p fullscreen=%d gl_interop=%d cache_changed=%d",
+        wszEvent   != nullptr ? wszEvent   : L"unknown",
+        wszBackend != nullptr ? wszBackend : L"unknown",
+        pSwapChain,
+        pCachedSwapChain,
+        bFullscreen ? 1 : 0,
+        bGLInterop  ? 1 : 0,
+        bCacheChanged ? 1 : 0
+    );
+  };
+
   auto _ReleaseMappedOverlay = [&]()
   {
     if (s_skf1.tex != nullptr)
@@ -1659,67 +1720,118 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         // Target-swapchain gate: claim if unclaimed, skip if another swapchain is already
         // the target. Uses a single CAS to avoid races between concurrent presents.
         {
-          void* const prev =
-            InterlockedCompareExchangePointer (
-              reinterpret_cast<void * volatile *> (&s_target_swapchain),
-              reinterpret_cast<void *>(pReal),  // desired
-              nullptr                           // only swap if currently null
-            );
-          // prev == nullptr  → we just claimed it (first match)
-          // prev == pReal    → we are the cached target (keep going)
-          // prev == other    → another swapchain owns this slot (skip)
-          if (prev == nullptr)
-          {
-            UINT glInteropMarker     = 0;
-            UINT glInteropMarkerSize = sizeof (glInteropMarker);
-            BOOL bTargetFullscreen   = FALSE;
+          IDXGISwapChain *cached_sc = _ReadTargetSwapChain ();
 
-            _SidecarLog (
-              L"SKF1 target cache assign: tid=%lu frame=%llu sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=first_matching_swapchain_d3d11",
-                (unsigned long)GetCurrentThreadId (),
-                (unsigned long long)frame,
+          if (cached_sc != nullptr)
+          {
+            BOOL bCachedFullscreen = FALSE;
+            bool bCachedGLInterop  = false;
+            _GetStageFTargetState (cached_sc, bCachedFullscreen, bCachedGLInterop);
+
+            if (bCachedGLInterop && bCachedFullscreen)
+            {
+              const void * const cleared =
+                InterlockedCompareExchangePointer (
+                  reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                  nullptr,
+                  reinterpret_cast<void *>(cached_sc)
+                );
+              const bool cache_cleared =
+                cleared == reinterpret_cast<void *>(cached_sc);
+
+              if (cache_cleared)
+              {
+                _LogStageFTargetCacheEvent (
+                  L"cleared",
+                  L"d3d11",
+                  cached_sc,
+                  cached_sc,
+                  bCachedFullscreen,
+                  bCachedGLInterop,
+                  true
+                );
+              }
+
+              cached_sc = _ReadTargetSwapChain ();
+            }
+          }
+
+          BOOL bCandidateFullscreen = FALSE;
+          bool bCandidateGLInterop  = false;
+          _GetStageFTargetState (pReal, bCandidateFullscreen, bCandidateGLInterop);
+
+          const bool reject_candidate =
+            bCandidateGLInterop && bCandidateFullscreen;
+
+          void* prev = reinterpret_cast<void *>(cached_sc);
+
+          if (reject_candidate)
+          {
+            const void * const cleared =
+              InterlockedCompareExchangePointer (
+                reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                nullptr,
+                reinterpret_cast<void *>(pReal)
+              );
+            const bool cache_cleared =
+              cleared == reinterpret_cast<void *>(pReal);
+
+            if (cache_cleared)
+            {
+              _LogStageFTargetCacheEvent (
+                L"cleared",
+                L"d3d11",
                 pReal,
-                bbDesc.Width,
-                bbDesc.Height,
-                s_skf1.width,
-                s_skf1.height,
-                copyW,
-                copyH,
-                (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
-                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
-                                                   &glInteropMarkerSize,
-                                                    &glInteropMarker )) &&
-                  glInteropMarkerSize == sizeof (glInteropMarker) &&
-                  glInteropMarker      == 1) ? 1 : 0
+                pReal,
+                bCandidateFullscreen,
+                bCandidateGLInterop,
+                true
+              );
+            }
+
+            prev =
+              InterlockedCompareExchangePointer (
+                reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                nullptr,
+                nullptr
+              );
+
+            _LogStageFTargetCacheEvent (
+              L"rejected",
+              L"d3d11",
+              pReal,
+              static_cast<IDXGISwapChain *>(prev),
+              bCandidateFullscreen,
+              bCandidateGLInterop,
+              cache_cleared
             );
+          }
+          else
+          {
+            prev =
+              InterlockedCompareExchangePointer (
+                reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                reinterpret_cast<void *>(pReal),  // desired
+                nullptr                           // only swap if currently null
+              );
+
+            if (prev == nullptr)
+            {
+              _LogStageFTargetCacheEvent (
+                L"accepted",
+                L"d3d11",
+                pReal,
+                nullptr,
+                bCandidateFullscreen,
+                bCandidateGLInterop,
+                true
+              );
+            }
           }
 
           if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
           {
-            UINT glInteropMarker     = 0;
-            UINT glInteropMarkerSize = sizeof (glInteropMarker);
-            BOOL bTargetFullscreen   = FALSE;
-
-            _SidecarLog (
-              L"SKF1 target cache skip: tid=%lu frame=%llu sc=%p cached_sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=other_swapchain_already_cached_d3d11",
-                (unsigned long)GetCurrentThreadId (),
-                (unsigned long long)frame,
-                pReal,
-                prev,
-                bbDesc.Width,
-                bbDesc.Height,
-                s_skf1.width,
-                s_skf1.height,
-                copyW,
-                copyH,
-                (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
-                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
-                                                   &glInteropMarkerSize,
-                                                    &glInteropMarker )) &&
-                  glInteropMarkerSize == sizeof (glInteropMarker) &&
-                  glInteropMarker      == 1) ? 1 : 0
-            );
-
+            
             bb->Release ();
             ctx->Release ();
             dev->Release ();
@@ -2193,64 +2305,118 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
         // Target-swapchain gate: claim if unclaimed, skip if another swapchain owns it.
         {
-          void* const prev =
-            InterlockedCompareExchangePointer (
-              reinterpret_cast<void * volatile *> (&s_target_swapchain),
-              reinterpret_cast<void *>(pReal),
-              nullptr
-            );
-          if (prev == nullptr)
-          {
-            UINT glInteropMarker     = 0;
-            UINT glInteropMarkerSize = sizeof (glInteropMarker);
-            BOOL bTargetFullscreen   = FALSE;
+          IDXGISwapChain *cached_sc = _ReadTargetSwapChain ();
 
-            _SidecarLog (
-              L"SKF1 target cache assign: tid=%lu frame=%llu sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=first_matching_swapchain_d3d12",
-                (unsigned long)GetCurrentThreadId (),
-                (unsigned long long)frame,
+          if (cached_sc != nullptr)
+          {
+            BOOL bCachedFullscreen = FALSE;
+            bool bCachedGLInterop  = false;
+            _GetStageFTargetState (cached_sc, bCachedFullscreen, bCachedGLInterop);
+
+            if (bCachedGLInterop && bCachedFullscreen)
+            {
+              const void * const cleared =
+                InterlockedCompareExchangePointer (
+                  reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                  nullptr,
+                  reinterpret_cast<void *>(cached_sc)
+                );
+              const bool cache_cleared =
+                cleared == reinterpret_cast<void *>(cached_sc);
+
+              if (cache_cleared)
+              {
+                _LogStageFTargetCacheEvent (
+                  L"cleared",
+                  L"d3d12",
+                  cached_sc,
+                  cached_sc,
+                  bCachedFullscreen,
+                  bCachedGLInterop,
+                  true
+                );
+              }
+
+              cached_sc = _ReadTargetSwapChain ();
+            }
+          }
+
+          BOOL bCandidateFullscreen = FALSE;
+          bool bCandidateGLInterop  = false;
+          _GetStageFTargetState (pReal, bCandidateFullscreen, bCandidateGLInterop);
+
+          const bool reject_candidate =
+            bCandidateGLInterop && bCandidateFullscreen;
+
+          void* prev = reinterpret_cast<void *>(cached_sc);
+
+          if (reject_candidate)
+          {
+            const void * const cleared =
+              InterlockedCompareExchangePointer (
+                reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                nullptr,
+                reinterpret_cast<void *>(pReal)
+              );
+            const bool cache_cleared =
+              cleared == reinterpret_cast<void *>(pReal);
+
+            if (cache_cleared)
+            {
+              _LogStageFTargetCacheEvent (
+                L"cleared",
+                L"d3d12",
                 pReal,
-                (UINT)bbDesc.Width,
-                bbDesc.Height,
-                s_skf1.width,
-                s_skf1.height,
-                copyW12,
-                copyH12,
-                (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
-                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
-                                                   &glInteropMarkerSize,
-                                                    &glInteropMarker )) &&
-                  glInteropMarkerSize == sizeof (glInteropMarker) &&
-                  glInteropMarker      == 1) ? 1 : 0
+                pReal,
+                bCandidateFullscreen,
+                bCandidateGLInterop,
+                true
+              );
+            }
+
+            prev =
+              InterlockedCompareExchangePointer (
+                reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                nullptr,
+                nullptr
+              );
+
+            _LogStageFTargetCacheEvent (
+              L"rejected",
+              L"d3d12",
+              pReal,
+              static_cast<IDXGISwapChain *>(prev),
+              bCandidateFullscreen,
+              bCandidateGLInterop,
+              cache_cleared
             );
+          }
+          else
+          {
+            prev =
+              InterlockedCompareExchangePointer (
+                reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                reinterpret_cast<void *>(pReal),
+                nullptr
+              );
+
+            if (prev == nullptr)
+            {
+              _LogStageFTargetCacheEvent (
+                L"accepted",
+                L"d3d12",
+                pReal,
+                nullptr,
+                bCandidateFullscreen,
+                bCandidateGLInterop,
+                true
+              );
+            }
           }
 
           if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
           {
-            UINT glInteropMarker     = 0;
-            UINT glInteropMarkerSize = sizeof (glInteropMarker);
-            BOOL bTargetFullscreen   = FALSE;
-
-            _SidecarLog (
-              L"SKF1 target cache skip: tid=%lu frame=%llu sc=%p cached_sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=other_swapchain_already_cached_d3d12",
-                (unsigned long)GetCurrentThreadId (),
-                (unsigned long long)frame,
-                pReal,
-                prev,
-                (UINT)bbDesc.Width,
-                bbDesc.Height,
-                s_skf1.width,
-                s_skf1.height,
-                copyW12,
-                copyH12,
-                (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
-                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
-                                                   &glInteropMarkerSize,
-                                                    &glInteropMarker )) &&
-                  glInteropMarkerSize == sizeof (glInteropMarker) &&
-                  glInteropMarker      == 1) ? 1 : 0
-            );
-
+            
             bb12->Release ();
             dev12->Release ();
             return
