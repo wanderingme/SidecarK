@@ -3201,13 +3201,24 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     gl_interop_size == sizeof (gl_interop) &&
     gl_interop == 1;
 
-  BOOL bHookSourceFullscreen = FALSE;
   const bool skip_hook_source_d3d11_post =
-    Source == SK_DXGI_PresentSource::Hook &&
-    is_gl_interop_swapchain                 &&
-    _IsBackendD3D11 (rb.api)                &&
-    ( rb.isTrueFullscreen () ||
-      (SUCCEEDED (This->GetFullscreenState (&bHookSourceFullscreen, nullptr)) && bHookSourceFullscreen) );
+    [&]()
+    {
+      if (Source != SK_DXGI_PresentSource::Hook ||
+          (! is_gl_interop_swapchain)          ||
+          (! _IsBackendD3D11 (rb.api)))
+      {
+        return false;
+      }
+
+      if (rb.isTrueFullscreen ())
+        return true;
+
+      BOOL bFullscreen = FALSE;
+      return
+        SUCCEEDED (This->GetFullscreenState (&bFullscreen, nullptr)) &&
+                   bFullscreen;
+    }();
 
   if ( SK_timeGetTime () > _osd.dwLastCheck + _osd.CheckInterval )
   {
