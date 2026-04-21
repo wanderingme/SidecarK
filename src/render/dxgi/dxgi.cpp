@@ -108,6 +108,23 @@ namespace
       bFullscreen;
   }
 
+  bool
+  SK_DXGI_ShouldPassthroughRecursiveGLInteropPresent (
+    SK_DXGI_PresentSource Source,
+    bool                  guard_active,
+    bool                  is_gl_interop_swapchain,
+    bool                  is_d3d11_backend,
+    bool                  fullscreen_active
+  ) noexcept
+  {
+    return
+      Source == SK_DXGI_PresentSource::Hook &&
+      guard_active                          &&
+      is_gl_interop_swapchain               &&
+      is_d3d11_backend                      &&
+      fullscreen_active;
+  }
+
   void
   SK_DXGI_LogWrapperSubmitDiagnostic (
     const wchar_t          *wszEvent,
@@ -3203,19 +3220,21 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
   const bool wrapper_submit_guard_active =
     SK_DXGI_IsWrapperSubmitGuardActive ();
 
-  BOOL bRecursiveDXGIFullscreen = FALSE;
+  BOOL bDXGIFullscreen = FALSE;
   const bool is_gl_interop_swapchain =
     SK_DXGI_IsGLInteropSwapChain (This);
   const bool dxgi_recursive_fullscreen =
-    SK_DXGI_GetFullscreenState (This, bRecursiveDXGIFullscreen);
-  const bool recursive_fullscreen =
+    SK_DXGI_GetFullscreenState (This, bDXGIFullscreen);
+  const bool fullscreen_active =
     rb.isTrueFullscreen () || dxgi_recursive_fullscreen;
   const bool recursive_gl_interop_passthrough =
-    Source == SK_DXGI_PresentSource::Hook &&
-    wrapper_submit_guard_active           &&
-    is_gl_interop_swapchain               &&
-    _IsBackendD3D11 (rb.api)              &&
-    recursive_fullscreen;
+    SK_DXGI_ShouldPassthroughRecursiveGLInteropPresent (
+      Source,
+      wrapper_submit_guard_active,
+      is_gl_interop_swapchain,
+      _IsBackendD3D11 (rb.api),
+      fullscreen_active
+    );
 
   if (Source == SK_DXGI_PresentSource::Hook && wrapper_submit_guard_active)
   {
