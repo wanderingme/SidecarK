@@ -2110,7 +2110,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                BOOL bStageFFullscreen   = FALSE;
 
                _SidecarLog (
-                  L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=%d backend=d3d11",
+                 L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=%d backend=d3d11",
                    (unsigned long)GetCurrentThreadId (),
                    (unsigned long long)frame,
                    (long)c1,
