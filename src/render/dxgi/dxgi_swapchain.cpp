@@ -1690,7 +1690,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             );
 
             _SidecarLog (
-              L"SKF1 target cache skip: tid=%lu frame=%llu sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=gl_interop_not_dxgi_fullscreen_in_true_fullscreen",
+              L"SKF1 target cache skip: tid=%lu frame=%llu sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=gl_interop_claim_blocked_fullscreen",
                 (unsigned long)GetCurrentThreadId (),
                 (unsigned long long)frame,
                 pReal,
