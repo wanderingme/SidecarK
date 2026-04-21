@@ -3214,6 +3214,8 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
       if (rb.isTrueFullscreen ())
         return true;
 
+      // The wrapped GL interop swapchain can transiently report fullscreen
+      // through DXGI before rb.fullscreen_exclusive catches up.
       BOOL bFullscreen = FALSE;
       return
         SUCCEEDED (This->GetFullscreenState (&bFullscreen, nullptr)) &&
