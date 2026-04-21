@@ -126,6 +126,24 @@ namespace
       fullscreen_active;
   }
 
+  constexpr bool
+  _IsBackendD3D11 (const SK_RenderAPI& api) noexcept
+  {
+    return
+      ( static_cast <int> (api) &
+        static_cast <int> (SK_RenderAPI::D3D11) ) ==
+        static_cast <int> (SK_RenderAPI::D3D11);
+  }
+
+  constexpr bool
+  _IsBackendD3D12 (const SK_RenderAPI& api) noexcept
+  {
+    return
+      ( static_cast <int> (api) &
+        static_cast <int> (SK_RenderAPI::D3D12) ) ==
+        static_cast <int> (SK_RenderAPI::D3D12);
+  }
+
   void
   SK_DXGI_LogWrapperSubmitDiagnostic (
     const wchar_t          *wszEvent,
@@ -2707,13 +2725,6 @@ SK_DXGI_DescribePresentStatus (HRESULT hrPresentStatus)
           "Unknown Present Status (%x)",
            (DWORD)hrPresentStatus );
 }
-
-auto _IsBackendD3D11 = [](const SK_RenderAPI& api) { return ( static_cast <int> (api) &
-                                                              static_cast <int> (SK_RenderAPI::D3D11) ) ==
-                                                              static_cast <int> (SK_RenderAPI::D3D11); };
-auto _IsBackendD3D12 = [](const SK_RenderAPI& api) { return ( static_cast <int> (api) &
-                                                              static_cast <int> (SK_RenderAPI::D3D12) ) ==
-                                                              static_cast <int> (SK_RenderAPI::D3D12); };
 
 volatile LONG lResetD3D11 = 0;
 volatile LONG lResetD3D12 = 0;
