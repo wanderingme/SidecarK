@@ -71,6 +71,7 @@ enum class SK_DXGI_PresentSource : int
 
 namespace
 {
+  // Mirrors DXGI/Win32-style unsigned counters used throughout this file.
   thread_local UINT SK_DXGI_WrapperSubmitNestingLevel = 0;
 
   bool
@@ -188,11 +189,17 @@ namespace
       );
     }
 
+    SK_DXGI_WrapperSubmitScope (const SK_DXGI_WrapperSubmitScope&) = delete;
+    SK_DXGI_WrapperSubmitScope& operator= (const SK_DXGI_WrapperSubmitScope&) = delete;
+    SK_DXGI_WrapperSubmitScope (SK_DXGI_WrapperSubmitScope&&) = delete;
+    SK_DXGI_WrapperSubmitScope& operator= (SK_DXGI_WrapperSubmitScope&&) = delete;
+
     ~SK_DXGI_WrapperSubmitScope (void) noexcept
     {
       if (! active_)
         return;
 
+      assert (SK_DXGI_WrapperSubmitNestingLevel > 0);
       --SK_DXGI_WrapperSubmitNestingLevel;
 
       BOOL bDXGIFullscreen = FALSE;
