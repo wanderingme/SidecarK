@@ -1567,6 +1567,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   // Treat sub-threshold header dims as "not ready" so sentinel / provisional
   // sizes (for example 1x1) never advance into the D3D11 claim/composite path.
   // --------------------------------------------------------------------------
+  // Match the existing D3D11 small-copy gate so sub-threshold headers stay
+  // in "not ready" state instead of entering the claim/composite path first.
   static constexpr UINT kSKF1MinReadyDimension = 64u;
   const bool skf1_stage_ef_ready =
     (s_skf1.view_ptr != nullptr &&
