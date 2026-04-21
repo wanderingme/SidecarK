@@ -1358,24 +1358,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     }
   }
 
-  // Early-out: when overlay is disabled skip ALL Stage A-F work (no mapping,
-  // no memcpy, no texture ops). Reuses the same dispatch path used everywhere.
-  if (!overlay_enabled)
-  {
-    if (!s_logged_overlay_disabled_skip)
-    {
-      _SidecarLog (L"SKF1 composite skipped overlay_disabled=%ld valid=%d tid=%lu",
-                   (long)overlay_value,
-                   overlay_value_valid ? 1 : 0,
-                   (unsigned long)GetCurrentThreadId ());
-      s_logged_overlay_disabled_skip = true;
-    }
-    return
-      SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
-                                  nullptr, SK_DXGI_PresentSource::Wrapper );
-  }
-
-  s_logged_overlay_disabled_skip = false;
+  if (overlay_enabled)
+    s_logged_overlay_disabled_skip = false;
 
   // ============================================================================
   // SKF1 SELF-AUDITING PIPELINE
@@ -2055,6 +2039,15 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                           pReal, (int)bbDesc.Format, (UINT)s_skf1.width, (UINT)s_skf1.height, (long)c1);
             }
           }
+          else if (!overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr &&
+                   !s_logged_overlay_disabled_skip)
+          {
+            _SidecarLog (L"SKF1 composite skipped overlay_disabled=%ld valid=%d tid=%lu",
+                         (long)overlay_value,
+                         overlay_value_valid ? 1 : 0,
+                         (unsigned long)GetCurrentThreadId ());
+            s_logged_overlay_disabled_skip = true;
+          }
         }
         else
         {
@@ -2642,6 +2635,16 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 }
               }
             }
+          }
+          else if (!overlay_enabled && s_skf1.has_frame && s_d3d12_staging_texture != nullptr &&
+                   s_d3d12_cmd_allocator != nullptr && s_d3d12_cmd_list != nullptr &&
+                   !s_logged_overlay_disabled_skip)
+          {
+            _SidecarLog (L"SKF1 composite skipped overlay_disabled=%ld valid=%d tid=%lu",
+                         (long)overlay_value,
+                         overlay_value_valid ? 1 : 0,
+                         (unsigned long)GetCurrentThreadId ());
+            s_logged_overlay_disabled_skip = true;
           }
         }
         else
