@@ -3594,48 +3594,76 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
            static SIZE_T   s_view_bytes   = 0;
            static std::vector <uint8_t> s_frame_snapshot;
 
-           if (s_base == nullptr)
+           auto ReleaseSKF1Mapping = [&]()
            {
-             SetLastError (ERROR_SUCCESS);
-             hmap_dbg = OpenFileMappingW (FILE_MAP_READ, FALSE, map_name);
-             gle_open = GetLastError ();
-             if (hmap_dbg == NULL)
+             if (s_base != nullptr)
              {
-               // Consumer must never create mapping, only open
-               open_gle = gle_open;
-               reason   = R_OPEN_FAIL;
-               goto skf1_epilogue;
+               UnmapViewOfFile (s_base);
+               s_base = nullptr;
              }
 
-             if (hmap_dbg != NULL && s_hMap != nullptr && s_hMap != hmap_dbg)
+             if (s_hMap != nullptr)
              {
                CloseHandle (s_hMap);
                s_hMap = nullptr;
              }
 
-              s_hMap = hmap_dbg;
+             s_view_bytes = 0;
+           };
 
-              s_base = (uint8_t *)MapViewOfFile (s_hMap, FILE_MAP_READ, 0, 0, 0);
-               if (s_base == nullptr)
-               {
-                 open_gle = GetLastError ();
-                 reason   = R_MAP_FAIL;
-                 goto skf1_epilogue;
-               }
+           auto AcquireSKF1Mapping = [&]() -> bool
+           {
+             if (s_base != nullptr && s_hMap != nullptr)
+             {
+               hmap_dbg = s_hMap;
+               return true;
+             }
 
-              MEMORY_BASIC_INFORMATION mbi = { };
-              if (VirtualQuery (s_base, &mbi, sizeof (mbi)) != 0)
-                s_view_bytes = mbi.RegionSize;
-              else
-                s_view_bytes = 0;
+             if (s_base != nullptr || s_hMap != nullptr)
+               ReleaseSKF1Mapping ();
 
-              if (s_view_bytes == 0)
-              {
-                open_gle = GetLastError ();
-                reason = R_MAP_FAIL;
-                goto skf1_epilogue;
-              }
-            }
+             SetLastError (ERROR_SUCCESS);
+             hmap_dbg = OpenFileMappingW (FILE_MAP_READ, FALSE, map_name);
+             gle_open = GetLastError ();
+
+             if (hmap_dbg == NULL)
+             {
+               // Consumer must never create mapping, only open
+               open_gle = gle_open;
+               return false;
+             }
+
+             s_hMap = hmap_dbg;
+             s_base = (uint8_t *)MapViewOfFile (s_hMap, FILE_MAP_READ, 0, 0, 0);
+
+             if (s_base == nullptr)
+             {
+               open_gle = GetLastError ();
+               ReleaseSKF1Mapping ();
+               return false;
+             }
+
+             MEMORY_BASIC_INFORMATION mbi = { };
+             if (VirtualQuery (s_base, &mbi, sizeof (mbi)) != 0)
+               s_view_bytes = mbi.RegionSize;
+             else
+               s_view_bytes = 0;
+
+             if (s_view_bytes == 0)
+             {
+               open_gle = GetLastError ();
+               ReleaseSKF1Mapping ();
+               return false;
+             }
+
+             return true;
+           };
+
+           if (! AcquireSKF1Mapping ())
+           {
+             reason = (hmap_dbg == NULL) ? R_OPEN_FAIL : R_MAP_FAIL;
+             goto skf1_epilogue;
+           }
 
             if (s_base != nullptr)
             {
@@ -3952,18 +3980,12 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                }
              }
               else
-             {
-                reason = R_HEADER_FAIL;
-                reached_draw = false;
-               UnmapViewOfFile (s_base);
-               s_base = nullptr;
-               if (s_hMap != nullptr)
-               {
-                 CloseHandle (s_hMap);
-                 s_hMap = nullptr;
-               }
-             }
-           }
+              {
+                 reason = R_HEADER_FAIL;
+                 reached_draw = false;
+                 ReleaseSKF1Mapping ();
+              }
+            }
           status =
             static_cast_pfn <wglSwapBuffers_pfn> (pfnSwapFunc)(hDC);
           SK_GL_SwapInterval (0);
