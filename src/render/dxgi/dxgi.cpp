@@ -3021,6 +3021,10 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     if (! bRelevantSwapChain)
       return;
 
+    static constexpr UINT      kEventCharShift      = 8u;
+    static constexpr UINT      kPrePresentCharShift = 16u;
+    static constexpr ULONGLONG kDiagnosticThrottleMs = 1000ULL;
+
     const UINT signature =
       (Source == SK_DXGI_PresentSource::Wrapper ? 0x0001u : 0x0000u) |
       (bGLInteropSwapChain                      ? 0x0002u : 0x0000u) |
@@ -3028,8 +3032,8 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
       (bDXGIFullscreen                         ? 0x0008u : 0x0000u) |
       (bRecursiveGLInteropPassthrough          ? 0x0010u : 0x0000u) |
       (bPrePresentWorkExecuted                 ? 0x0020u : 0x0000u) |
-      (((UINT)(wszEvent          != nullptr && wszEvent [0] != L'\0' ? wszEvent [0] : L'?')) << 8) |
-      (((UINT)(wszPrePresentWork != nullptr && wszPrePresentWork [0] != L'\0' ? wszPrePresentWork [0] : L'?')) << 16);
+      (((UINT)(wszEvent          != nullptr && wszEvent [0] != L'\0' ? wszEvent [0] : L'?')) << kEventCharShift) |
+      (((UINT)(wszPrePresentWork != nullptr && wszPrePresentWork [0] != L'\0' ? wszPrePresentWork [0] : L'?')) << kPrePresentCharShift);
 
     const ULONGLONG now = GetTickCount64 ();
 
@@ -3043,7 +3047,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
 
     if (last_sc == reinterpret_cast<UINT_PTR> (This) &&
         last_sig == signature                         &&
-        now - last_ms < 1000ULL)
+        now - last_ms < kDiagnosticThrottleMs)
     {
       return;
     }

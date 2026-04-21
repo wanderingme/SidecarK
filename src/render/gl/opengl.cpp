@@ -157,11 +157,14 @@ SK_GL_LogInteropPresentDiagnostic ( const wchar_t  *wszEvent,
   if (! SidecarK_DiagnosticsEnabled ())
     return;
 
+  static constexpr UINT      kEventCharShift       = 8u;
+  static constexpr ULONGLONG kDiagnosticThrottleMs = 1000ULL;
+
   const ULONGLONG now = GetTickCount64 ();
   const UINT signature =
     (bTrueFullscreen ? 0x0001u : 0x0000u) |
     (bDXGIFullscreen ? 0x0002u : 0x0000u) |
-    (((UINT)(wszEvent != nullptr && wszEvent [0] != L'\0' ? wszEvent [0] : L'?')) << 8);
+    (((UINT)(wszEvent != nullptr && wszEvent [0] != L'\0' ? wszEvent [0] : L'?')) << kEventCharShift);
 
   static std::atomic<UINT_PTR>  s_last_sc  { 0 };
   static std::atomic<UINT>      s_last_sig { 0 };
@@ -173,7 +176,7 @@ SK_GL_LogInteropPresentDiagnostic ( const wchar_t  *wszEvent,
 
   if (last_sc == reinterpret_cast<UINT_PTR> (pSwapChain) &&
       last_sig == signature                               &&
-      now - last_ms < 1000ULL)
+      now - last_ms < kDiagnosticThrottleMs)
   {
     return;
   }
