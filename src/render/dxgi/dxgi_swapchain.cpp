@@ -2064,8 +2064,17 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (is_gl_interop_swapchain)
           {
-            _SidecarLog(L"SKF1 Stage F gate: gl_interop=%d source=wrapper pre_present_work=1 pre_present_kind=real_getbuffer0 recursive_passthrough=%d presentbase_wrapper_copy_expected=%d defer=%d",
+            ID3D11Resource* wrapper_bb0_diag = nullptr;
+            {
+              std::scoped_lock lock (_backbufferLock);
+              if (_backbuffers.contains (0) && _backbuffers [0].p != nullptr)
+                wrapper_bb0_diag = _backbuffers [0].p;
+            }
+
+            _SidecarLog(L"SKF1 Stage F gate: gl_interop=%d source=wrapper pre_present_work=1 pre_present_kind=real_getbuffer0 wrapper_bb0=%p real_bb_pre=%p recursive_passthrough=%d presentbase_wrapper_copy_expected=%d defer=%d",
                         is_gl_interop_swapchain ? 1 : 0,
+                        wrapper_bb0_diag,
+                        bb,
                         recursive_gl_interop_passthrough_expected ? 1 : 0,
                         presentbase_will_overwrite_real_backbuffer ? 1 : 0,
                         defer_gl_interop_stage_f_until_post_presentbase ? 1 : 0);
@@ -2921,6 +2930,25 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       s_skf1.has_frame                 &&
       s_skf1.tex != nullptr)
   {
+    UINT glInteropMarkerPost     = 0;
+    UINT glInteropMarkerPostSize = sizeof (glInteropMarkerPost);
+    const bool is_gl_interop_swapchain_post =
+      (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                         &glInteropMarkerPostSize,
+                                          &glInteropMarkerPost )) &&
+        glInteropMarkerPostSize == sizeof (glInteropMarkerPost) &&
+        glInteropMarkerPost      == 1);
+
+    BOOL bSkipPresentBaseCopyPost = FALSE;
+    SK_DXGI_GetPrivateData ( pReal,
+      SKID_DXGI_SwapChainSkipBackbufferCopy_D3D11, sizeof (BOOL), &bSkipPresentBaseCopyPost
+    );
+
+    const bool presentbase_will_overwrite_real_backbuffer_post =
+      ((flip_model.isOverrideActive () || SK_DXGI_ZeroCopy == TRUE) &&
+       (! d3d12_) &&
+       (! bSkipPresentBaseCopyPost));
+
     ID3D11Device*        dev11_post = nullptr;
     ID3D11DeviceContext* ctx11_post = nullptr;
 
@@ -2934,32 +2962,55 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       dev11_post->GetImmediateContext (&ctx11_post);
 
       ID3D11Texture2D* bb11_post = nullptr;
+      ID3D11Texture2D* bb11_wrapper_post = nullptr;
+      ID3D11Texture2D* bb11_target_post  = nullptr;
+      const wchar_t*   bb11_target_kind  = L"real_getbuffer0_post_presentbase";
 
       const ULONGLONG tGetBuf11Post = GetTickCount64 ();
       const HRESULT hrPostBuffer =
         pReal->GetBuffer (0, __uuidof (ID3D11Texture2D), (void **)&bb11_post);
       _LogSlowStage (L"D3D11.GetBuffer.PostPresentBase", tGetBuf11Post);
 
-      if (SUCCEEDED (hrPostBuffer) && bb11_post != nullptr && ctx11_post != nullptr)
       {
-        D3D11_TEXTURE2D_DESC bbDescPost = { };
-        bb11_post->GetDesc (&bbDescPost);
+        std::scoped_lock lock (_backbufferLock);
+        if (_backbuffers.contains (0) && _backbuffers [0].p != nullptr)
+          _backbuffers [0]->QueryInterface (__uuidof (ID3D11Texture2D),
+                                            (void **)&bb11_wrapper_post);
+      }
 
-        const UINT copyWPost = (s_skf1.width  > 0u) ? std::min((UINT)bbDescPost.Width,  s_skf1.width)  : 0u;
-        const UINT copyHPost = (s_skf1.height > 0u) ? std::min((UINT)bbDescPost.Height, s_skf1.height) : 0u;
+      const bool use_wrapper_backbuffer_post =
+        (is_gl_interop_swapchain_post                  &&
+         (! presentbase_will_overwrite_real_backbuffer_post) &&
+         bb11_wrapper_post != nullptr);
+
+      bb11_target_post =
+        use_wrapper_backbuffer_post ? bb11_wrapper_post : bb11_post;
+      bb11_target_kind =
+        use_wrapper_backbuffer_post ? L"wrapper_backbuffer0" : L"real_getbuffer0_post_presentbase";
+
+      if (bb11_target_post != nullptr && ctx11_post != nullptr)
+      {
+        D3D11_TEXTURE2D_DESC bbDescPost       = { };
+        D3D11_TEXTURE2D_DESC bbDescTargetPost = { };
+        if (bb11_post != nullptr)
+          bb11_post->GetDesc (&bbDescPost);
+        bb11_target_post->GetDesc (&bbDescTargetPost);
+
+        const UINT copyWPost = (s_skf1.width  > 0u) ? std::min((UINT)bbDescTargetPost.Width,  s_skf1.width)  : 0u;
+        const UINT copyHPost = (s_skf1.height > 0u) ? std::min((UINT)bbDescTargetPost.Height, s_skf1.height) : 0u;
         const bool needs_scaled_gl_blit_post =
-          (s_skf1.width != bbDescPost.Width || s_skf1.height != bbDescPost.Height);
+          (s_skf1.width != bbDescTargetPost.Width || s_skf1.height != bbDescTargetPost.Height);
 
-        static std::atomic<bool> s_logged_stage_f_post_target_once = false;
-        if (!s_logged_stage_f_post_target_once.exchange(true))
-        {
-          _SidecarLog(L"SKF1 Stage F post-PresentBase target: sc=%p real_bb=%p bb=%ux%u hdr=%ux%u tex=%ux%u scaled=%d reason=wrapper_copy_overwrite_risk",
-                      pReal, bb11_post, bbDescPost.Width, bbDescPost.Height,
-                      s_skf1.width, s_skf1.height, s_skf1.texW, s_skf1.texH,
-                      needs_scaled_gl_blit_post ? 1 : 0);
-        }
+        _SidecarLog(L"SKF1 Stage F post-PresentBase target: sc=%p wrapper_bb0=%p real_bb_post=%p target=%p target_kind=%ws real_bb_dims=%ux%u target_dims=%ux%u hdr=%ux%u tex=%ux%u scaled=%d presentbase_wrapper_copy_expected=%d reason=gl_interop_visible_resource",
+                    pReal, bb11_wrapper_post, bb11_post, bb11_target_post, bb11_target_kind,
+                    bb11_post != nullptr ? bbDescPost.Width  : 0u,
+                    bb11_post != nullptr ? bbDescPost.Height : 0u,
+                    bbDescTargetPost.Width, bbDescTargetPost.Height,
+                    s_skf1.width, s_skf1.height, s_skf1.texW, s_skf1.texH,
+                    needs_scaled_gl_blit_post ? 1 : 0,
+                    presentbase_will_overwrite_real_backbuffer_post ? 1 : 0);
 
-        if (s_skf1.texFmt == bbDescPost.Format && copyWPost >= 64u && copyHPost >= 64u)
+        if (s_skf1.texFmt == bbDescTargetPost.Format && copyWPost >= 64u && copyHPost >= 64u)
         {
           D3D11_BOX srcBoxPost = { 0, 0, 0, copyWPost, copyHPost, 1 };
           bool blit_executed_post = false;
@@ -2969,16 +3020,16 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               s_skf1.texH == s_skf1.height)
           {
             const ULONGLONG tBlt11Post = GetTickCount64 ();
-            if (SK_D3D11_BltCopySurface (s_skf1.tex, bb11_post, nullptr))
+            if (SK_D3D11_BltCopySurface (s_skf1.tex, bb11_target_post, nullptr))
             {
               blit_executed_post = true;
             }
             _LogSlowStage (L"D3D11.BltCopySurface.PostPresentBase", tBlt11Post);
           }
-          else if (bbDescPost.SampleDesc.Count > 1u)
+          else if (bbDescTargetPost.SampleDesc.Count > 1u)
           {
             const ULONGLONG tBlt11Post = GetTickCount64 ();
-            if (SK_D3D11_BltCopySurface (s_skf1.tex, bb11_post, &srcBoxPost))
+            if (SK_D3D11_BltCopySurface (s_skf1.tex, bb11_target_post, &srcBoxPost))
             {
               blit_executed_post = true;
             }
@@ -2987,7 +3038,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           else
           {
             const ULONGLONG tCopySub11Post = GetTickCount64 ();
-            ctx11_post->CopySubresourceRegion (bb11_post, 0, 0, 0, 0, s_skf1.tex, 0, &srcBoxPost);
+            ctx11_post->CopySubresourceRegion (bb11_target_post, 0, 0, 0, 0, s_skf1.tex, 0, &srcBoxPost);
             _LogSlowStage (L"D3D11.CopySubresourceRegion.PostPresentBase", tCopySub11Post);
             blit_executed_post = true;
           }
@@ -3002,8 +3053,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 (unsigned long long)skf1_deferred_stage_f_frame,
                 (long)skf1_deferred_stage_f_counter,
                 pReal,
-                bbDescPost.Width,
-                bbDescPost.Height,
+                bbDescTargetPost.Width,
+                bbDescTargetPost.Height,
                 (SUCCEEDED (pReal->GetFullscreenState (&bStageFFullscreenPost, nullptr)) && bStageFFullscreenPost) ? 1 : 0
             );
 
@@ -3018,7 +3069,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             if (!s_logged_stage_f_post_blit_failure_once.exchange(true))
             {
               _SidecarLog(L"SKF1 Stage F post-PresentBase skip: reason=BLIT_FAILED bb=%ux%u hdr=%ux%u tex=%ux%u scaled=%d",
-                          bbDescPost.Width, bbDescPost.Height,
+                          bbDescTargetPost.Width, bbDescTargetPost.Height,
                           s_skf1.width, s_skf1.height,
                           s_skf1.texW, s_skf1.texH,
                           needs_scaled_gl_blit_post ? 1 : 0);
@@ -3031,21 +3082,24 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           if (!s_logged_stage_f_post_precond_failure_once.exchange(true))
           {
             _SidecarLog(L"SKF1 Stage F post-PresentBase skip: reason=PRECONDITION_FAIL tex_fmt=%u bb_fmt=%u copy=%ux%u tex=%ux%u",
-                        s_skf1.texFmt, bbDescPost.Format, copyWPost, copyHPost,
+                        s_skf1.texFmt, bbDescTargetPost.Format, copyWPost, copyHPost,
                         s_skf1.texW, s_skf1.texH);
           }
         }
 
-        bb11_post->Release ();
+        if (bb11_post != nullptr)         bb11_post->Release ();
+        if (bb11_wrapper_post != nullptr) bb11_wrapper_post->Release ();
       }
       else
       {
         static std::atomic<bool> s_logged_stage_f_post_bb_failure_once = false;
         if (!s_logged_stage_f_post_bb_failure_once.exchange(true))
         {
-          _SidecarLog(L"SKF1 Stage F post-PresentBase skip: reason=BACKBUFFER_OR_CONTEXT_UNAVAILABLE hr_buffer=0x%08X bb=%p ctx=%p",
-                      hrPostBuffer, bb11_post, ctx11_post);
+          _SidecarLog(L"SKF1 Stage F post-PresentBase skip: reason=BACKBUFFER_OR_CONTEXT_UNAVAILABLE hr_buffer=0x%08X real_bb=%p wrapper_bb0=%p ctx=%p",
+                      hrPostBuffer, bb11_post, bb11_wrapper_post, ctx11_post);
         }
+        if (bb11_post != nullptr)         bb11_post->Release ();
+        if (bb11_wrapper_post != nullptr) bb11_wrapper_post->Release ();
       }
     }
     else

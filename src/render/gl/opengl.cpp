@@ -2168,6 +2168,57 @@ SK_IndirectX_PresentManager::Start (SK_IndirectX_InteropCtx *pCtx)
             auto pSwapChain =
               pCtx->output.pSwapChain.p;
 
+            if (SidecarK_DiagnosticsEnabled ())
+            {
+              IDXGISwapChain* pWrappedSwapChain = nullptr;
+              if (pSwapChain != nullptr)
+              {
+                SK_DXGI_GetPrivateData ( pSwapChain,
+                  SKID_DXGI_WrappedSwapChain, sizeof (void *), &pWrappedSwapChain
+                );
+              }
+
+              wchar_t wszPath [MAX_PATH] = { };
+              if (GetTempPathW (MAX_PATH, wszPath) > 0)
+              {
+                wcsncat_s (wszPath, _countof (wszPath), L"SidecarK_Overlay.log", _TRUNCATE);
+
+                FILE* f = nullptr;
+                _wfopen_s (&f, wszPath, L"a+,ccs=UTF-8");
+                if (f != nullptr)
+                {
+                  SYSTEMTIME st = { };
+                  GetLocalTime (&st);
+
+                  const void* final_present_src =
+                    (pCtx->d3d11.staging.colorView.p != nullptr) ?
+                      (const void *)pCtx->d3d11.staging.colorBuffer.p :
+                      (const void *)pCtx->output.backbuffer.image.p;
+                  const void* final_present_dst =
+                    (const void *)pCtx->output.backbuffer.image.p;
+                  const wchar_t* handoff_kind =
+                    (pCtx->d3d11.staging.colorView.p != nullptr) ?
+                      L"staging_to_output_backbuffer" :
+                      L"direct_output_backbuffer";
+
+                  fwprintf ( f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu "
+                                L"SKF1 GL interop handoff: present_sc=%p wrapped_sc=%p shared_tex=%p output_bb=%p final_present_src=%p final_present_dst=%p handoff=%ws\n",
+                             st.wYear, st.wMonth, st.wDay,
+                             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                             (unsigned long)GetCurrentProcessId (),
+                             pSwapChain,
+                             pWrappedSwapChain,
+                             pCtx->d3d11.staging.colorBuffer.p,
+                             pCtx->output.backbuffer.image.p,
+                             final_present_src,
+                             final_present_dst,
+                             handoff_kind );
+
+                  fclose (f);
+                }
+              }
+            }
+
             BOOL bSuccess =
               SUCCEEDED ( pSwapChain->Present ( pCtx->present_man.interval,
                   (pCtx->output.caps.tearing && pCtx->present_man.interval == 0) ? DXGI_PRESENT_ALLOW_TEARING
