@@ -1989,35 +1989,65 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 _SidecarLog(L"→ No backbuffer clear performed (composite only)");
                 _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
               }
+              bool blit_executed = true;
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
-               const ULONGLONG tCopySub11 = GetTickCount64 ();
-               ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
-               _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
 
-               UINT glInteropMarker     = 0;
-               UINT glInteropMarkerSize = sizeof (glInteropMarker);
-               BOOL bStageFFullscreen   = FALSE;
+              if (bbDesc.SampleDesc.Count > 1u)
+              {
+                static std::atomic<bool> s_logged_msaa_blt = false;
+                if (!s_logged_msaa_blt.exchange(true))
+                {
+                  _SidecarLog(L"SKF1 D3D11 composite: using shader blit for MSAA backbuffer samples=%u quality=%u",
+                              bbDesc.SampleDesc.Count, bbDesc.SampleDesc.Quality);
+                }
 
-               _SidecarLog (
-                 L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=%d backend=d3d11",
-                   (unsigned long)GetCurrentThreadId (),
-                   (unsigned long long)frame,
-                   (long)c1,
-                   pReal,
-                   bbDesc.Width,
-                   bbDesc.Height,
-                   (SUCCEEDED (pReal->GetFullscreenState (&bStageFFullscreen, nullptr)) && bStageFFullscreen) ? 1 : 0,
-                   (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
-                                                      &glInteropMarkerSize,
-                                                       &glInteropMarker )) &&
-                     glInteropMarkerSize == sizeof (glInteropMarker) &&
-                     glInteropMarker      == 1) ? 1 : 0
-               );
+                const ULONGLONG tBlt11 = GetTickCount64 ();
+                if (! SK_D3D11_BltCopySurface (s_skf1.tex, bb, &srcBox))
+                {
+                  blit_executed = false;
+                  static std::atomic<bool> s_logged_msaa_blt_fail = false;
+                  if (!s_logged_msaa_blt_fail.exchange(true))
+                  {
+                    _SidecarLog(L"SKF1 D3D11 skip: reason=MSAA_BLT_FAILED samples=%u quality=%u",
+                                bbDesc.SampleDesc.Count, bbDesc.SampleDesc.Quality);
+                  }
+                }
+                _LogSlowStage (L"D3D11.BltCopySurface", tBlt11);
+              }
+              else
+              {
+                const ULONGLONG tCopySub11 = GetTickCount64 ();
+                ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
+                _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
+              }
 
-               // STAGE F OK
-               if (!s_skf1.logged_stage_f_ok.exchange(true))
-               {
-                 _SidecarLog(L"SKF1 Stage F OK: Blit executed");
+              if (blit_executed)
+              {
+                UINT glInteropMarker     = 0;
+                UINT glInteropMarkerSize = sizeof (glInteropMarker);
+                BOOL bStageFFullscreen   = FALSE;
+
+                _SidecarLog (
+                  L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=%d backend=d3d11",
+                    (unsigned long)GetCurrentThreadId (),
+                    (unsigned long long)frame,
+                    (long)c1,
+                    pReal,
+                    bbDesc.Width,
+                    bbDesc.Height,
+                    (SUCCEEDED (pReal->GetFullscreenState (&bStageFFullscreen, nullptr)) && bStageFFullscreen) ? 1 : 0,
+                    (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                                       &glInteropMarkerSize,
+                                                        &glInteropMarker )) &&
+                      glInteropMarkerSize == sizeof (glInteropMarker) &&
+                      glInteropMarker      == 1) ? 1 : 0
+                );
+
+                // STAGE F OK
+                if (!s_skf1.logged_stage_f_ok.exchange(true))
+                {
+                  _SidecarLog(L"SKF1 Stage F OK: Blit executed");
+                }
               }
             }
             else
