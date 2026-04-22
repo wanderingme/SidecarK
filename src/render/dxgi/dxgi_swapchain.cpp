@@ -1989,24 +1989,27 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 _SidecarLog(L"→ No backbuffer clear performed (composite only)");
                 _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
               }
-              bool blit_executed = true;
+              bool blit_executed = false;
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
 
               if (bbDesc.SampleDesc.Count > 1u)
               {
-                static std::atomic<bool> s_logged_msaa_blt = false;
-                if (!s_logged_msaa_blt.exchange(true))
+                static std::atomic<bool> s_logged_msaa_blit_once = false;
+                if (!s_logged_msaa_blit_once.exchange(true))
                 {
                   _SidecarLog(L"SKF1 D3D11 composite: using shader blit for MSAA backbuffer samples=%u quality=%u",
                               bbDesc.SampleDesc.Count, bbDesc.SampleDesc.Quality);
                 }
 
                 const ULONGLONG tBlt11 = GetTickCount64 ();
-                if (! SK_D3D11_BltCopySurface (s_skf1.tex, bb, &srcBox))
+                if (SK_D3D11_BltCopySurface (s_skf1.tex, bb, &srcBox))
                 {
-                  blit_executed = false;
-                  static std::atomic<bool> s_logged_msaa_blt_fail = false;
-                  if (!s_logged_msaa_blt_fail.exchange(true))
+                  blit_executed = true;
+                }
+                else
+                {
+                  static std::atomic<bool> s_logged_msaa_blit_failure_once = false;
+                  if (!s_logged_msaa_blit_failure_once.exchange(true))
                   {
                     _SidecarLog(L"SKF1 D3D11 skip: reason=MSAA_BLT_FAILED samples=%u quality=%u",
                                 bbDesc.SampleDesc.Count, bbDesc.SampleDesc.Quality);
@@ -2019,6 +2022,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 const ULONGLONG tCopySub11 = GetTickCount64 ();
                 ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
                 _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
+                blit_executed = true;
               }
 
               if (blit_executed)
