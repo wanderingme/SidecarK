@@ -1642,13 +1642,31 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           SKID_DXGI_SwapChainSkipBackbufferCopy_D3D11, sizeof (BOOL), &bSkipPresentBaseCopy
         );
 
+        auto& rb = SK_GetCurrentRenderBackend ();
+        BOOL  bStageFDXGIFullscreen = FALSE;
+        const bool dxgi_fullscreen_stage_f =
+          (SUCCEEDED (pReal->GetFullscreenState (&bStageFDXGIFullscreen, nullptr)) &&
+                        bStageFDXGIFullscreen);
+        const bool is_d3d11_backend =
+          ( static_cast <int> (rb.api) &
+            static_cast <int> (SK_RenderAPI::D3D11) ) ==
+            static_cast <int> (SK_RenderAPI::D3D11);
+        const bool fullscreen_active_stage_f =
+          rb.isTrueFullscreen () || dxgi_fullscreen_stage_f;
+        const bool recursive_gl_interop_passthrough_expected =
+          (is_gl_interop_swapchain &&
+           is_d3d11_backend      &&
+           fullscreen_active_stage_f);
+
         const bool presentbase_will_overwrite_real_backbuffer =
           ((flip_model.isOverrideActive () || SK_DXGI_ZeroCopy == TRUE) &&
            (! d3d12_) &&
            (! bSkipPresentBaseCopy));
 
         const bool defer_gl_interop_stage_f_until_post_presentbase =
-          (is_gl_interop_swapchain && presentbase_will_overwrite_real_backbuffer);
+          (is_gl_interop_swapchain &&
+           (presentbase_will_overwrite_real_backbuffer ||
+            (! recursive_gl_interop_passthrough_expected)));
 
         const bool needs_scaled_gl_blit =
           (is_gl_interop_swapchain &&
@@ -2044,6 +2062,15 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             _SidecarLog(msg);
           }
 
+          if (is_gl_interop_swapchain)
+          {
+            _SidecarLog(L"SKF1 Stage F gate: gl_interop=%d source=wrapper pre_present_work=1 pre_present_kind=real_getbuffer0 recursive_passthrough=%d presentbase_wrapper_copy_expected=%d defer=%d",
+                        is_gl_interop_swapchain ? 1 : 0,
+                        recursive_gl_interop_passthrough_expected ? 1 : 0,
+                        presentbase_will_overwrite_real_backbuffer ? 1 : 0,
+                        defer_gl_interop_stage_f_until_post_presentbase ? 1 : 0);
+          }
+
           if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
           {
             if (defer_gl_interop_stage_f_until_post_presentbase)
@@ -2055,8 +2082,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               static std::atomic<bool> s_logged_stage_f_defer_once = false;
               if (!s_logged_stage_f_defer_once.exchange(true))
               {
-                _SidecarLog(L"SKF1 Stage F defer: sc=%p real_bb=%p bb=%ux%u hdr=%ux%u reason=PresentBase_overwrites_real_backbuffer gl_interop=%d",
+                _SidecarLog(L"SKF1 Stage F defer: sc=%p real_bb=%p bb=%ux%u hdr=%ux%u reason=mixed_gl_interop_wrapper_chain recursive_passthrough=%d presentbase_wrapper_copy_expected=%d gl_interop=%d",
                             pReal, bb, bbDesc.Width, bbDesc.Height, s_skf1.width, s_skf1.height,
+                            recursive_gl_interop_passthrough_expected ? 1 : 0,
+                            presentbase_will_overwrite_real_backbuffer ? 1 : 0,
                             is_gl_interop_swapchain ? 1 : 0);
               }
             }
