@@ -1034,8 +1034,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static DWORD s_pidCached = 0;  // For reset detection only
   static std::atomic_bool s_logged_swapchain_once = false;
 
-  // Target swapchain: the first swapchain whose backbuffer exactly matches header dims.
-  // All other swapchains skip compositing until a device/pid reset clears this.
+  // Target swapchain: first claimant wins by default, but an exact backbuffer/header
+  // match may replace a stale claimant later in the frame stream.
   // Not declared volatile — accessed exclusively via Interlocked ops (which provide
   // the necessary memory ordering). Matches the pattern of other D3D resources here.
   static IDXGISwapChain* s_target_swapchain = nullptr;
@@ -1665,6 +1665,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               reinterpret_cast<void *>(pReal),  // desired
               nullptr                           // only swap if currently null
             );
+          bool own_target =
+            (prev == nullptr || prev == reinterpret_cast<void *>(pReal));
           // prev == nullptr  → we just claimed it (first match)
           // prev == pReal    → we are the cached target (keep going)
           // prev == other    → another swapchain owns this slot (skip)
@@ -1694,7 +1696,53 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             );
           }
 
-          if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
+          if (! own_target)
+          {
+            const bool exact_backbuffer_match =
+              (bbDesc.Width  == s_skf1.width &&
+               bbDesc.Height == s_skf1.height);
+
+            if (exact_backbuffer_match)
+            {
+              const void* const replaced =
+                InterlockedCompareExchangePointer (
+                  reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                  reinterpret_cast<void *>(pReal),
+                  prev
+                );
+
+              if (replaced == prev)
+              {
+                UINT glInteropMarker     = 0;
+                UINT glInteropMarkerSize = sizeof (glInteropMarker);
+                BOOL bTargetFullscreen   = FALSE;
+
+                _SidecarLog (
+                  L"SKF1 target cache reassign: tid=%lu frame=%llu old_sc=%p new_sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=exact_backbuffer_match_d3d11",
+                    (unsigned long)GetCurrentThreadId (),
+                    (unsigned long long)frame,
+                    prev,
+                    pReal,
+                    bbDesc.Width,
+                    bbDesc.Height,
+                    s_skf1.width,
+                    s_skf1.height,
+                    copyW,
+                    copyH,
+                    (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
+                    (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                                       &glInteropMarkerSize,
+                                                        &glInteropMarker )) &&
+                      glInteropMarkerSize == sizeof (glInteropMarker) &&
+                      glInteropMarker      == 1) ? 1 : 0
+                );
+
+                own_target = true;
+              }
+            }
+          }
+
+          if (! own_target)
           {
             UINT glInteropMarker     = 0;
             UINT glInteropMarkerSize = sizeof (glInteropMarker);
@@ -2233,6 +2281,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               reinterpret_cast<void *>(pReal),
               nullptr
             );
+          bool own_target =
+            (prev == nullptr || prev == reinterpret_cast<void *>(pReal));
           if (prev == nullptr)
           {
             UINT glInteropMarker     = 0;
@@ -2259,7 +2309,53 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             );
           }
 
-          if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
+          if (! own_target)
+          {
+            const bool exact_backbuffer_match =
+              ((UINT)bbDesc.Width == s_skf1.width &&
+                       bbDesc.Height == s_skf1.height);
+
+            if (exact_backbuffer_match)
+            {
+              const void* const replaced =
+                InterlockedCompareExchangePointer (
+                  reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                  reinterpret_cast<void *>(pReal),
+                  prev
+                );
+
+              if (replaced == prev)
+              {
+                UINT glInteropMarker     = 0;
+                UINT glInteropMarkerSize = sizeof (glInteropMarker);
+                BOOL bTargetFullscreen   = FALSE;
+
+                _SidecarLog (
+                  L"SKF1 target cache reassign: tid=%lu frame=%llu old_sc=%p new_sc=%p dims=%ux%u hdr=%ux%u copy=%ux%u fullscreen=%d gl_interop=%d reason=exact_backbuffer_match_d3d12",
+                    (unsigned long)GetCurrentThreadId (),
+                    (unsigned long long)frame,
+                    prev,
+                    pReal,
+                    (UINT)bbDesc.Width,
+                    bbDesc.Height,
+                    s_skf1.width,
+                    s_skf1.height,
+                    copyW12,
+                    copyH12,
+                    (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
+                    (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                                       &glInteropMarkerSize,
+                                                        &glInteropMarker )) &&
+                      glInteropMarkerSize == sizeof (glInteropMarker) &&
+                      glInteropMarker      == 1) ? 1 : 0
+                );
+
+                own_target = true;
+              }
+            }
+          }
+
+          if (! own_target)
           {
             UINT glInteropMarker     = 0;
             UINT glInteropMarkerSize = sizeof (glInteropMarker);
