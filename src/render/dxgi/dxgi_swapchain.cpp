@@ -1663,10 +1663,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
            (! d3d12_) &&
            (! bSkipPresentBaseCopy));
 
+        // In the wrapped GL interop path, wrapper Present is entered only after
+        // the GL present manager has already drawn the frame into the output
+        // backbuffer.  That makes the pre-PresentBase window the last mutable
+        // point for the current frame unless PresentBase() itself will overwrite
+        // the target.
         const bool defer_gl_interop_stage_f_until_post_presentbase =
           (is_gl_interop_swapchain &&
-           (presentbase_will_overwrite_real_backbuffer ||
-            (! recursive_gl_interop_passthrough_expected)));
+            presentbase_will_overwrite_real_backbuffer);
 
         const bool needs_scaled_gl_blit =
           (is_gl_interop_swapchain &&
@@ -2091,7 +2095,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               static std::atomic<bool> s_logged_stage_f_defer_once = false;
               if (!s_logged_stage_f_defer_once.exchange(true))
               {
-                _SidecarLog(L"SKF1 Stage F defer: sc=%p real_bb=%p bb=%ux%u hdr=%ux%u reason=mixed_gl_interop_wrapper_chain recursive_passthrough=%d presentbase_wrapper_copy_expected=%d gl_interop=%d",
+                _SidecarLog(L"SKF1 Stage F defer: sc=%p real_bb=%p bb=%ux%u hdr=%ux%u reason=presentbase_wrapper_copy_overwrite_risk recursive_passthrough=%d presentbase_wrapper_copy_expected=%d gl_interop=%d",
                             pReal, bb, bbDesc.Width, bbDesc.Height, s_skf1.width, s_skf1.height,
                             recursive_gl_interop_passthrough_expected ? 1 : 0,
                             presentbase_will_overwrite_real_backbuffer ? 1 : 0,
