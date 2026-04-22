@@ -1615,11 +1615,27 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         D3D11_TEXTURE2D_DESC bbDesc = { };
         bb->GetDesc (&bbDesc);
 
-        // copyW/copyH: clamp copy rect to min(backbuffer, header).
+        // copyW/copyH: clamp direct-copy rect to min(backbuffer, header).
         // When header dims are 0 (not yet published by producer), copyW/copyH will be 0
         // and the 64×64 minimum gate below will reject compositing until real dims arrive.
         const UINT copyW = (s_skf1.width  > 0u) ? std::min((UINT)bbDesc.Width,  s_skf1.width)  : 0u;
         const UINT copyH = (s_skf1.height > 0u) ? std::min((UINT)bbDesc.Height, s_skf1.height) : 0u;
+
+        UINT glInteropMarker     = 0;
+        UINT glInteropMarkerSize = sizeof (glInteropMarker);
+        const bool is_gl_interop_swapchain =
+          (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                             &glInteropMarkerSize,
+                                              &glInteropMarker )) &&
+            glInteropMarkerSize == sizeof (glInteropMarker) &&
+            glInteropMarker      == 1);
+
+        const bool needs_scaled_gl_blit =
+          (is_gl_interop_swapchain &&
+           (s_skf1.width != bbDesc.Width || s_skf1.height != bbDesc.Height));
+
+        const UINT uploadW = needs_scaled_gl_blit ? s_skf1.width  : copyW;
+        const UINT uploadH = needs_scaled_gl_blit ? s_skf1.height : copyH;
 
         // Per-second log: sc, bbWxH, hdrWxH, copyWxH, is_target, frame_counter.
         static ULONGLONG s_last_periodic_log_ms = 0;
@@ -1672,8 +1688,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           // prev == other    → another swapchain owns this slot (skip)
           if (prev == nullptr)
           {
-            UINT glInteropMarker     = 0;
-            UINT glInteropMarkerSize = sizeof (glInteropMarker);
             BOOL bTargetFullscreen   = FALSE;
 
             _SidecarLog (
@@ -1688,11 +1702,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 copyW,
                 copyH,
                 (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
-                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
-                                                   &glInteropMarkerSize,
-                                                    &glInteropMarker )) &&
-                  glInteropMarkerSize == sizeof (glInteropMarker) &&
-                  glInteropMarker      == 1) ? 1 : 0
+                is_gl_interop_swapchain ? 1 : 0
             );
           }
 
@@ -1713,8 +1723,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
               if (replaced == prev)
               {
-                UINT glInteropMarker     = 0;
-                UINT glInteropMarkerSize = sizeof (glInteropMarker);
                 BOOL bTargetFullscreen   = FALSE;
 
                 _SidecarLog (
@@ -1730,11 +1738,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                     copyW,
                     copyH,
                     (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
-                    (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
-                                                       &glInteropMarkerSize,
-                                                        &glInteropMarker )) &&
-                      glInteropMarkerSize == sizeof (glInteropMarker) &&
-                      glInteropMarker      == 1) ? 1 : 0
+                    is_gl_interop_swapchain ? 1 : 0
                 );
 
                 own_target = true;
@@ -1744,8 +1748,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (! own_target)
           {
-            UINT glInteropMarker     = 0;
-            UINT glInteropMarkerSize = sizeof (glInteropMarker);
             BOOL bTargetFullscreen   = FALSE;
 
             _SidecarLog (
@@ -1761,11 +1763,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 copyW,
                 copyH,
                 (SUCCEEDED (pReal->GetFullscreenState (&bTargetFullscreen, nullptr)) && bTargetFullscreen) ? 1 : 0,
-                (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
-                                                   &glInteropMarkerSize,
-                                                    &glInteropMarker )) &&
-                  glInteropMarkerSize == sizeof (glInteropMarker) &&
-                  glInteropMarker      == 1) ? 1 : 0
+                is_gl_interop_swapchain ? 1 : 0
             );
 
             bb->Release ();
@@ -1790,9 +1788,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
             bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
         {
-          // Texture must match the clamped copy rect, not full header dims.
+          // Texture normally matches the clamped direct-copy rect.
+          // For GL interop size mismatches, keep the full header-sized source so Stage F
+          // can scale it with a shader blit into the smaller presented backbuffer.
           if (s_skf1.tex == nullptr || s_skf1.texFmt != bbDesc.Format ||
-              s_skf1.texW != copyW || s_skf1.texH != copyH)
+              s_skf1.texW != uploadW || s_skf1.texH != uploadH)
           {
             if (s_skf1.tex != nullptr)
             {
@@ -1802,12 +1802,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
             if (!s_skf1.logged_tex_create.exchange(true))
             {
-              _SidecarLog(L"Attempting D3D11 texture creation: %ux%u format=%u", copyW, copyH, bbDesc.Format);
+              _SidecarLog(L"Attempting D3D11 texture creation: tex=%ux%u copy=%ux%u hdr=%ux%u format=%u scaled_gl=%d",
+                          uploadW, uploadH, copyW, copyH, s_skf1.width, s_skf1.height, bbDesc.Format,
+                          needs_scaled_gl_blit ? 1 : 0);
             }
 
             D3D11_TEXTURE2D_DESC tdesc = { };
-            tdesc.Width              = copyW;
-            tdesc.Height             = copyH;
+            tdesc.Width              = uploadW;
+            tdesc.Height             = uploadH;
             tdesc.MipLevels          = 1;
             tdesc.ArraySize          = 1;
             tdesc.Format             = bbDesc.Format;
@@ -1824,11 +1826,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             if (SUCCEEDED (hrTex) && s_skf1.tex != nullptr)
             {
               s_skf1.texFmt = bbDesc.Format;
-              s_skf1.texW   = copyW;
-              s_skf1.texH   = copyH;
+              s_skf1.texW   = uploadW;
+              s_skf1.texH   = uploadH;
               if (!s_skf1.logged_tex_success.exchange(true))
               {
-                _SidecarLog(L"Texture created successfully: tex=%p format=%u %ux%u", s_skf1.tex, s_skf1.texFmt, copyW, copyH);
+                _SidecarLog(L"Texture created successfully: tex=%p format=%u %ux%u", s_skf1.tex, s_skf1.texFmt, uploadW, uploadH);
               }
             }
             else
@@ -1852,9 +1854,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               _SidecarLog(msg);
             }
 
-            // maxH/maxW alias the clamped copy rect computed before format check.
-            const UINT maxH = copyH;
-            const UINT maxW = copyW;
+            // maxH/maxW alias the staged source dimensions selected above.
+            const UINT maxH = uploadH;
+            const UINT maxW = uploadW;
             const uint8_t* srcBase = s_skf1.view_ptr + s_skf1.data_offset;
             const size_t snapshot_bytes = (size_t)s_skf1.stride * (size_t)maxH;
             static std::vector <uint8_t> s_frame_snapshot;
@@ -2029,18 +2031,53 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               // Formats match - safe to use CopySubresourceRegion.
               // Use clamped copy rect (copyW×copyH), not full header dims.
               D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
+              const bool use_scaled_gl_blit =
+                (needs_scaled_gl_blit &&
+                 s_skf1.texW == s_skf1.width &&
+                 s_skf1.texH == s_skf1.height);
               static std::atomic<bool> s_logged_blit_details = false;
               if (!s_logged_blit_details.exchange(true))
               {
                 _SidecarLog(L"→ Blit destination: bb=%p (backbuffer from GetBuffer(0))", bb);
                 _SidecarLog(L"→ Backbuffer format: %u, Overlay format: %u", bbDesc.Format, s_skf1.texFmt);
                 _SidecarLog(L"→ No backbuffer clear performed (composite only)");
-                _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
+                _SidecarLog(use_scaled_gl_blit
+                              ? L"→ Using SK_D3D11_BltCopySurface (scaled GL interop mismatch)"
+                              : (bbDesc.SampleDesc.Count > 1u
+                                  ? L"→ Using SK_D3D11_BltCopySurface (MSAA backbuffer)"
+                                  : L"→ Using CopySubresourceRegion (formats match)"));
               }
               bool blit_executed = false;
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
 
-              if (bbDesc.SampleDesc.Count > 1u)
+              if (use_scaled_gl_blit)
+              {
+                static std::atomic<bool> s_logged_scaled_gl_blit_once = false;
+                if (!s_logged_scaled_gl_blit_once.exchange(true))
+                {
+                  _SidecarLog(L"SKF1 D3D11 composite: using scaled GL interop blit src=%ux%u dst=%ux%u hdr=%ux%u",
+                              s_skf1.texW, s_skf1.texH, bbDesc.Width, bbDesc.Height,
+                              s_skf1.width, s_skf1.height);
+                }
+
+                const ULONGLONG tBlt11 = GetTickCount64 ();
+                if (SK_D3D11_BltCopySurface (s_skf1.tex, bb, nullptr))
+                {
+                  blit_executed = true;
+                }
+                else
+                {
+                  static std::atomic<bool> s_logged_scaled_gl_blit_failure_once = false;
+                  if (!s_logged_scaled_gl_blit_failure_once.exchange(true))
+                  {
+                    _SidecarLog(L"SKF1 D3D11 skip: reason=SCALED_GL_BLT_FAILED src=%ux%u dst=%ux%u hdr=%ux%u",
+                                s_skf1.texW, s_skf1.texH, bbDesc.Width, bbDesc.Height,
+                                s_skf1.width, s_skf1.height);
+                  }
+                }
+                _LogSlowStage (L"D3D11.BltCopySurface", tBlt11);
+              }
+              else if (bbDesc.SampleDesc.Count > 1u)
               {
                 static std::atomic<bool> s_logged_msaa_blit_once = false;
                 if (!s_logged_msaa_blit_once.exchange(true))
@@ -2088,11 +2125,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                     bbDesc.Width,
                     bbDesc.Height,
                     (SUCCEEDED (pReal->GetFullscreenState (&bStageFFullscreen, nullptr)) && bStageFFullscreen) ? 1 : 0,
-                    (SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
-                                                       &glInteropMarkerSize,
-                                                        &glInteropMarker )) &&
-                      glInteropMarkerSize == sizeof (glInteropMarker) &&
-                      glInteropMarker      == 1) ? 1 : 0
+                    is_gl_interop_swapchain ? 1 : 0
                 );
 
                 // STAGE F OK
@@ -2117,8 +2150,13 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             if (s_last_overlay_log_frame.load () + 120 < frame)
             {
               s_last_overlay_log_frame.store (frame);
-              _SidecarLog (L"SKF1 composite: swapchain=%p bbfmt=%d w=%u h=%u counter=%ld", 
-                          pReal, (int)bbDesc.Format, (UINT)s_skf1.width, (UINT)s_skf1.height, (long)c1);
+              _SidecarLog (L"SKF1 composite: swapchain=%p bbfmt=%d bb=%ux%u hdr=%ux%u tex=%ux%u copy=%ux%u counter=%ld",
+                          pReal, (int)bbDesc.Format,
+                          bbDesc.Width, bbDesc.Height,
+                          (UINT)s_skf1.width, (UINT)s_skf1.height,
+                          s_skf1.texW, s_skf1.texH,
+                          copyW, copyH,
+                          (long)c1);
             }
           }
           else if (!overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr &&
