@@ -762,6 +762,9 @@ HRESULT
 STDMETHODCALLTYPE
 IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 {
+  if (SK_DXGI_ZeroCopy == -1)
+      SK_DXGI_ZeroCopy = (__SK_HDR_16BitSwap || __SK_HDR_10BitSwap);
+
   if (kEnableSKF1_PresentHitCounter)
   {
     InterlockedIncrement (&g_SKF1_PresentHits);
@@ -1569,6 +1572,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     (s_skf1.view_ptr != nullptr && s_skf1.width > 0 && s_skf1.height > 0 &&
      s_skf1.stride > 0 && s_skf1.pixel_format == 1);
 
+  bool    skf1_deferred_gl_interop_stage_f = false;
+  LONG    skf1_deferred_stage_f_counter    = 0;
+  ULONG64 skf1_deferred_stage_f_frame      = 0;
+
   if (skf1_stage_ef_ready)
   {
     static std::atomic<bool> s_logged_ef_entered = false;
@@ -1629,6 +1636,19 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                               &glInteropMarker )) &&
             glInteropMarkerSize == sizeof (glInteropMarker) &&
             glInteropMarker      == 1);
+
+        BOOL bSkipPresentBaseCopy = FALSE;
+        SK_DXGI_GetPrivateData ( pReal,
+          SKID_DXGI_SwapChainSkipBackbufferCopy_D3D11, sizeof (BOOL), &bSkipPresentBaseCopy
+        );
+
+        const bool presentbase_will_overwrite_real_backbuffer =
+          ((flip_model.isOverrideActive () || SK_DXGI_ZeroCopy == TRUE) &&
+           (! d3d12_) &&
+           (! bSkipPresentBaseCopy));
+
+        const bool defer_gl_interop_stage_f_until_post_presentbase =
+          (is_gl_interop_swapchain && presentbase_will_overwrite_real_backbuffer);
 
         const bool needs_scaled_gl_blit =
           (is_gl_interop_swapchain &&
@@ -2026,7 +2046,21 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
           {
-            if (s_skf1.texFmt == bbDesc.Format)
+            if (defer_gl_interop_stage_f_until_post_presentbase)
+            {
+              skf1_deferred_gl_interop_stage_f = true;
+              skf1_deferred_stage_f_counter    = c1;
+              skf1_deferred_stage_f_frame      = frame;
+
+              static std::atomic<bool> s_logged_stage_f_defer_once = false;
+              if (!s_logged_stage_f_defer_once.exchange(true))
+              {
+                _SidecarLog(L"SKF1 Stage F defer: sc=%p real_bb=%p bb=%ux%u hdr=%ux%u reason=PresentBase_overwrites_real_backbuffer gl_interop=%d",
+                            pReal, bb, bbDesc.Width, bbDesc.Height, s_skf1.width, s_skf1.height,
+                            is_gl_interop_swapchain ? 1 : 0);
+              }
+            }
+            else if (s_skf1.texFmt == bbDesc.Format)
             {
               // Formats match - safe to use CopySubresourceRegion.
               // Use clamped copy rect (copyW×copyH), not full header dims.
@@ -2142,10 +2176,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               }
             }
 
-            // Health signal: log successful composite periodically
-
-              // Health signal: log successful composite periodically
-            if (s_last_overlay_log_frame.load () + 120 < frame)
+            if (! defer_gl_interop_stage_f_until_post_presentbase &&
+                s_last_overlay_log_frame.load () + 120 < frame)
             {
               s_last_overlay_log_frame.store (frame);
               _SidecarLog (L"SKF1 composite: swapchain=%p bbfmt=%d bb=%ux%u hdr=%ux%u tex=%ux%u copy=%ux%u counter=%ld",
@@ -2854,6 +2886,152 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     SyncInterval = 0;
   }
   _LogSlowStage (L"PresentBase", tPresentBase);
+
+  if (skf1_deferred_gl_interop_stage_f &&
+      overlay_enabled                  &&
+      s_skf1.has_frame                 &&
+      s_skf1.tex != nullptr)
+  {
+    ID3D11Device*        dev11_post = nullptr;
+    ID3D11DeviceContext* ctx11_post = nullptr;
+
+    const ULONGLONG tGetDev11Post = GetTickCount64 ();
+    const HRESULT hrPostDev =
+      pReal->GetDevice (__uuidof (ID3D11Device), (void **)&dev11_post);
+    _LogSlowStage (L"D3D11.GetDevice.PostPresentBase", tGetDev11Post);
+
+    if (SUCCEEDED (hrPostDev) && dev11_post != nullptr)
+    {
+      dev11_post->GetImmediateContext (&ctx11_post);
+
+      ID3D11Texture2D* bb11_post = nullptr;
+
+      const ULONGLONG tGetBuf11Post = GetTickCount64 ();
+      const HRESULT hrPostBuffer =
+        pReal->GetBuffer (0, __uuidof (ID3D11Texture2D), (void **)&bb11_post);
+      _LogSlowStage (L"D3D11.GetBuffer.PostPresentBase", tGetBuf11Post);
+
+      if (SUCCEEDED (hrPostBuffer) && bb11_post != nullptr && ctx11_post != nullptr)
+      {
+        D3D11_TEXTURE2D_DESC bbDescPost = { };
+        bb11_post->GetDesc (&bbDescPost);
+
+        const UINT copyWPost = (s_skf1.width  > 0u) ? std::min((UINT)bbDescPost.Width,  s_skf1.width)  : 0u;
+        const UINT copyHPost = (s_skf1.height > 0u) ? std::min((UINT)bbDescPost.Height, s_skf1.height) : 0u;
+        const bool needs_scaled_gl_blit_post =
+          (s_skf1.width != bbDescPost.Width || s_skf1.height != bbDescPost.Height);
+
+        static std::atomic<bool> s_logged_stage_f_post_target_once = false;
+        if (!s_logged_stage_f_post_target_once.exchange(true))
+        {
+          _SidecarLog(L"SKF1 Stage F post-PresentBase target: sc=%p real_bb=%p bb=%ux%u hdr=%ux%u tex=%ux%u scaled=%d reason=wrapper_copy_overwrite_risk",
+                      pReal, bb11_post, bbDescPost.Width, bbDescPost.Height,
+                      s_skf1.width, s_skf1.height, s_skf1.texW, s_skf1.texH,
+                      needs_scaled_gl_blit_post ? 1 : 0);
+        }
+
+        if (s_skf1.texFmt == bbDescPost.Format && copyWPost >= 64u && copyHPost >= 64u)
+        {
+          D3D11_BOX srcBoxPost = { 0, 0, 0, copyWPost, copyHPost, 1 };
+          bool blit_executed_post = false;
+
+          if (needs_scaled_gl_blit_post &&
+              s_skf1.texW == s_skf1.width &&
+              s_skf1.texH == s_skf1.height)
+          {
+            const ULONGLONG tBlt11Post = GetTickCount64 ();
+            if (SK_D3D11_BltCopySurface (s_skf1.tex, bb11_post, nullptr))
+            {
+              blit_executed_post = true;
+            }
+            _LogSlowStage (L"D3D11.BltCopySurface.PostPresentBase", tBlt11Post);
+          }
+          else if (bbDescPost.SampleDesc.Count > 1u)
+          {
+            const ULONGLONG tBlt11Post = GetTickCount64 ();
+            if (SK_D3D11_BltCopySurface (s_skf1.tex, bb11_post, &srcBoxPost))
+            {
+              blit_executed_post = true;
+            }
+            _LogSlowStage (L"D3D11.BltCopySurface.PostPresentBase", tBlt11Post);
+          }
+          else
+          {
+            const ULONGLONG tCopySub11Post = GetTickCount64 ();
+            ctx11_post->CopySubresourceRegion (bb11_post, 0, 0, 0, 0, s_skf1.tex, 0, &srcBoxPost);
+            _LogSlowStage (L"D3D11.CopySubresourceRegion.PostPresentBase", tCopySub11Post);
+            blit_executed_post = true;
+          }
+
+          if (blit_executed_post)
+          {
+            BOOL bStageFFullscreenPost = FALSE;
+
+            _SidecarLog (
+              L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=1 backend=d3d11_post_presentbase",
+                (unsigned long)GetCurrentThreadId (),
+                (unsigned long long)skf1_deferred_stage_f_frame,
+                (long)skf1_deferred_stage_f_counter,
+                pReal,
+                bbDescPost.Width,
+                bbDescPost.Height,
+                (SUCCEEDED (pReal->GetFullscreenState (&bStageFFullscreenPost, nullptr)) && bStageFFullscreenPost) ? 1 : 0
+            );
+
+            if (!s_skf1.logged_stage_f_ok.exchange(true))
+            {
+              _SidecarLog(L"SKF1 Stage F OK: Blit executed");
+            }
+          }
+          else
+          {
+            static std::atomic<bool> s_logged_stage_f_post_blit_failure_once = false;
+            if (!s_logged_stage_f_post_blit_failure_once.exchange(true))
+            {
+              _SidecarLog(L"SKF1 Stage F post-PresentBase skip: reason=BLIT_FAILED bb=%ux%u hdr=%ux%u tex=%ux%u scaled=%d",
+                          bbDescPost.Width, bbDescPost.Height,
+                          s_skf1.width, s_skf1.height,
+                          s_skf1.texW, s_skf1.texH,
+                          needs_scaled_gl_blit_post ? 1 : 0);
+            }
+          }
+        }
+        else
+        {
+          static std::atomic<bool> s_logged_stage_f_post_precond_failure_once = false;
+          if (!s_logged_stage_f_post_precond_failure_once.exchange(true))
+          {
+            _SidecarLog(L"SKF1 Stage F post-PresentBase skip: reason=PRECONDITION_FAIL tex_fmt=%u bb_fmt=%u copy=%ux%u tex=%ux%u",
+                        s_skf1.texFmt, bbDescPost.Format, copyWPost, copyHPost,
+                        s_skf1.texW, s_skf1.texH);
+          }
+        }
+
+        bb11_post->Release ();
+      }
+      else
+      {
+        static std::atomic<bool> s_logged_stage_f_post_bb_failure_once = false;
+        if (!s_logged_stage_f_post_bb_failure_once.exchange(true))
+        {
+          _SidecarLog(L"SKF1 Stage F post-PresentBase skip: reason=BACKBUFFER_OR_CONTEXT_UNAVAILABLE hr_buffer=0x%08X bb=%p ctx=%p",
+                      hrPostBuffer, bb11_post, ctx11_post);
+        }
+      }
+    }
+    else
+    {
+      static std::atomic<bool> s_logged_stage_f_post_dev_failure_once = false;
+      if (!s_logged_stage_f_post_dev_failure_once.exchange(true))
+      {
+        _SidecarLog(L"SKF1 Stage F post-PresentBase skip: reason=DEVICE_UNAVAILABLE hr=0x%08X dev=%p",
+                    hrPostDev, dev11_post);
+      }
+    }
+
+    if (ctx11_post != nullptr) ctx11_post->Release ();
+    if (dev11_post != nullptr) dev11_post->Release ();
+  }
 
   return
     SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
