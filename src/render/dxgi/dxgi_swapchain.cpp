@@ -2063,7 +2063,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               (SK_DXGI_ZeroCopy == TRUE) ||
               (SK_DXGI_ZeroCopy == -1 && (__SK_HDR_16BitSwap || __SK_HDR_10BitSwap));
             ID3D11Texture2D* presentbase_src     = nullptr;
-            D3D11_TEXTURE2D_DESC compositeDesc   = bbDesc;
+            D3D11_TEXTURE2D_DESC presentbaseDesc = { };
+            bool presentbase_has_desc            = false;
 
             if ((flip_model.isOverrideActive () || zero_copy_active) &&
                 (! d3d12_) && (! bSkipCopy))
@@ -2078,16 +2079,24 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 {
                   presentbase_src = backbuffer0;
                   presentbase_src->AddRef ();
-                  presentbase_src->GetDesc (&compositeDesc);
+                  presentbase_src->GetDesc (&presentbaseDesc);
+                  presentbase_has_desc = true;
                 }
               }
             }
 
+            BOOL bWrappedForwardFullscreen = FALSE;
+            const bool wrapped_forward_fullscreen =
+              (presentbase_src != nullptr) &&
+              (SUCCEEDED (pReal->GetFullscreenState (&bWrappedForwardFullscreen, nullptr)) &&
+               bWrappedForwardFullscreen);
             const bool wrapped_forward_expected =
-              (presentbase_src != nullptr);
+              (wrapped_forward_fullscreen && presentbase_has_desc);
             ID3D11Texture2D* composite_dst    = wrapped_forward_expected ? presentbase_src : bb;
             const wchar_t*   composite_dst_kind =
               wrapped_forward_expected ? L"proxy" : L"real";
+            D3D11_TEXTURE2D_DESC compositeDesc =
+              wrapped_forward_expected ? presentbaseDesc : bbDesc;
 
             const UINT compositeCopyW = std::min (copyW, compositeDesc.Width);
             const UINT compositeCopyH = std::min (copyH, compositeDesc.Height);
@@ -2101,6 +2110,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               static std::atomic<bool> s_logged_blit_details = false;
               if (!s_logged_blit_details.exchange(true))
               {
+                _SidecarLog(L"→ Stage F wrapped-forward guard: candidate=%d fullscreen=%d active=%d",
+                  presentbase_src != nullptr ? 1 : 0,
+                  bWrappedForwardFullscreen ? 1 : 0,
+                  wrapped_forward_expected ? 1 : 0);
                 _SidecarLog(L"→ Stage F destination: kind=%ls ptr=%p wrapped_forward=%d", composite_dst_kind, composite_dst, wrapped_forward_expected ? 1 : 0);
                 _SidecarLog(L"→ Backbuffer format: %u, Overlay format: %u", compositeDesc.Format, s_skf1.texFmt);
                 _SidecarLog(L"→ No backbuffer clear performed (composite only)");
