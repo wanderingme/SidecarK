@@ -2112,8 +2112,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
               if (blit_executed)
               {
-                UINT glInteropMarker     = 0;
-                UINT glInteropMarkerSize = sizeof (glInteropMarker);
                 BOOL bStageFFullscreen   = FALSE;
 
                 _SidecarLog (
