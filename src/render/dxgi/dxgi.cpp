@@ -113,8 +113,7 @@ namespace
   SK_DXGI_ShouldPassthroughRecursiveGLInteropPresent (
     SK_DXGI_PresentSource Source,
     bool                  guard_active,
-    bool                  is_gl_interop_swapchain,
-    bool                  is_d3d11_backend
+    bool                  is_gl_interop_swapchain
   ) noexcept
   {
     // Fullscreen state is intentionally NOT part of this predicate.
@@ -127,7 +126,19 @@ namespace
     // fullscreen_active caused this passthrough to fail closed and let
     // SK's frame-end re-render execute on top of Stage F's composite.
     //
-    // The remaining four conditions already scope this narrowly to the
+    // A D3D11-backend term is also intentionally NOT part of this
+    // predicate. The GL-interop swapchain marker (SKID_DXGI_GL_Interop-
+    // SwapChain) is only ever attached to chains created by
+    // SK_GL_CreateInteropSwapChain, which exclusively produces D3D11
+    // swapchains, so is_gl_interop_swapchain == true already implies the
+    // backbuffer is owned by a D3D11 device on this code path. Gating
+    // additionally on _IsBackendD3D11 (rb.api) compared the *game*'s
+    // render API (which on a GL-hooked process is SK_RenderAPI::OpenGL
+    // == 0x0002, lacking the 0x0040 D3D11 bit) instead of the swapchain's
+    // device, so that term was guaranteed false on this exact path and
+    // caused the passthrough to fail closed.
+    //
+    // The remaining three conditions already scope this narrowly to the
     // exact recursion the wrapper-submit guard is designed to detect:
     // a wrapper-originated Present has just composited SKF1 onto the real
     // GL-interop backbuffer and is now invoking pReal->Present, which
@@ -135,8 +146,7 @@ namespace
     return
       Source == SK_DXGI_PresentSource::Hook &&
       guard_active                          &&
-      is_gl_interop_swapchain               &&
-      is_d3d11_backend;
+      is_gl_interop_swapchain;
   }
 
   constexpr bool
@@ -3316,8 +3326,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     SK_DXGI_ShouldPassthroughRecursiveGLInteropPresent (
       Source,
       wrapper_submit_guard_active,
-      is_gl_interop_swapchain,
-      _IsBackendD3D11 (rb.api)
+      is_gl_interop_swapchain
     );
 
   if (Source == SK_DXGI_PresentSource::Hook && wrapper_submit_guard_active)
