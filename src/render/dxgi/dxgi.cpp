@@ -196,6 +196,50 @@ namespace
                 dxgi_fullscreen       ? 1 : 0,
                 passthrough_fast_path ? 1 : 0
     );
+
+    // Also mirror to %TEMP%\SidecarK_Overlay.log, which is the diagnostic
+    // sink the rest of the SKF1 telemetry (Stage A..F, Present correlate,
+    // ctrl map, etc.) writes to via direct fwprintf. SK_LOGi0 alone routes
+    // this line to SK's standard logs/dxgi.log, which is a different file
+    // than the one operators audit for SKF1 evidence -- meaning the
+    // recursive-passthrough predicate's runtime behavior was previously
+    // unobservable from the audit log even when it was firing.
+    wchar_t path [MAX_PATH] = { };
+    DWORD cch = GetTempPathW (MAX_PATH, path);
+    if (cch == 0 || cch >= MAX_PATH)
+      return;
+
+    wcsncat_s (path, _countof (path), L"SidecarK_Overlay.log", _TRUNCATE);
+
+    FILE* f = nullptr;
+    _wfopen_s (&f, path, L"a+,ccs=UTF-8");
+    if (f == nullptr)
+      return;
+
+    SYSTEMTIME st = { };
+    GetLocalTime (&st);
+
+    fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu ",
+              st.wYear, st.wMonth, st.wDay,
+              st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+              (unsigned long)GetCurrentProcessId ());
+
+    fwprintf (
+      f,
+      L"SKF1 recursion: event=%ws tid=%lu sc=%p source=%ws guard=%d gl_interop=%d d3d11=%d true_fs=%d dxgi_fs=%d passthrough=%d\n",
+        wszEvent != nullptr ? wszEvent : L"<null>",
+          (unsigned long)GetCurrentThreadId (),
+            pSwapChain,
+              Source == SK_DXGI_PresentSource::Wrapper ? L"wrapper" : L"hook",
+                guard_active          ? 1 : 0,
+                is_gl_interop         ? 1 : 0,
+                is_d3d11_backend      ? 1 : 0,
+                true_fullscreen       ? 1 : 0,
+                dxgi_fullscreen       ? 1 : 0,
+                passthrough_fast_path ? 1 : 0
+    );
+
+    fclose (f);
   }
 
   class SK_DXGI_WrapperSubmitScope
