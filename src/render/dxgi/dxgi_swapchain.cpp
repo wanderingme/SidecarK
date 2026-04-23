@@ -1656,6 +1656,39 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                         nullptr, SK_DXGI_PresentSource::Wrapper );
         }
 
+        // GL interop sidecar exclusion: in the mixed GL/DXGI wrapped present path,
+        // Special K creates a DXGI swapchain purely as an interop sidecar for
+        // GL→DX presentation (see SK_GL_CreateInteropSwapChain).  It is tagged
+        // with SKID_DXGI_GL_InteropSwapChain == 1 via SetPrivateData.  That
+        // sidecar chain's backbuffer is NOT what DWM scans out for the visible
+        // HWND (the GL HDC is).  If it wins the one-shot s_target_swapchain CAS
+        // below, Stage F composite succeeds but paints onto a backbuffer the
+        // user never sees, yielding "interactive but invisible" overlay.
+        //
+        // Exclude it from ever claiming the persistent target, and fall through
+        // to the normal wrapper passthrough.  This has no effect on the
+        // single-swapchain D3D11 path (no marker is set on game-owned chains).
+        {
+          UINT glInteropMarker     = 0;
+          UINT glInteropMarkerSize = sizeof (glInteropMarker);
+          const bool is_gl_interop_sidecar =
+            ( SUCCEEDED (pReal->GetPrivateData ( SKID_DXGI_GL_InteropSwapChain,
+                                                 &glInteropMarkerSize,
+                                                  &glInteropMarker )) &&
+              glInteropMarkerSize == sizeof (glInteropMarker) &&
+              glInteropMarker      == 1 );
+
+          if (is_gl_interop_sidecar)
+          {
+            bb->Release ();
+            ctx->Release ();
+            dev->Release ();
+            return
+              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+          }
+        }
+
         // Target-swapchain gate: claim if unclaimed, skip if another swapchain is already
         // the target. Uses a single CAS to avoid races between concurrent presents.
         {
