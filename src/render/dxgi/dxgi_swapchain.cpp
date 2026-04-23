@@ -119,6 +119,10 @@ static bool SK_SKF1_EnsureComposeD3D11 (ID3D11Device* dev)
   if (! s_resolved)
   {
     s_resolved = true;
+    // Intentionally leak the module handle for the process lifetime.  The
+    // function pointer we resolve below must remain valid every Present, so
+    // we deliberately do not FreeLibrary here; d3dcompiler_*.dll is small
+    // and the leak is bounded to exactly one module reference.
     HMODULE hDll = LoadLibraryW (L"d3dcompiler_47.dll");
     if (hDll == nullptr) hDll = LoadLibraryW (L"d3dcompiler_46.dll");
     if (hDll == nullptr) hDll = LoadLibraryW (L"d3dcompiler_43.dll");
@@ -2085,7 +2089,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             tdesc.SampleDesc.Count   = 1;
             tdesc.SampleDesc.Quality = 0;
             tdesc.Usage              = D3D11_USAGE_DEFAULT;       // DEFAULT: valid source for sampling + CopySubresourceRegion
-            tdesc.BindFlags          = D3D11_BIND_SHADER_RESOURCE; // Required for sampling in premult-OVER composite
+            tdesc.BindFlags          = D3D11_BIND_SHADER_RESOURCE; // Required for sampling in premultiplied-OVER composite
             tdesc.CPUAccessFlags     = 0;                          // No CPU access needed (UpdateSubresource handles upload)
             tdesc.MiscFlags          = 0;
 
