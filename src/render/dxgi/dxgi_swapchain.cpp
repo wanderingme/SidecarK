@@ -1981,64 +1981,17 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               // Formats match - safe to use CopySubresourceRegion.
               // Use clamped copy rect (copyW×copyH), not full header dims.
               D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
-
-              // Pick the correct composite destination:
-              //   When the wrapper uses a proxy back buffer (flip-model
-              //   override or HDR ZeroCopy), IWrapDXGISwapChain::GetBuffer(0)
-              //   hands out _backbuffers[0] to callers (the game, or the GL
-              //   interop's output RTV), and PresentBase() later does
-              //   CopyResource(real_bb, _backbuffers[0]) BEFORE the real
-              //   Present.  If Stage F targeted pReal's back buffer, that
-              //   subsequent proxy→real copy would overwrite the overlay.
-              //   Target the proxy here so the existing PresentBase copy
-              //   carries the composited overlay into the real back buffer.
-              //
-              //   This is especially important for the mixed GL/DXGI wrapped
-              //   present path: there the GL-created interop swap chain has
-              //   flip_model.active=true but native=false (the GL game is
-              //   not a native DXGI presenter), so isOverrideActive() is
-              //   true and the proxy is always in play.
-              //
-              //   In the known-good windowed D3D11 flow where the game
-              //   natively created a flip-model swap chain, native=true and
-              //   isOverrideActive() is false, so this falls through to the
-              //   previous behavior (composite onto the real back buffer)
-              //   and nothing changes.
-              ID3D11Texture2D*             bbComposite         = bb;
-              SK_ComPtr <ID3D11Texture2D>  bbCompositeProxy;
-              {
-                std::scoped_lock lock (_backbufferLock);
-                if ((flip_model.isOverrideActive () || SK_DXGI_ZeroCopy == TRUE) &&
-                    (! d3d12_) &&
-                    _backbuffers.contains (0) &&
-                    _backbuffers [0].p != nullptr)
-                {
-                  D3D11_TEXTURE2D_DESC proxyDesc = { };
-                  _backbuffers [0]->GetDesc (&proxyDesc);
-
-                  // Dimensions must match the swap chain back buffer;
-                  // format need only be in the same type group for
-                  // CopySubresourceRegion (the proxy is typically typeless).
-                  if (proxyDesc.Width  == bbDesc.Width &&
-                      proxyDesc.Height == bbDesc.Height)
-                  {
-                    bbCompositeProxy = _backbuffers [0].p;
-                    bbComposite      = bbCompositeProxy.p;
-                  }
-                }
-              }
-
               static std::atomic<bool> s_logged_blit_details = false;
               if (!s_logged_blit_details.exchange(true))
               {
-                _SidecarLog(L"→ Blit destination: dest=%p proxy=%d (real bb=%p)", bbComposite, (bbCompositeProxy.p != nullptr) ? 1 : 0, bb);
+                _SidecarLog(L"→ Blit destination: bb=%p (backbuffer from GetBuffer(0))", bb);
                 _SidecarLog(L"→ Backbuffer format: %u, Overlay format: %u", bbDesc.Format, s_skf1.texFmt);
                 _SidecarLog(L"→ No backbuffer clear performed (composite only)");
                 _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
               }
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
                const ULONGLONG tCopySub11 = GetTickCount64 ();
-               ctx->CopySubresourceRegion (bbComposite, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
+               ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
                _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
 
                UINT glInteropMarker     = 0;
