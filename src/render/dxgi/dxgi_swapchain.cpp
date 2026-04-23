@@ -42,6 +42,308 @@ static volatile LONG g_SKF1_HeaderReject = 0;
 static volatile LONG g_SKF1_SeqMismatch  = 0;
 static volatile LONG g_SKF1_CompositeHit = 0;
 
+// ----------------------------------------------------------------------------
+// SKF1 D3D11 Stage F — premultiplied-alpha OVER composite resources.
+//
+// The SKF1 producer (SidecarKHost) publishes frames as PREMULTIPLIED BGRA
+// (alpha_mode == 1).  The GL consumer composites these with a matching OVER
+// blend (GL_ONE, GL_ONE_MINUS_SRC_ALPHA); the D3D11 Stage F path historically
+// used a raw CopySubresourceRegion, which treats transparent regions as a
+// flat (0,0,0,0) replacement instead of blending them — yielding a
+// structurally valid but visually null composite on the mixed GL/DXGI path.
+//
+// These file-scope resources implement the matching D3D11 OVER blend.  They
+// are tied to the first device we see via dev_owner; on device change we
+// release and re-create.  D3DCompile is dynamically resolved from
+// d3dcompiler_47.dll — when unavailable we cleanly fall back to the raw copy
+// path so behavior never regresses below the previous implementation.
+// ----------------------------------------------------------------------------
+struct SKF1_ComposeD3D11_t {
+  ID3D11Device*            dev_owner = nullptr; // non-owning weak ref
+  ID3D11VertexShader*      vs        = nullptr;
+  ID3D11PixelShader*       ps        = nullptr;
+  ID3D11BlendState*        blend     = nullptr;
+  ID3D11SamplerState*      sampler   = nullptr;
+  ID3D11RasterizerState*   raster    = nullptr;
+  ID3D11DepthStencilState* depth     = nullptr;
+  bool                     init_failed = false; // sticky: don't retry compile every Present
+};
+
+static SKF1_ComposeD3D11_t g_skf1_compose11 = { };
+
+static void SK_SKF1_ReleaseComposeD3D11 (void)
+{
+  if (g_skf1_compose11.depth)   { g_skf1_compose11.depth->Release   (); g_skf1_compose11.depth   = nullptr; }
+  if (g_skf1_compose11.raster)  { g_skf1_compose11.raster->Release  (); g_skf1_compose11.raster  = nullptr; }
+  if (g_skf1_compose11.sampler) { g_skf1_compose11.sampler->Release (); g_skf1_compose11.sampler = nullptr; }
+  if (g_skf1_compose11.blend)   { g_skf1_compose11.blend->Release   (); g_skf1_compose11.blend   = nullptr; }
+  if (g_skf1_compose11.ps)      { g_skf1_compose11.ps->Release      (); g_skf1_compose11.ps      = nullptr; }
+  if (g_skf1_compose11.vs)      { g_skf1_compose11.vs->Release      (); g_skf1_compose11.vs      = nullptr; }
+  g_skf1_compose11.dev_owner   = nullptr;
+  g_skf1_compose11.init_failed = false;
+}
+
+// Lazy-init the composite resources for `dev`.  Returns true if the pipeline
+// is ready to be used; false means the caller should fall back to the raw
+// CopySubresourceRegion path (e.g. D3DCompile unavailable or shader failed).
+static bool SK_SKF1_EnsureComposeD3D11 (ID3D11Device* dev)
+{
+  if (dev == nullptr)
+    return false;
+
+  // Reset on device change
+  if (g_skf1_compose11.dev_owner != nullptr && g_skf1_compose11.dev_owner != dev)
+    SK_SKF1_ReleaseComposeD3D11 ();
+
+  if (g_skf1_compose11.init_failed)
+    return false;
+
+  if (g_skf1_compose11.vs      != nullptr &&
+      g_skf1_compose11.ps      != nullptr &&
+      g_skf1_compose11.blend   != nullptr &&
+      g_skf1_compose11.sampler != nullptr &&
+      g_skf1_compose11.raster  != nullptr &&
+      g_skf1_compose11.depth   != nullptr)
+  {
+    return true;
+  }
+
+  // Dynamically resolve D3DCompile so we don't take a link-time dep on
+  // d3dcompiler.lib.  d3dcompiler_47.dll ships with every supported Windows.
+  typedef HRESULT (WINAPI *D3DCompile_pfn)(
+    LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*,
+    LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
+
+  static D3DCompile_pfn pfnD3DCompile = nullptr;
+  static bool           s_resolved    = false;
+  if (! s_resolved)
+  {
+    s_resolved = true;
+    HMODULE hDll = LoadLibraryW (L"d3dcompiler_47.dll");
+    if (hDll == nullptr) hDll = LoadLibraryW (L"d3dcompiler_46.dll");
+    if (hDll == nullptr) hDll = LoadLibraryW (L"d3dcompiler_43.dll");
+    if (hDll != nullptr)
+      pfnD3DCompile = (D3DCompile_pfn)GetProcAddress (hDll, "D3DCompile");
+  }
+
+  if (pfnD3DCompile == nullptr)
+  {
+    g_skf1_compose11.init_failed = true;
+    return false;
+  }
+
+  // Fullscreen triangle via SV_VertexID — no vertex/index buffer, no input
+  // layout needed.  Pixel shader samples the SKF1 overlay texture; the
+  // premultiplied-OVER math (dst = src + dst*(1-src.a)) is done by the blend
+  // state, so the PS just returns the sampled texel unchanged.
+  static const char kComposeHLSL[] =
+    "Texture2D    tex  : register(t0);\n"
+    "SamplerState samp : register(s0);\n"
+    "struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };\n"
+    "VSOut vs_main (uint id : SV_VertexID) {\n"
+    "  VSOut o;\n"
+    "  float2 uv = float2 ((id << 1) & 2, id & 2);\n"
+    "  o.uv  = uv;\n"
+    "  o.pos = float4 (uv * float2 (2.0, -2.0) + float2 (-1.0, 1.0), 0.0, 1.0);\n"
+    "  return o;\n"
+    "}\n"
+    "float4 ps_main (VSOut i) : SV_TARGET {\n"
+    "  return tex.Sample (samp, i.uv);\n"
+    "}\n";
+
+  ID3DBlob* vsBlob = nullptr;
+  ID3DBlob* psBlob = nullptr;
+  ID3DBlob* errBlob = nullptr;
+  HRESULT hr;
+
+  hr = pfnD3DCompile (kComposeHLSL, sizeof (kComposeHLSL) - 1, "skf1_compose.hlsl",
+                      nullptr, nullptr, "vs_main", "vs_4_0", 0, 0, &vsBlob, &errBlob);
+  if (errBlob) { errBlob->Release (); errBlob = nullptr; }
+  if (FAILED (hr) || vsBlob == nullptr)
+  {
+    g_skf1_compose11.init_failed = true;
+    return false;
+  }
+
+  hr = pfnD3DCompile (kComposeHLSL, sizeof (kComposeHLSL) - 1, "skf1_compose.hlsl",
+                      nullptr, nullptr, "ps_main", "ps_4_0", 0, 0, &psBlob, &errBlob);
+  if (errBlob) { errBlob->Release (); errBlob = nullptr; }
+  if (FAILED (hr) || psBlob == nullptr)
+  {
+    vsBlob->Release ();
+    g_skf1_compose11.init_failed = true;
+    return false;
+  }
+
+  hr = dev->CreateVertexShader (vsBlob->GetBufferPointer (), vsBlob->GetBufferSize (),
+                                nullptr, &g_skf1_compose11.vs);
+  if (FAILED (hr))
+  {
+    vsBlob->Release (); psBlob->Release ();
+    g_skf1_compose11.init_failed = true;
+    return false;
+  }
+
+  hr = dev->CreatePixelShader (psBlob->GetBufferPointer (), psBlob->GetBufferSize (),
+                               nullptr, &g_skf1_compose11.ps);
+  vsBlob->Release ();
+  psBlob->Release ();
+  if (FAILED (hr))
+  {
+    SK_SKF1_ReleaseComposeD3D11 ();
+    g_skf1_compose11.init_failed = true;
+    return false;
+  }
+
+  // Premultiplied-alpha OVER blend: matches GL_ONE / GL_ONE_MINUS_SRC_ALPHA
+  // used by the GL consumer.  RGB: src*1 + dst*(1-src.a).  Alpha combines
+  // the same way so downstream consumers of the backbuffer alpha channel see
+  // a consistent compositing result.
+  D3D11_BLEND_DESC bd = { };
+  bd.AlphaToCoverageEnable                 = FALSE;
+  bd.IndependentBlendEnable                = FALSE;
+  bd.RenderTarget [0].BlendEnable          = TRUE;
+  bd.RenderTarget [0].SrcBlend             = D3D11_BLEND_ONE;
+  bd.RenderTarget [0].DestBlend            = D3D11_BLEND_INV_SRC_ALPHA;
+  bd.RenderTarget [0].BlendOp              = D3D11_BLEND_OP_ADD;
+  bd.RenderTarget [0].SrcBlendAlpha        = D3D11_BLEND_ONE;
+  bd.RenderTarget [0].DestBlendAlpha       = D3D11_BLEND_INV_SRC_ALPHA;
+  bd.RenderTarget [0].BlendOpAlpha         = D3D11_BLEND_OP_ADD;
+  bd.RenderTarget [0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+
+  if (FAILED (dev->CreateBlendState (&bd, &g_skf1_compose11.blend)))
+  {
+    SK_SKF1_ReleaseComposeD3D11 ();
+    g_skf1_compose11.init_failed = true;
+    return false;
+  }
+
+  D3D11_SAMPLER_DESC sd = { };
+  sd.Filter         = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+  sd.AddressU       = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sd.AddressV       = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sd.AddressW       = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+  sd.MinLOD         = 0.0f;
+  sd.MaxLOD         = D3D11_FLOAT32_MAX;
+  if (FAILED (dev->CreateSamplerState (&sd, &g_skf1_compose11.sampler)))
+  {
+    SK_SKF1_ReleaseComposeD3D11 ();
+    g_skf1_compose11.init_failed = true;
+    return false;
+  }
+
+  D3D11_RASTERIZER_DESC rd = { };
+  rd.FillMode              = D3D11_FILL_SOLID;
+  rd.CullMode              = D3D11_CULL_NONE;     // fullscreen tri, no culling
+  rd.FrontCounterClockwise = FALSE;
+  rd.DepthClipEnable       = TRUE;
+  rd.ScissorEnable         = FALSE;
+  rd.MultisampleEnable     = FALSE;
+  rd.AntialiasedLineEnable = FALSE;
+  if (FAILED (dev->CreateRasterizerState (&rd, &g_skf1_compose11.raster)))
+  {
+    SK_SKF1_ReleaseComposeD3D11 ();
+    g_skf1_compose11.init_failed = true;
+    return false;
+  }
+
+  D3D11_DEPTH_STENCIL_DESC dsd = { };
+  dsd.DepthEnable    = FALSE;
+  dsd.StencilEnable  = FALSE;
+  dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+  dsd.DepthFunc      = D3D11_COMPARISON_ALWAYS;
+  if (FAILED (dev->CreateDepthStencilState (&dsd, &g_skf1_compose11.depth)))
+  {
+    SK_SKF1_ReleaseComposeD3D11 ();
+    g_skf1_compose11.init_failed = true;
+    return false;
+  }
+
+  g_skf1_compose11.dev_owner = dev;
+  return true;
+}
+
+// Returns true if the draw succeeded (pixels were blended into `bb`).  Caller
+// is responsible for state save/restore around this call.
+static bool SK_SKF1_ComposeOverlayPremultiplied_D3D11 (
+  ID3D11Device*             dev,
+  ID3D11DeviceContext*      ctx,
+  ID3D11Texture2D*          bb,
+  ID3D11ShaderResourceView* srcSRV,
+  UINT                      bbW,
+  UINT                      bbH,
+  DXGI_FORMAT               bbFormat)
+{
+  if (dev == nullptr || ctx == nullptr || bb == nullptr || srcSRV == nullptr)
+    return false;
+
+  if (! SK_SKF1_EnsureComposeD3D11 (dev))
+    return false;
+
+  // Create an RTV for the backbuffer with the same UNORM format we entered
+  // the Stage F block with.  This matches the GL path's linear write path
+  // (no automatic gamma conversion).
+  ID3D11RenderTargetView* rtv = nullptr;
+  D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = { };
+  rtvDesc.Format        = bbFormat;
+  rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+  rtvDesc.Texture2D.MipSlice = 0;
+  if (FAILED (dev->CreateRenderTargetView (bb, &rtvDesc, &rtv)) || rtv == nullptr)
+    return false;
+
+  // Unbind any SRVs on the pixel stage that might alias `bb` to keep the
+  // runtime quiet when the same resource is in use elsewhere.
+  ID3D11ShaderResourceView* nullSRVs [8] = { };
+  ctx->PSSetShaderResources (0, 8, nullSRVs);
+
+  ctx->OMSetRenderTargets (1, &rtv, nullptr);
+
+  D3D11_VIEWPORT vp = { };
+  vp.TopLeftX = 0.0f;
+  vp.TopLeftY = 0.0f;
+  vp.Width    = (FLOAT)bbW;
+  vp.Height   = (FLOAT)bbH;
+  vp.MinDepth = 0.0f;
+  vp.MaxDepth = 1.0f;
+  ctx->RSSetViewports (1, &vp);
+  ctx->RSSetScissorRects (0, nullptr);
+  ctx->RSSetState (g_skf1_compose11.raster);
+
+  const FLOAT blendFactor [4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+  ctx->OMSetBlendState (g_skf1_compose11.blend, blendFactor, 0xFFFFFFFFu);
+  ctx->OMSetDepthStencilState (g_skf1_compose11.depth, 0);
+
+  ctx->IASetInputLayout  (nullptr);
+  ctx->IASetPrimitiveTopology (D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  ID3D11Buffer* nullVB [1] = { nullptr };
+  UINT strides [1] = { 0 };
+  UINT offsets [1] = { 0 };
+  ctx->IASetVertexBuffers (0, 1, nullVB, strides, offsets);
+  ctx->IASetIndexBuffer   (nullptr, DXGI_FORMAT_UNKNOWN, 0);
+
+  ctx->VSSetShader (g_skf1_compose11.vs, nullptr, 0);
+  ctx->GSSetShader (nullptr, nullptr, 0);
+  ctx->HSSetShader (nullptr, nullptr, 0);
+  ctx->DSSetShader (nullptr, nullptr, 0);
+  ctx->PSSetShader (g_skf1_compose11.ps, nullptr, 0);
+
+  ctx->PSSetShaderResources (0, 1, &srcSRV);
+  ctx->PSSetSamplers        (0, 1, &g_skf1_compose11.sampler);
+
+  ctx->Draw (3, 0);
+
+  // Detach the RTV from the context so `rtv->Release()` actually decrements
+  // to zero; otherwise the state block restore below is what would do it.
+  ID3D11RenderTargetView* nullRTV [1] = { nullptr };
+  ctx->OMSetRenderTargets (1, nullRTV, nullptr);
+  ID3D11ShaderResourceView* nullSRV [1] = { nullptr };
+  ctx->PSSetShaderResources (0, 1, nullSRV);
+
+  rtv->Release ();
+  return true;
+}
+
 std::atomic_bool g_dxgi_present_seen{ false };
 
 std::atomic_bool g_dxgi_overlay_owner{ false };
@@ -1002,10 +1304,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     ULONGLONG stale_counter_since = 0;
 
     // D3D11 resources
-    ID3D11Texture2D* tex = nullptr;
-    DXGI_FORMAT      texFmt = DXGI_FORMAT_UNKNOWN;
-    UINT             texW = 0;
-    UINT             texH = 0;
+    ID3D11Texture2D*         tex    = nullptr;
+    ID3D11ShaderResourceView* srv   = nullptr;
+    DXGI_FORMAT               texFmt = DXGI_FORMAT_UNKNOWN;
+    UINT                      texW   = 0;
+    UINT                      texH   = 0;
 
     // One-time transition markers
     std::atomic_bool logged_enabled_on = false;
@@ -1126,6 +1429,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
   auto _ReleaseMappedOverlay = [&]()
   {
+    if (s_skf1.srv != nullptr)
+    {
+      s_skf1.srv->Release ();
+      s_skf1.srv = nullptr;
+    }
+
     if (s_skf1.tex != nullptr)
     {
       s_skf1.tex->Release ();
@@ -1541,6 +1850,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       s_skf1.pixel_format = lf;
       if (s_skf1.tex != nullptr)
       {
+        if (s_skf1.srv != nullptr)
+        {
+          s_skf1.srv->Release ();
+          s_skf1.srv = nullptr;
+        }
         s_skf1.tex->Release ();
         s_skf1.tex    = nullptr;
         s_skf1.texFmt = DXGI_FORMAT_UNKNOWN;
@@ -1748,6 +2062,11 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           {
             if (s_skf1.tex != nullptr)
             {
+              if (s_skf1.srv != nullptr)
+              {
+                s_skf1.srv->Release ();
+                s_skf1.srv = nullptr;
+              }
               s_skf1.tex->Release ();
               s_skf1.tex = nullptr;
             }
@@ -1765,8 +2084,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             tdesc.Format             = bbDesc.Format;
             tdesc.SampleDesc.Count   = 1;
             tdesc.SampleDesc.Quality = 0;
-            tdesc.Usage              = D3D11_USAGE_DEFAULT;       // DEFAULT: valid source for CopySubresourceRegion
-            tdesc.BindFlags          = D3D11_BIND_SHADER_RESOURCE; // Required by DEFAULT usage
+            tdesc.Usage              = D3D11_USAGE_DEFAULT;       // DEFAULT: valid source for sampling + CopySubresourceRegion
+            tdesc.BindFlags          = D3D11_BIND_SHADER_RESOURCE; // Required for sampling in premult-OVER composite
             tdesc.CPUAccessFlags     = 0;                          // No CPU access needed (UpdateSubresource handles upload)
             tdesc.MiscFlags          = 0;
 
@@ -1778,9 +2097,29 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               s_skf1.texFmt = bbDesc.Format;
               s_skf1.texW   = copyW;
               s_skf1.texH   = copyH;
+
+              // Create the SRV used by the premultiplied-OVER composite draw.
+              // Sampling reads linear bytes from the UNORM texture; final output
+              // goes into the UNORM backbuffer RTV, matching the GL path's
+              // "no gamma conversion, alpha blend in source space" semantics.
+              D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = { };
+              srvDesc.Format                    = bbDesc.Format;
+              srvDesc.ViewDimension             = D3D11_SRV_DIMENSION_TEXTURE2D;
+              srvDesc.Texture2D.MostDetailedMip = 0;
+              srvDesc.Texture2D.MipLevels       = 1;
+              HRESULT hrSrv = dev->CreateShaderResourceView (s_skf1.tex, &srvDesc, &s_skf1.srv);
+              if (FAILED (hrSrv) || s_skf1.srv == nullptr)
+              {
+                static std::atomic<bool> s_logged_srv_fail = false;
+                if (!s_logged_srv_fail.exchange(true))
+                {
+                  _SidecarLog(L"SKF1 SRV creation FAILED: hr=0x%08X srv=%p fmt=%u", hrSrv, (void*)s_skf1.srv, bbDesc.Format);
+                }
+              }
+
               if (!s_skf1.logged_tex_success.exchange(true))
               {
-                _SidecarLog(L"Texture created successfully: tex=%p format=%u %ux%u", s_skf1.tex, s_skf1.texFmt, copyW, copyH);
+                _SidecarLog(L"Texture created successfully: tex=%p format=%u %ux%u srv=%p", s_skf1.tex, s_skf1.texFmt, copyW, copyH, (void*)s_skf1.srv);
               }
             }
             else
@@ -1978,28 +2317,74 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           {
             if (s_skf1.texFmt == bbDesc.Format)
             {
-              // Formats match - safe to use CopySubresourceRegion.
-              // Use clamped copy rect (copyW×copyH), not full header dims.
-              D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
+              // Formats match.  Compose with a premultiplied-alpha OVER blend
+              // (src*1 + dst*(1-src.a)) to match the GL path's semantics; the
+              // producer publishes premultiplied BGRA, so a raw subresource
+              // copy would stomp the backbuffer with (0,0,0,0) under
+              // transparent regions and produce a visually null overlay.
+              //
+              // If shader infra fails to initialize (e.g. d3dcompiler not
+              // available) we fall back to the historical raw copy so we
+              // never regress below previous behavior.
               static std::atomic<bool> s_logged_blit_details = false;
               if (!s_logged_blit_details.exchange(true))
               {
                 _SidecarLog(L"→ Blit destination: bb=%p (backbuffer from GetBuffer(0))", bb);
                 _SidecarLog(L"→ Backbuffer format: %u, Overlay format: %u", bbDesc.Format, s_skf1.texFmt);
                 _SidecarLog(L"→ No backbuffer clear performed (composite only)");
-                _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
               }
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
-               const ULONGLONG tCopySub11 = GetTickCount64 ();
-               ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
-               _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
+
+              bool composed_via_blend = false;
+
+              if (s_skf1.srv != nullptr && SK_SKF1_EnsureComposeD3D11 (dev))
+              {
+                // Save the game's full pipeline state, do the OVER draw,
+                // then restore.  ApplyStateblock also Releases all the refs
+                // CreateStateblock captured, so this is leak-safe.
+                D3DX11_STATE_BLOCK sb = { };
+                CreateStateblock (ctx, &sb);
+
+                const ULONGLONG tCompose11 = GetTickCount64 ();
+                composed_via_blend =
+                  SK_SKF1_ComposeOverlayPremultiplied_D3D11 (
+                    dev, ctx, bb, s_skf1.srv,
+                    bbDesc.Width, bbDesc.Height, bbDesc.Format);
+                _LogSlowStage (L"D3D11.ComposePremultiplied", tCompose11);
+
+                ApplyStateblock (ctx, &sb);
+
+                static std::atomic<bool> s_logged_compose_path = false;
+                if (!s_logged_compose_path.exchange(true))
+                {
+                  _SidecarLog(L"→ Using premultiplied-OVER blend composite (composed=%d srv=%p)",
+                              composed_via_blend ? 1 : 0, (void*)s_skf1.srv);
+                }
+              }
+
+              if (! composed_via_blend)
+              {
+                // Fallback: raw subresource copy (original behavior).  Kept as
+                // a safety net — on systems missing d3dcompiler_*.dll the
+                // overlay still composites in the previous form instead of
+                // disappearing entirely.
+                static std::atomic<bool> s_logged_fallback = false;
+                if (!s_logged_fallback.exchange(true))
+                {
+                  _SidecarLog(L"→ Compose fallback: CopySubresourceRegion (blend-compose unavailable)");
+                }
+                D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
+                const ULONGLONG tCopySub11 = GetTickCount64 ();
+                ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
+                _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
+              }
 
                UINT glInteropMarker     = 0;
                UINT glInteropMarkerSize = sizeof (glInteropMarker);
                BOOL bStageFFullscreen   = FALSE;
 
                _SidecarLog (
-                 L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=%d backend=d3d11",
+                 L"SKF1 Stage F correlate: tid=%lu frame=%llu counter=%ld sc=%p bb=%ux%u fullscreen=%d gl_interop=%d backend=d3d11 compose=%ls",
                    (unsigned long)GetCurrentThreadId (),
                    (unsigned long long)frame,
                    (long)c1,
@@ -2011,13 +2396,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                                       &glInteropMarkerSize,
                                                        &glInteropMarker )) &&
                      glInteropMarkerSize == sizeof (glInteropMarker) &&
-                     glInteropMarker      == 1) ? 1 : 0
+                     glInteropMarker      == 1) ? 1 : 0,
+                   composed_via_blend ? L"blend_over" : L"copy_region"
                );
 
                // STAGE F OK
                if (!s_skf1.logged_stage_f_ok.exchange(true))
                {
-                 _SidecarLog(L"SKF1 Stage F OK: Blit executed");
+                 _SidecarLog(L"SKF1 Stage F OK: composed=%ls", composed_via_blend ? L"blend_over" : L"copy_region");
               }
             }
             else
