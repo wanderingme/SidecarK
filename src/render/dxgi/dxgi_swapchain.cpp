@@ -1643,6 +1643,20 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                       copyW, copyH,
                       is_target ? 1 : 0,
                       (long)fc_log);
+          // Compact throttled gate-disambiguation line. Emitted once per second
+          // (same 1 Hz throttle as above), placed BEFORE the 64×64 copy gate,
+          // the B8G8R8A8/R8G8B8A8/R10G10B10A2 format whitelist gate, and the
+          // overlay-enabled blit gate. One line, every field needed to tell
+          // which Stage E/F gate is silently short-circuiting visible output.
+          _SidecarLog(L"[SKF1] fmt=%u bbw=%u bbh=%u w=%u h=%u copy=%ux%u hasFrame=%d overlay=%d ctr=%ld last=%ld",
+                      (unsigned)bbDesc.Format,
+                      bbDesc.Width, bbDesc.Height,
+                      s_skf1.width, s_skf1.height,
+                      copyW, copyH,
+                      s_skf1.has_frame ? 1 : 0,
+                      overlay_enabled ? 1 : 0,
+                      (long)c1,
+                      (long)s_skf1.last_counter);
         }
 
         // Gate: only composite if clamped region is at least 64×64 and we have header dims.
