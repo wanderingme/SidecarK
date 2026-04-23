@@ -114,16 +114,29 @@ namespace
     SK_DXGI_PresentSource Source,
     bool                  guard_active,
     bool                  is_gl_interop_swapchain,
-    bool                  is_d3d11_backend,
-    bool                  fullscreen_active
+    bool                  is_d3d11_backend
   ) noexcept
   {
+    // Fullscreen state is intentionally NOT part of this predicate.
+    //
+    // The GL/DXGI interop swapchain is always created windowed (the game's
+    // real output is the GL HDC; the DXGI chain exists only to carry the
+    // interop blit to the desktop compositor). rb.isTrueFullscreen() and
+    // IDXGISwapChain::GetFullscreenState therefore report false on this
+    // chain even when the game is visually fullscreen, so gating on
+    // fullscreen_active caused this passthrough to fail closed and let
+    // SK's frame-end re-render execute on top of Stage F's composite.
+    //
+    // The remaining four conditions already scope this narrowly to the
+    // exact recursion the wrapper-submit guard is designed to detect:
+    // a wrapper-originated Present has just composited SKF1 onto the real
+    // GL-interop backbuffer and is now invoking pReal->Present, which
+    // re-enters SK through the hooked vtable with Source == Hook.
     return
       Source == SK_DXGI_PresentSource::Hook &&
       guard_active                          &&
       is_gl_interop_swapchain               &&
-      is_d3d11_backend                      &&
-      fullscreen_active;
+      is_d3d11_backend;
   }
 
   constexpr bool
@@ -3299,15 +3312,12 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
     SK_DXGI_IsGLInteropSwapChain (This);
   const bool dxgi_fullscreen_state =
     SK_DXGI_GetFullscreenState (This, bDXGIFullscreen);
-  const bool fullscreen_active =
-    rb.isTrueFullscreen () || dxgi_fullscreen_state;
   const bool recursive_gl_interop_passthrough =
     SK_DXGI_ShouldPassthroughRecursiveGLInteropPresent (
       Source,
       wrapper_submit_guard_active,
       is_gl_interop_swapchain,
-      _IsBackendD3D11 (rb.api),
-      fullscreen_active
+      _IsBackendD3D11 (rb.api)
     );
 
   if (Source == SK_DXGI_PresentSource::Hook && wrapper_submit_guard_active)
