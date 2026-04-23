@@ -1818,6 +1818,111 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             memcpy (s_frame_snapshot.data (), srcBase, snapshot_bytes);
             _LogSlowStage (L"D3D11.CopySnapshot", tCopySnapshot11);
 
+            // ----------------------------------------------------------------
+            // Content sampling telemetry (audit: "what exactly is in s_skf1.tex
+            // at Stage F time, is the content visually null?").
+            //
+            // Rate-limited to once per second. Read-only; does not alter the
+            // snapshot, the upload, or the blit. Samples the CPU-side snapshot
+            // (which is the exact bytes that will be handed to UpdateSubresource
+            // and thus end up in s_skf1.tex), plus reads the producer header's
+            // alpha_mode / frame_id directly from the shared mapping.
+            // ----------------------------------------------------------------
+            static ULONGLONG s_last_content_sample_ms = 0;
+            const  ULONGLONG nowContentMs             = GetTickCount64 ();
+            if ( maxW >= 2u && maxH >= 2u && s_skf1.pixel_format == 1u &&
+                 snapshot_bytes >= ((size_t)s_skf1.stride * (size_t)maxH) &&
+                 nowContentMs - s_last_content_sample_ms >= 1000ULL )
+            {
+              s_last_content_sample_ms = nowContentMs;
+
+              const uint8_t* scan = s_frame_snapshot.data ();
+
+              // Aggregate scan: BGRA8 (producer pixel_format=1 is BGRA).
+              uint8_t  aMin = 255u, aMax = 0u;
+              uint8_t  rMin = 255u, rMax = 0u;
+              uint8_t  gMin = 255u, gMax = 0u;
+              uint8_t  bMin = 255u, bMax = 0u;
+              uint64_t nzAlpha = 0u, nzRGB = 0u, totalPx = 0u;
+
+              for (UINT y = 0; y < maxH; ++y)
+              {
+                const uint8_t* row = scan + (size_t)y * (size_t)s_skf1.stride;
+                for (UINT x = 0; x < maxW; ++x)
+                {
+                  const uint8_t b = row [x * 4u + 0u];
+                  const uint8_t g = row [x * 4u + 1u];
+                  const uint8_t r = row [x * 4u + 2u];
+                  const uint8_t a = row [x * 4u + 3u];
+
+                  if (a < aMin) aMin = a;
+                  if (a > aMax) aMax = a;
+                  if (r < rMin) rMin = r;
+                  if (r > rMax) rMax = r;
+                  if (g < gMin) gMin = g;
+                  if (g > gMax) gMax = g;
+                  if (b < bMin) bMin = b;
+                  if (b > bMax) bMax = b;
+
+                  if (a != 0u)                        ++nzAlpha;
+                  if ((r | g | b) != 0u)              ++nzRGB;
+                  ++totalPx;
+                }
+              }
+
+              // Sampled pixels: 4 corners + center, BGRA -> print as b,g,r,a.
+              auto _Px = [&](UINT sx, UINT sy) -> const uint8_t *
+              {
+                const UINT cx = (sx < maxW) ? sx : (maxW - 1u);
+                const UINT cy = (sy < maxH) ? sy : (maxH - 1u);
+                return scan + (size_t)cy * (size_t)s_skf1.stride + (size_t)cx * 4u;
+              };
+
+              const uint8_t* pTL = _Px (0u,            0u);
+              const uint8_t* pTR = _Px (maxW - 1u,     0u);
+              const uint8_t* pBL = _Px (0u,            maxH - 1u);
+              const uint8_t* pBR = _Px (maxW - 1u,     maxH - 1u);
+              const uint8_t* pC  = _Px (maxW / 2u,     maxH / 2u);
+
+              // Producer header fields live at fixed offsets inside view_ptr:
+              //   alpha_mode @ +24, frame_id @ +28 (uint64).
+              uint32_t hdr_alpha_mode = 0u;
+              uint64_t hdr_frame_id   = 0u;
+              if (s_skf1.view_ptr != nullptr &&
+                  s_skf1.view_bytes >= 36u)
+              {
+                hdr_alpha_mode = *reinterpret_cast <const uint32_t *> (s_skf1.view_ptr + 24u);
+                hdr_frame_id   = *reinterpret_cast <const uint64_t *> (s_skf1.view_ptr + 28u);
+              }
+
+              const double   pct_alpha = totalPx ? (100.0 * (double)nzAlpha / (double)totalPx) : 0.0;
+              const double   pct_rgb   = totalPx ? (100.0 * (double)nzRGB   / (double)totalPx) : 0.0;
+
+              _SidecarLog (
+                L"SKF1 content sample: tid=%lu counter=%ld frame_id=%llu alpha_mode=%u pxfmt=%u "
+                L"dims=%ux%u copy=%ux%u stride=%u bgra_min=(%u,%u,%u,%u) bgra_max=(%u,%u,%u,%u) "
+                L"nz_alpha=%llu/%llu (%.2f%%) nz_rgb=%llu/%llu (%.2f%%) "
+                L"TL=(%u,%u,%u,%u) TR=(%u,%u,%u,%u) BL=(%u,%u,%u,%u) BR=(%u,%u,%u,%u) C=(%u,%u,%u,%u)",
+                  (unsigned long)GetCurrentThreadId (),
+                  (long)c1,
+                  (unsigned long long)hdr_frame_id,
+                  (unsigned)hdr_alpha_mode,
+                  (unsigned)s_skf1.pixel_format,
+                  s_skf1.width, s_skf1.height,
+                  maxW, maxH,
+                  s_skf1.stride,
+                  (unsigned)bMin, (unsigned)gMin, (unsigned)rMin, (unsigned)aMin,
+                  (unsigned)bMax, (unsigned)gMax, (unsigned)rMax, (unsigned)aMax,
+                  (unsigned long long)nzAlpha, (unsigned long long)totalPx, pct_alpha,
+                  (unsigned long long)nzRGB,   (unsigned long long)totalPx, pct_rgb,
+                  (unsigned)pTL [0], (unsigned)pTL [1], (unsigned)pTL [2], (unsigned)pTL [3],
+                  (unsigned)pTR [0], (unsigned)pTR [1], (unsigned)pTR [2], (unsigned)pTR [3],
+                  (unsigned)pBL [0], (unsigned)pBL [1], (unsigned)pBL [2], (unsigned)pBL [3],
+                  (unsigned)pBR [0], (unsigned)pBR [1], (unsigned)pBR [2], (unsigned)pBR [3],
+                  (unsigned)pC  [0], (unsigned)pC  [1], (unsigned)pC  [2], (unsigned)pC  [3]
+              );
+            }
+
             // Complete stable read: check c2 after copying frame data
             const LONG c2 = *counter_ptr;
             const bool stable = (c1 == c2);
