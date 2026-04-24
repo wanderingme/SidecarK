@@ -3416,6 +3416,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       }
     }
 
+    bool real_wgl_called = false;
+
     if (! _SkipThisFrame)
     {
       if (SK_GL_OnD3D11 && pSwapChain != nullptr)
@@ -3441,6 +3443,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         if (__SK_BFI)
           SK_GL_SwapInterval (0);
 
+        real_wgl_called = true;
         status =
           static_cast_pfn <wglSwapBuffers_pfn> (pfnSwapFunc)(hDC);
       }
@@ -3448,6 +3451,35 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     }
     else
       status = TRUE;
+
+    // [SK-PROBE][GL]: Once-per-mode present-path probe (instrumentation only, no behavioral change)
+    if (SidecarK_DiagnosticsEnabled ())
+    {
+      static volatile LONG s_probe_a_logged_windowed   = 0;
+      static volatile LONG s_probe_a_logged_fullscreen = 0;
+
+      auto& rb_probe_a = SK_GetCurrentRenderBackend ();
+      const bool is_fs_probe_a = rb_probe_a.fullscreen_exclusive;
+
+      volatile LONG* pLatch_probe_a = is_fs_probe_a ? &s_probe_a_logged_fullscreen
+                                                    : &s_probe_a_logged_windowed;
+
+      if (InterlockedCompareExchange (pLatch_probe_a, 1L, 0L) == 0L)
+      {
+        const char* branch_name_probe_a =
+          _SkipThisFrame                             ? "other"             :
+          (SK_GL_OnD3D11 && pSwapChain != nullptr)   ? "present_man"       :
+                                                       "real_wglSwapBuffers";
+
+        dll_log->Log (
+          L"[SK-PROBE][GL] OnD3D11=%d Reset=%d fs=%d branch=%hs real_wgl_called=%d",
+          (int)SK_GL_OnD3D11,
+          (int)SK_GL_OnD3D11_Reset,
+          (int)is_fs_probe_a,
+          branch_name_probe_a,
+          (int)real_wgl_called );
+      }
+    }
 
     // This info is used to dynamically adjust target
     //   sync time for laser precision
