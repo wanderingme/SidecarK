@@ -1605,6 +1605,62 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
         D3D11_TEXTURE2D_DESC bbDesc = { };
         bb->GetDesc (&bbDesc);
 
+        // [SK-PROBE][DXGI]: Once-per-mode present-path probe (instrumentation only, no behavioral change)
+        if (SidecarK_DiagnosticsEnabled ())
+        {
+          static volatile LONG s_probe_b_logged_windowed   = 0;
+          static volatile LONG s_probe_b_logged_fullscreen = 0;
+
+          auto& rb_probe_b = SK_GetCurrentRenderBackend ();
+          const bool is_fs_probe_b = rb_probe_b.fullscreen_exclusive;
+
+          volatile LONG* pLatch_probe_b = is_fs_probe_b ? &s_probe_b_logged_fullscreen
+                                                        : &s_probe_b_logged_windowed;
+
+          if (InterlockedCompareExchange (pLatch_probe_b, 1L, 0L) == 0L)
+          {
+            BOOL probe_bFS = FALSE;
+            const HRESULT probe_hrFS = pReal->GetFullscreenState (&probe_bFS, nullptr);
+
+            DXGI_SWAP_CHAIN_DESC probe_scd = {};
+            pReal->GetDesc (&probe_scd);
+
+            SK_ComPtr <ID3D11Texture2D> probe_wrapper_bb;
+            this->GetBuffer (0, IID_ID3D11Texture2D, (void **)&probe_wrapper_bb.p);
+
+            ID3D11Texture2D* probe_bb0_raw = nullptr;
+            {
+              std::lock_guard <std::recursive_mutex> lk_probe (_backbufferLock);
+              auto it_probe = _backbuffers.find (0);
+              if (it_probe != _backbuffers.end ())
+                probe_bb0_raw = it_probe->second.p;
+            }
+
+            wchar_t probe_bb0_str [32] = {};
+            if (probe_bb0_raw != nullptr)
+              _snwprintf_s (probe_bb0_str, _TRUNCATE, L"%p", (void *)probe_bb0_raw);
+            else
+              wcscpy_s (probe_bb0_str, L"<none>");
+
+            _SidecarLog (
+              L"[SK-PROBE][DXGI] rb_fs=%d GetFS_hr=0x%08X GetFS_bFS=%d"
+              L" flip_active=%d flip_native=%d flip_override=%d"
+              L" SwapEffect=%u"
+              L" pReal_bb=%p wrapper_bb=%p backbuffers0=%s stage_f_bb=%p",
+              (int)is_fs_probe_b,
+              (unsigned)probe_hrFS, (int)probe_bFS,
+              (int)flip_model.active, (int)flip_model.native,
+              (int)flip_model.isOverrideActive (),
+              (unsigned)probe_scd.SwapEffect,
+              (void *)bb,
+              (void *)probe_wrapper_bb.p,
+              probe_bb0_str,
+              (void *)bb );
+
+            // probe_wrapper_bb auto-releases via SK_ComPtr destructor
+          }
+        }
+
         // copyW/copyH: clamp copy rect to min(backbuffer, header).
         // When header dims are 0 (not yet published by producer), copyW/copyH will be 0
         // and the 64×64 minimum gate below will reject compositing until real dims arrive.
