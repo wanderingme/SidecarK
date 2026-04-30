@@ -53,6 +53,14 @@ std::atomic_bool g_dxgi_overlay_owner{ false };
 // exclusively via Interlocked ops (which provide the necessary memory ordering).
 static IDXGISwapChain* s_target_swapchain = nullptr;
 
+// Last time (GetTickCount64 ms) the cached target was observed at the
+// target-claim gate. Updated every time s_target_swapchain == pReal at the
+// gate. Read by other candidates to decide whether the cache is stale
+// (i.e. the owning wrapper has stopped presenting but was not destroyed,
+// so the Release()-time clear never fires).
+// Accessed exclusively via Interlocked64 ops; no <atomic> dependency.
+static volatile LONG64 s_target_last_seen_ms = 0;
+
 #define SK_LOG_ONCE(x) { static bool logged = false; if (! logged) \
                        { dll_log->Log ((x)); logged = true; } }
 
@@ -1696,26 +1704,65 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                         nullptr, SK_DXGI_PresentSource::Wrapper );
         }
 
-        // Target-swapchain gate: claim if unclaimed, skip if another swapchain is already
-        // the target. Uses a single CAS to avoid races between concurrent presents.
+        // Target-swapchain gate: claim if unclaimed; if another swapchain
+        // currently owns the slot but has not been seen at the gate within
+        // kStaleAfterMs, treat the cache as stale and steal it. Uses the
+        // same Interlocked CAS primitive as the original claim path.
         {
-          void* const prev =
+          const ULONGLONG nowMs = GetTickCount64 ();
+
+          // First try the existing claim: nullptr -> pReal.
+          void* prev =
             InterlockedCompareExchangePointer (
               reinterpret_cast<void * volatile *> (&s_target_swapchain),
               reinterpret_cast<void *>(pReal),  // desired
               nullptr                           // only swap if currently null
             );
-          // prev == nullptr  → we just claimed it (first match)
-          // prev == pReal    → we are the cached target (keep going)
-          // prev == other    → another swapchain owns this slot (skip)
-          if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
+
+          if (prev == nullptr || prev == reinterpret_cast<void *>(pReal))
           {
-            bb->Release ();
-            ctx->Release ();
-            dev->Release ();
-            return
-              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
-                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+            // We own the target. Update heartbeat and proceed.
+            InterlockedExchange64 (&s_target_last_seen_ms, (LONG64)nowMs);
+          }
+          else
+          {
+            // Cache is held by a different pointer. Check staleness.
+            const ULONGLONG lastSeenMs = (ULONGLONG)
+              InterlockedCompareExchange64 (&s_target_last_seen_ms, 0, 0);
+            const ULONGLONG kStaleAfterMs = 2000ULL;
+
+            bool stole = false;
+            if (lastSeenMs != 0 && nowMs - lastSeenMs >= kStaleAfterMs)
+            {
+              // Try to steal: replace prev pointer with our own.
+              void* const stolen =
+                InterlockedCompareExchangePointer (
+                  reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                  reinterpret_cast<void *>(pReal),
+                  prev);
+
+              if (stolen == prev)
+              {
+                InterlockedExchange64 (&s_target_last_seen_ms, (LONG64)nowMs);
+                _SidecarLog (L"[target-cache] stole stale target: prev=%p new=%p age=%llu ms",
+                             prev, (void*)pReal,
+                             (unsigned long long)(nowMs - lastSeenMs));
+                stole = true;
+                // Fall through to compositing; we own the target now.
+              }
+            }
+
+            if (! stole)
+            {
+              // Either not stale yet, or someone else stole/cleared first.
+              // Skip this frame via the existing skip-present path.
+              bb->Release ();
+              ctx->Release ();
+              dev->Release ();
+              return
+                SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                            nullptr, SK_DXGI_PresentSource::Wrapper );
+            }
           }
         }
 
@@ -2151,21 +2198,56 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                                         nullptr, SK_DXGI_PresentSource::Wrapper );
         }
 
-        // Target-swapchain gate: claim if unclaimed, skip if another swapchain owns it.
+        // Target-swapchain gate: claim if unclaimed; if another swapchain
+        // currently owns the slot but has not been seen at the gate within
+        // kStaleAfterMs, treat the cache as stale and steal it.
         {
-          void* const prev =
+          const ULONGLONG nowMs = GetTickCount64 ();
+
+          void* prev =
             InterlockedCompareExchangePointer (
               reinterpret_cast<void * volatile *> (&s_target_swapchain),
               reinterpret_cast<void *>(pReal),
               nullptr
             );
-          if (prev != nullptr && prev != reinterpret_cast<void *>(pReal))
+
+          if (prev == nullptr || prev == reinterpret_cast<void *>(pReal))
           {
-            bb12->Release ();
-            dev12->Release ();
-            return
-              SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
-                                          nullptr, SK_DXGI_PresentSource::Wrapper );
+            InterlockedExchange64 (&s_target_last_seen_ms, (LONG64)nowMs);
+          }
+          else
+          {
+            const ULONGLONG lastSeenMs = (ULONGLONG)
+              InterlockedCompareExchange64 (&s_target_last_seen_ms, 0, 0);
+            const ULONGLONG kStaleAfterMs = 2000ULL;
+
+            bool stole = false;
+            if (lastSeenMs != 0 && nowMs - lastSeenMs >= kStaleAfterMs)
+            {
+              void* const stolen =
+                InterlockedCompareExchangePointer (
+                  reinterpret_cast<void * volatile *> (&s_target_swapchain),
+                  reinterpret_cast<void *>(pReal),
+                  prev);
+
+              if (stolen == prev)
+              {
+                InterlockedExchange64 (&s_target_last_seen_ms, (LONG64)nowMs);
+                _SidecarLog (L"[target-cache] stole stale target: prev=%p new=%p age=%llu ms",
+                             prev, (void*)pReal,
+                             (unsigned long long)(nowMs - lastSeenMs));
+                stole = true;
+              }
+            }
+
+            if (! stole)
+            {
+              bb12->Release ();
+              dev12->Release ();
+              return
+                SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
+                                            nullptr, SK_DXGI_PresentSource::Wrapper );
+            }
           }
         }
 
