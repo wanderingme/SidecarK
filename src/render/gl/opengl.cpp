@@ -2554,6 +2554,44 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
   auto& rb =
     SK_GetCurrentRenderBackend ();
 
+  // Local helper that mirrors the _SidecarLog lambda in
+  // src/render/dxgi/dxgi_swapchain.cpp (~lines 1063–1095) so that GL probe
+  // lines land in %TEMP%\SidecarK_Overlay.log alongside the DXGI probe lines.
+  // Self-contained per file (per spec); not shared with the DXGI lambda.
+  auto _SidecarLog_GL = [](const wchar_t* fmt, ...)
+  {
+    if (! SidecarK_DiagnosticsEnabled ())
+      return;
+
+    wchar_t path [MAX_PATH] = { };
+    DWORD cch = GetTempPathW (MAX_PATH, path);
+    if (cch == 0 || cch >= MAX_PATH)
+      return;
+
+    wcscat_s (path, L"SidecarK_Overlay.log");
+
+    FILE* f = nullptr;
+    _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+    if (f == nullptr)
+      return;
+
+    SYSTEMTIME st = { };
+    GetLocalTime (&st);
+
+    fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu ",
+              st.wYear, st.wMonth, st.wDay,
+              st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+              (unsigned long)GetCurrentProcessId ());
+
+    va_list args;
+    va_start (args, fmt);
+    vfwprintf (f, fmt, args);
+    va_end (args);
+
+    fwprintf (f, L"\n");
+    fclose (f);
+  };
+
   // [SK-PROBE][GL-IN] — instrumentation only, no behavior change.
   // Emitted after the only trivially-cheap parameter validation in this
   // function (the `if (! hDC) return FALSE;` above) and before any further
@@ -2565,11 +2603,11 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     if (SidecarK_DiagnosticsEnabled () &&
         InterlockedCompareExchange (&s_sk_probe_gl_in_latch [sk_probe_gl_in_idx], 1, 0) == 0)
     {
-      dll_log->Log ( L"[SK-PROBE][GL-IN] fs=%d OnD3D11=%d Reset=%d hDC=%p",
-                     (int)rb.fullscreen_exclusive,
-                     (int)SK_GL_OnD3D11,
-                     (int)SK_GL_OnD3D11_Reset,
-                     (void *)hDC );
+      _SidecarLog_GL ( L"[SK-PROBE][GL-IN] fs=%d OnD3D11=%d Reset=%d hDC=%p",
+                       (int)rb.fullscreen_exclusive,
+                       (int)SK_GL_OnD3D11,
+                       (int)SK_GL_OnD3D11_Reset,
+                       (void *)hDC );
     }
   }
 
@@ -3483,12 +3521,12 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           (SK_GL_OnD3D11 && pSwapChain != nullptr) ? "present_man" : "real_wgl";
         const int sk_probe_real_wgl_called =
           (! _SkipThisFrame && ! (SK_GL_OnD3D11 && pSwapChain != nullptr)) ? 1 : 0;
-        dll_log->Log ( L"[SK-PROBE][GL-OUT] OnD3D11=%d Reset=%d fs=%d branch=%hs real_wgl_called=%d",
-                       (int)SK_GL_OnD3D11,
-                       (int)SK_GL_OnD3D11_Reset,
-                       (int)rb.fullscreen_exclusive,
-                       sk_probe_branch,
-                       sk_probe_real_wgl_called );
+        _SidecarLog_GL ( L"[SK-PROBE][GL-OUT] OnD3D11=%d Reset=%d fs=%d branch=%hs real_wgl_called=%d",
+                         (int)SK_GL_OnD3D11,
+                         (int)SK_GL_OnD3D11_Reset,
+                         (int)rb.fullscreen_exclusive,
+                         sk_probe_branch,
+                         sk_probe_real_wgl_called );
       }
     }
 
