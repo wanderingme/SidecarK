@@ -2555,7 +2555,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     SK_GetCurrentRenderBackend ();
 
   // Local helper that mirrors the _SidecarLog lambda in
-  // src/render/dxgi/dxgi_swapchain.cpp (~lines 1063–1095) so that GL probe
+  // src/render/dxgi/dxgi_swapchain.cpp (~lines 1113–1145) so that GL probe
   // lines land in %TEMP%\SidecarK_Overlay.log alongside the DXGI probe lines.
   // Self-contained per file (per spec); not shared with the DXGI lambda.
   auto _SidecarLog_GL = [](const wchar_t* fmt, ...)

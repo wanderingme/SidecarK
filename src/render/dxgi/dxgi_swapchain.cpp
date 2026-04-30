@@ -46,6 +46,13 @@ std::atomic_bool g_dxgi_present_seen{ false };
 
 std::atomic_bool g_dxgi_overlay_owner{ false };
 
+// Target swapchain: the first swapchain whose backbuffer exactly matches header dims.
+// All other swapchains skip compositing until a device/pid reset clears this.
+// File-scope so the wrapper's Release() teardown path can lifetime-bind it (clear the
+// slot when the owning wrapper is destroyed). Not declared volatile — accessed
+// exclusively via Interlocked ops (which provide the necessary memory ordering).
+static IDXGISwapChain* s_target_swapchain = nullptr;
+
 #define SK_LOG_ONCE(x) { static bool logged = false; if (! logged) \
                        { dll_log->Log ((x)); logged = true; } }
 
@@ -435,6 +442,52 @@ IWrapDXGISwapChain::Release (void)
       _d3d12_rbk->_pCommandQueue.Release ();
 
       rb.releaseOwnedResources ();
+    }
+
+    // Lifetime-bound target-cache release: if this wrapper's pReal is the
+    // currently-cached target swapchain, atomically clear the slot before
+    // pReal is Released. Without this, s_target_swapchain remains pinned to
+    // a stale chain across mode/menu transitions and subsequently-created
+    // swapchains see is_target=0 indefinitely. Mirrors the claim-CAS pattern.
+    {
+      void* const prev_target =
+        InterlockedCompareExchangePointer (
+          reinterpret_cast<void * volatile *> (&s_target_swapchain),
+          nullptr,
+          reinterpret_cast<void *>(pReal));
+
+      if (prev_target == reinterpret_cast<void *>(pReal))
+      {
+        // Confirmation log on successful clear, written to the same
+        // %TEMP%\SidecarK_Overlay.log sink used by the Present-local
+        // _SidecarLog lambda. Inlined here because that lambda is local
+        // to Present() and not visible from Release().
+        if (SidecarK_DiagnosticsEnabled ())
+        {
+          wchar_t path [MAX_PATH] = { };
+          DWORD cch = GetTempPathW (MAX_PATH, path);
+          if (cch != 0 && cch < MAX_PATH)
+          {
+            wcscat_s (path, L"SidecarK_Overlay.log");
+
+            FILE* f = nullptr;
+            _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+            if (f != nullptr)
+            {
+              SYSTEMTIME st = { };
+              GetLocalTime (&st);
+
+              fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu ",
+                        st.wYear, st.wMonth, st.wDay,
+                        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                        (unsigned long)GetCurrentProcessId ());
+              fwprintf (f, L"[target-cache] cleared on wrapper dtor: pReal=%p\n",
+                        (void *)pReal);
+              fclose (f);
+            }
+          }
+        }
+      }
     }
   }
 
@@ -1034,11 +1087,8 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static DWORD s_pidCached = 0;  // For reset detection only
   static std::atomic_bool s_logged_swapchain_once = false;
 
-  // Target swapchain: the first swapchain whose backbuffer exactly matches header dims.
-  // All other swapchains skip compositing until a device/pid reset clears this.
-  // Not declared volatile — accessed exclusively via Interlocked ops (which provide
-  // the necessary memory ordering). Matches the pattern of other D3D resources here.
-  static IDXGISwapChain* s_target_swapchain = nullptr;
+  // Note: s_target_swapchain is declared at file scope (above) so the wrapper's
+  // Release() path can clear it when the owning wrapper is destroyed.
 
   static HANDLE   g_ctrlMap = nullptr;
   static uint8_t* g_ctrlBase = nullptr;
