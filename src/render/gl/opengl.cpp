@@ -2554,6 +2554,25 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
   auto& rb =
     SK_GetCurrentRenderBackend ();
 
+  // [SK-PROBE][GL-IN] — instrumentation only, no behavior change.
+  // Emitted after the only trivially-cheap parameter validation in this
+  // function (the `if (! hDC) return FALSE;` above) and before any further
+  // branching that could bypass the mixed-path block. Once-per-mode latched,
+  // keyed on rb.fullscreen_exclusive. Independent latch from [GL-OUT].
+  {
+    static volatile LONG s_sk_probe_gl_in_latch [2] = { 0, 0 };
+    const int sk_probe_gl_in_idx = rb.fullscreen_exclusive ? 1 : 0;
+    if (SidecarK_DiagnosticsEnabled () &&
+        InterlockedCompareExchange (&s_sk_probe_gl_in_latch [sk_probe_gl_in_idx], 1, 0) == 0)
+    {
+      dll_log->Log ( L"[SK-PROBE][GL-IN] fs=%d OnD3D11=%d Reset=%d hDC=%p",
+                     (int)rb.fullscreen_exclusive,
+                     (int)SK_GL_OnD3D11,
+                     (int)SK_GL_OnD3D11_Reset,
+                     (void *)hDC );
+    }
+  }
+
   rb.active_traits.bOriginallysRGB |= static_cast <bool> (glIsEnabled (GL_FRAMEBUFFER_SRGB));
   SK_GL_CheckSRGB ();
 
@@ -3448,6 +3467,30 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     }
     else
       status = TRUE;
+
+    // [SK-PROBE][GL-OUT] — instrumentation only, no behavior change.
+    // Emitted immediately after the present_man vs real wglSwapBuffers branch
+    // decision, so that we can observe which branch was taken (and whether the
+    // real wgl swap was actually invoked) on each mode. Once-per-mode latched,
+    // keyed on rb.fullscreen_exclusive. Independent latch from [GL-IN].
+    {
+      static volatile LONG s_sk_probe_gl_out_latch [2] = { 0, 0 };
+      const int sk_probe_gl_out_idx = rb.fullscreen_exclusive ? 1 : 0;
+      if (SidecarK_DiagnosticsEnabled () &&
+          InterlockedCompareExchange (&s_sk_probe_gl_out_latch [sk_probe_gl_out_idx], 1, 0) == 0)
+      {
+        const char* sk_probe_branch =
+          (SK_GL_OnD3D11 && pSwapChain != nullptr) ? "present_man" : "real_wgl";
+        const int sk_probe_real_wgl_called =
+          (! _SkipThisFrame && ! (SK_GL_OnD3D11 && pSwapChain != nullptr)) ? 1 : 0;
+        dll_log->Log ( L"[SK-PROBE][GL-OUT] OnD3D11=%d Reset=%d fs=%d branch=%hs real_wgl_called=%d",
+                       (int)SK_GL_OnD3D11,
+                       (int)SK_GL_OnD3D11_Reset,
+                       (int)rb.fullscreen_exclusive,
+                       sk_probe_branch,
+                       sk_probe_real_wgl_called );
+      }
+    }
 
     // This info is used to dynamically adjust target
     //   sync time for laser precision
