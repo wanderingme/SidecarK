@@ -1095,6 +1095,61 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static DWORD s_pidCached = 0;  // For reset detection only
   static std::atomic_bool s_logged_swapchain_once = false;
 
+  // ============================================================================
+  // STAGE F DIAGNOSTICS (read-only)
+  // Purpose: distinguish A=DirectFlip/FSO/HW-composition, B=GPU ordering,
+  // C=wrong buffer index, D=wrong target identity, E=other, when Stage F
+  // reports a successful blit but the overlay is invisible (EFPSE fullscreen).
+  // No behavioral change. Optional Flush/Query experiment is gated by env var.
+  // ============================================================================
+  struct SidecarStageFDiag
+  {
+    // Rate limiting / transition detection
+    ULONGLONG last_summary_ms             = 0;
+    ULONG     frames_logged_after_first   = 0; // logs first 3 frames after first Stage F OK
+
+    // Last-logged values for change-detection logging
+    HWND             last_hwnd            = nullptr;
+    LONG             last_style           = 0;
+    LONG             last_exstyle         = 0;
+    BOOL             last_fs_state        = -1; // -1 = unknown
+    HMONITOR         last_hmon            = nullptr;
+    BOOL             last_windowed_desc   = -1;
+    UINT             last_buf_count       = 0;
+    DXGI_SWAP_EFFECT last_swap_effect     = (DXGI_SWAP_EFFECT)-1;
+    UINT             last_flags           = 0;
+    UINT             last_hw_comp_flags   = 0xFFFFFFFFu; // sentinel
+    int              last_fs_shaped       = -1;          // -1 = unknown
+
+    // Frame statistics deltas
+    UINT      last_present_count   = 0;
+    UINT      last_present_refresh = 0;
+    UINT      last_sync_refresh    = 0;
+    bool      have_last_stats      = false;
+
+    // Buffer index sample carry across frames
+    UINT      last_idx_post_stagef = 0xFFFFFFFFu;
+    UINT      last_idx_pre_present = 0xFFFFFFFFu;
+    UINT      last_idx_post_present= 0xFFFFFFFFu;
+
+    // Optional gated Flush/Query experiment.
+    // Env var SIDECARK_DIAG_FLUSH_AFTER_STAGE_F:
+    //   "0" or unset -> disabled (default)
+    //   "1"          -> Flush() after Stage F copy
+    //   "2"          -> Flush() + ID3D11Query(D3D11_QUERY_EVENT) bounded poll
+    // This is strictly diagnostic. It must NOT be the final fix.
+    int  diag_flush_mode = -1; // -1 = uncached
+    bool logged_flush_mode = false;
+
+    // One-time markers
+    std::atomic_bool logged_no_swapchain1 { false };
+    std::atomic_bool logged_no_swapchain3 { false };
+    std::atomic_bool logged_no_output6    { false };
+    std::atomic_bool logged_flush_disabled_once { false };
+  };
+
+  static SidecarStageFDiag s_diag;
+
   // Note: s_target_swapchain is declared at file scope (above) so the wrapper's
   // Release() path can clear it when the owning wrapper is destroyed.
 
@@ -2036,6 +2091,338 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               {
                 _SidecarLog(L"SKF1 Stage F OK: Blit executed");
               }
+
+              // ================================================================
+              // STAGE F DIAGNOSTICS (D3D11 path) — read-only
+              // Logs cadence: first 3 frames after first Stage F OK,
+              // on transition (HWND/style/fullscreen/monitor/SwapEffect change),
+              // and once per second. Honors SidecarK_DiagnosticsEnabled() via
+              // _SidecarLog.
+              // ================================================================
+              {
+                // ---- Resolve identities (best-effort) ----
+                HWND hWndSC = nullptr;
+                IDXGISwapChain1* pSC1 = nullptr;
+                if (SUCCEEDED (pReal->QueryInterface (__uuidof (IDXGISwapChain1), (void**)&pSC1)) && pSC1 != nullptr)
+                {
+                  pSC1->GetHwnd (&hWndSC);
+                }
+                else if (! s_diag.logged_no_swapchain1.exchange (true))
+                {
+                  _SidecarLog (L"[diag/F] no IDXGISwapChain1 QI; HWND from desc only");
+                }
+
+                DXGI_SWAP_CHAIN_DESC scDesc = { };
+                pReal->GetDesc (&scDesc);
+                if (hWndSC == nullptr) hWndSC = scDesc.OutputWindow;
+
+                // ---- HWND geometry & styles ----
+                LONG style = 0, exstyle = 0;
+                RECT wr = { }, cr = { };
+                HMONITOR hMon = nullptr;
+                MONITORINFO mi = { sizeof (MONITORINFO) };
+                int fs_shaped = -1; // unknown
+                if (hWndSC != nullptr && IsWindow (hWndSC))
+                {
+                  style   = GetWindowLongW (hWndSC, GWL_STYLE);
+                  exstyle = GetWindowLongW (hWndSC, GWL_EXSTYLE);
+                  GetWindowRect (hWndSC, &wr);
+                  GetClientRect (hWndSC, &cr);
+                  hMon = MonitorFromWindow (hWndSC, MONITOR_DEFAULTTONEAREST);
+                  if (hMon != nullptr) GetMonitorInfoW (hMon, &mi);
+
+                  const bool rect_eq_monitor =
+                    (wr.left   == mi.rcMonitor.left  ) &&
+                    (wr.top    == mi.rcMonitor.top   ) &&
+                    (wr.right  == mi.rcMonitor.right ) &&
+                    (wr.bottom == mi.rcMonitor.bottom);
+                  const bool has_popup    = (style & WS_POPUP)      != 0;
+                  const bool has_caption  = (style & WS_CAPTION)    != 0;
+                  const bool has_thick    = (style & WS_THICKFRAME) != 0;
+                  fs_shaped =
+                    (rect_eq_monitor && has_popup && !has_caption && !has_thick) ? 1 : 0;
+                }
+
+                // ---- DXGI swapchain extended state ----
+                DXGI_SWAP_CHAIN_DESC1 scDesc1 = { };
+                bool have_desc1 = (pSC1 != nullptr) && SUCCEEDED (pSC1->GetDesc1 (&scDesc1));
+                BOOL bFS = FALSE;
+                IDXGIOutput* pOut = nullptr;
+                pReal->GetFullscreenState (&bFS, &pOut);
+                if (pOut != nullptr) { pOut->Release (); pOut = nullptr; }
+
+                IDXGIOutput* pContaining = nullptr;
+                DXGI_OUTPUT_DESC outDesc = { };
+                if (SUCCEEDED (pReal->GetContainingOutput (&pContaining)) && pContaining != nullptr)
+                {
+                  pContaining->GetDesc (&outDesc);
+                }
+
+                // ---- Hardware composition support (log only, no branching) ----
+                UINT hw_comp_flags = 0xFFFFFFFFu;
+                IDXGIOutput6* pOut6 = nullptr;
+                if (pContaining != nullptr &&
+                    SUCCEEDED (pContaining->QueryInterface (__uuidof (IDXGIOutput6), (void**)&pOut6)) &&
+                    pOut6 != nullptr)
+                {
+                  UINT raw = 0;
+                  if (SUCCEEDED (pOut6->CheckHardwareCompositionSupport (&raw)))
+                  {
+                    hw_comp_flags = raw;
+                  }
+                  pOut6->Release ();
+                }
+                else if (! s_diag.logged_no_output6.exchange (true))
+                {
+                  _SidecarLog (L"[diag/F] no IDXGIOutput6 QI on containing output");
+                }
+
+                // ---- Backbuffer identity (IUnknown via QI, not wrapper ptr) ----
+                IUnknown* bbUnk = nullptr;
+                bb->QueryInterface (__uuidof (IUnknown), (void**)&bbUnk);
+                // (release immediately; we only want pointer identity for log compare)
+                if (bbUnk != nullptr) bbUnk->Release ();
+
+                // ---- Buffer index immediately after Stage F copy ----
+                UINT idx_post_stagef = 0xFFFFFFFFu;
+                IDXGISwapChain3* pSC3 = nullptr;
+                if (SUCCEEDED (pReal->QueryInterface (__uuidof (IDXGISwapChain3), (void**)&pSC3)) && pSC3 != nullptr)
+                {
+                  idx_post_stagef = pSC3->GetCurrentBackBufferIndex ();
+                  pSC3->Release ();
+                }
+                else if (! s_diag.logged_no_swapchain3.exchange (true))
+                {
+                  _SidecarLog (L"[diag/F] no IDXGISwapChain3 QI; cannot sample backbuffer index");
+                }
+                s_diag.last_idx_post_stagef = idx_post_stagef;
+
+                // ---- Frame statistics pre-Present (best-effort) ----
+                DXGI_FRAME_STATISTICS fs = { };
+                bool have_fs = SUCCEEDED (pReal->GetFrameStatistics (&fs));
+                UINT lastPresentCount = 0;
+                bool have_lpc = SUCCEEDED (pReal->GetLastPresentCount (&lastPresentCount));
+
+                // ---- Device / context lineage ----
+                D3D11_DEVICE_CONTEXT_TYPE ctxType = ctx->GetType ();
+
+                // ---- Cadence: should we log this frame? ----
+                const ULONGLONG nowMs = GetTickCount64 ();
+                const bool first_burst    = (s_diag.frames_logged_after_first < 3u);
+                const bool periodic       = (nowMs - s_diag.last_summary_ms >= 1000ULL);
+                const bool changed_hwnd   = (hWndSC != s_diag.last_hwnd);
+                const bool changed_style  = (style != s_diag.last_style || exstyle != s_diag.last_exstyle);
+                const bool changed_fs     = (bFS != s_diag.last_fs_state);
+                const bool changed_mon    = (hMon != s_diag.last_hmon);
+                const bool changed_swap   = (scDesc.SwapEffect != s_diag.last_swap_effect ||
+                                             scDesc.BufferCount != s_diag.last_buf_count ||
+                                             scDesc.Flags       != s_diag.last_flags ||
+                                             scDesc.Windowed    != s_diag.last_windowed_desc);
+                const bool changed_hwc    = (hw_comp_flags != s_diag.last_hw_comp_flags);
+                const bool changed_shape  = (fs_shaped != s_diag.last_fs_shaped);
+
+                const bool should_log =
+                  first_burst || periodic || changed_hwnd || changed_style ||
+                  changed_fs  || changed_mon || changed_swap || changed_hwc || changed_shape;
+
+                if (should_log)
+                {
+                  if (first_burst)         s_diag.frames_logged_after_first += 1u;
+                  if (periodic)            s_diag.last_summary_ms = nowMs;
+
+                  s_diag.last_hwnd          = hWndSC;
+                  s_diag.last_style         = style;
+                  s_diag.last_exstyle       = exstyle;
+                  s_diag.last_fs_state      = bFS;
+                  s_diag.last_hmon          = hMon;
+                  s_diag.last_buf_count     = scDesc.BufferCount;
+                  s_diag.last_swap_effect   = scDesc.SwapEffect;
+                  s_diag.last_flags         = scDesc.Flags;
+                  s_diag.last_windowed_desc = scDesc.Windowed;
+                  s_diag.last_hw_comp_flags = hw_comp_flags;
+                  s_diag.last_fs_shaped     = fs_shaped;
+
+                  // (1) Identity & HWND state
+                  _SidecarLog (
+                    L"[diag/F.id] sc=%p sc1=%p hwnd=%p style=0x%08X exstyle=0x%08X "
+                    L"win_rect=(%ld,%ld,%ld,%ld) client=(%ld,%ld,%ld,%ld) "
+                    L"mon=%p mon_rect=(%ld,%ld,%ld,%ld) fs_shaped=%d "
+                    L"popup=%d caption=%d thick=%d",
+                    (void*)pReal, (void*)pSC1, (void*)hWndSC,
+                    (UINT)style, (UINT)exstyle,
+                    wr.left, wr.top, wr.right, wr.bottom,
+                    cr.left, cr.top, cr.right, cr.bottom,
+                    (void*)hMon,
+                    mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom,
+                    fs_shaped,
+                    (style & WS_POPUP)      ? 1 : 0,
+                    (style & WS_CAPTION)    ? 1 : 0,
+                    (style & WS_THICKFRAME) ? 1 : 0);
+
+                  // (2) DXGI swapchain state
+                  _SidecarLog (
+                    L"[diag/F.dxgi] desc: w=%u h=%u fmt=%d swap_effect=%d "
+                    L"buf_count=%u flags=0x%08X windowed=%d  fs_state=%d  "
+                    L"present_args(later): SyncInterval=%u Flags=0x%08X",
+                    scDesc.BufferDesc.Width, scDesc.BufferDesc.Height,
+                    (int)scDesc.BufferDesc.Format, (int)scDesc.SwapEffect,
+                    scDesc.BufferCount, scDesc.Flags, scDesc.Windowed,
+                    (int)bFS, SyncInterval, Flags);
+
+                  if (have_desc1)
+                  {
+                    _SidecarLog (
+                      L"[diag/F.dxgi1] desc1: w=%u h=%u fmt=%d stereo=%d sample=%u/%u "
+                      L"buf_usage=0x%08X buf_count=%u scaling=%d swap_effect=%d "
+                      L"alpha=%d flags=0x%08X",
+                      scDesc1.Width, scDesc1.Height, (int)scDesc1.Format,
+                      (int)scDesc1.Stereo,
+                      scDesc1.SampleDesc.Count, scDesc1.SampleDesc.Quality,
+                      scDesc1.BufferUsage, scDesc1.BufferCount,
+                      (int)scDesc1.Scaling, (int)scDesc1.SwapEffect,
+                      (int)scDesc1.AlphaMode, scDesc1.Flags);
+                  }
+
+                  if (pContaining != nullptr)
+                  {
+                    _SidecarLog (
+                      L"[diag/F.output] device=%ls attached=%d rotation=%d "
+                      L"desktop=(%ld,%ld,%ld,%ld) hmon=%p",
+                      outDesc.DeviceName, (int)outDesc.AttachedToDesktop,
+                      (int)outDesc.Rotation,
+                      outDesc.DesktopCoordinates.left,  outDesc.DesktopCoordinates.top,
+                      outDesc.DesktopCoordinates.right, outDesc.DesktopCoordinates.bottom,
+                      (void*)outDesc.Monitor);
+                  }
+
+                  // (3) Hardware composition support
+                  if (hw_comp_flags != 0xFFFFFFFFu)
+                  {
+                    const bool fs_supp =
+                      (hw_comp_flags & DXGI_HARDWARE_COMPOSITION_SUPPORT_FLAG_FULLSCREEN) != 0;
+                    const bool win_supp =
+                      (hw_comp_flags & DXGI_HARDWARE_COMPOSITION_SUPPORT_FLAG_WINDOWED) != 0;
+                    const bool curs_supp =
+                      (hw_comp_flags & DXGI_HARDWARE_COMPOSITION_SUPPORT_FLAG_CURSOR_STRETCHED) != 0;
+                    _SidecarLog (
+                      L"[diag/F.hwcomp] raw=0x%08X FULLSCREEN=%d WINDOWED=%d CURSOR_STRETCHED=%d",
+                      hw_comp_flags, fs_supp ? 1 : 0, win_supp ? 1 : 0, curs_supp ? 1 : 0);
+                  }
+                  else
+                  {
+                    _SidecarLog (L"[diag/F.hwcomp] unavailable (no IDXGIOutput6 or call failed)");
+                  }
+
+                  // (4) Frame / present state
+                  if (have_fs)
+                  {
+                    UINT dPC = s_diag.have_last_stats ? (fs.PresentCount       - s_diag.last_present_count)   : 0;
+                    UINT dPR = s_diag.have_last_stats ? (fs.PresentRefreshCount- s_diag.last_present_refresh) : 0;
+                    UINT dSR = s_diag.have_last_stats ? (fs.SyncRefreshCount   - s_diag.last_sync_refresh)    : 0;
+                    _SidecarLog (
+                      L"[diag/F.frame] PresentCount=%u (Δ=%u) PresentRefresh=%u (Δ=%u) "
+                      L"SyncRefresh=%u (Δ=%u) lastPresentCount(GetLastPresentCount)=%u(have=%d)",
+                      fs.PresentCount,        dPC,
+                      fs.PresentRefreshCount, dPR,
+                      fs.SyncRefreshCount,    dSR,
+                      lastPresentCount, have_lpc ? 1 : 0);
+                    s_diag.last_present_count   = fs.PresentCount;
+                    s_diag.last_present_refresh = fs.PresentRefreshCount;
+                    s_diag.last_sync_refresh    = fs.SyncRefreshCount;
+                    s_diag.have_last_stats      = true;
+                  }
+                  else
+                  {
+                    _SidecarLog (L"[diag/F.frame] GetFrameStatistics not ready");
+                  }
+
+                  if (idx_post_stagef != 0xFFFFFFFFu)
+                  {
+                    _SidecarLog (L"[diag/F.idx] post_stageF_buffer_index=%u (sampled immediately after CopySubresourceRegion)",
+                                 idx_post_stagef);
+                  }
+
+                  // (5) Stage F submission proof
+                  ID3D11Device* devLog = nullptr;
+                  bb->GetDevice (&devLog);
+                  _SidecarLog (
+                    L"[diag/F.subm] dev=%p ctx=%p ctx_type=%d (0=IMMEDIATE,1=DEFERRED) "
+                    L"bb_owning_dev=%p flush_after_StageF=no(default) flipper_path=GL→D3D11(out-of-process)",
+                    (void*)dev, (void*)ctx, (int)ctxType, (void*)devLog);
+                  if (devLog != nullptr) devLog->Release ();
+
+                  // (6) Backbuffer identity
+                  _SidecarLog (
+                    L"[diag/F.bb] stageF_tex_wrapper=%p stageF_tex_IUnknown=%p bb_idx=%u "
+                    L"(compare against producer/flipper-side IUnknown for output.backbuffer.image)",
+                    (void*)bb, (void*)bbUnk, idx_post_stagef);
+                }
+
+                // ---- (5b) Optional gated diagnostic Flush experiment ----
+                // Cache env var on first hit.
+                if (s_diag.diag_flush_mode < 0)
+                {
+                  wchar_t buf[8] = { };
+                  DWORD n = GetEnvironmentVariableW (L"SIDECARK_DIAG_FLUSH_AFTER_STAGE_F", buf, _countof (buf));
+                  int mode = 0;
+                  if (n > 0 && n < _countof (buf))
+                  {
+                    if      (buf[0] == L'2') mode = 2;
+                    else if (buf[0] == L'1') mode = 1;
+                    else                     mode = 0;
+                  }
+                  s_diag.diag_flush_mode = mode;
+                  if (! s_diag.logged_flush_mode)
+                  {
+                    s_diag.logged_flush_mode = true;
+                    _SidecarLog (L"[diag/F.flush] SIDECARK_DIAG_FLUSH_AFTER_STAGE_F=%d (0=off,1=Flush,2=Flush+EventQuery)", mode);
+                  }
+                }
+
+                if (s_diag.diag_flush_mode >= 1 && ctxType == D3D11_DEVICE_CONTEXT_IMMEDIATE)
+                {
+                  const ULONGLONG tFlush = GetTickCount64 ();
+                  ctx->Flush ();
+                  if (s_diag.diag_flush_mode == 2)
+                  {
+                    ID3D11Device* devQ = nullptr;
+                    bb->GetDevice (&devQ);
+                    if (devQ != nullptr)
+                    {
+                      D3D11_QUERY_DESC qd = { D3D11_QUERY_EVENT, 0 };
+                      ID3D11Query* pQuery = nullptr;
+                      if (SUCCEEDED (devQ->CreateQuery (&qd, &pQuery)) && pQuery != nullptr)
+                      {
+                        ctx->End (pQuery);
+                        // Bounded poll: up to ~16ms (one frame). DO NOT extend.
+                        const ULONGLONG tDeadline = GetTickCount64 () + 16ULL;
+                        BOOL done = FALSE;
+                        while (! done && GetTickCount64 () < tDeadline)
+                        {
+                          HRESULT hrQ = ctx->GetData (pQuery, &done, sizeof (done), 0);
+                          if (FAILED (hrQ)) break;
+                          if (! done) Sleep (0);
+                        }
+                        const ULONGLONG dt = GetTickCount64 () - tFlush;
+                        if (should_log)
+                        {
+                          _SidecarLog (L"[diag/F.flush] Flush+EventQuery completed=%d total_ms=%llu",
+                                       done ? 1 : 0, (unsigned long long)dt);
+                        }
+                        pQuery->Release ();
+                      }
+                      devQ->Release ();
+                    }
+                  }
+                  else if (should_log)
+                  {
+                    _SidecarLog (L"[diag/F.flush] Flush() executed after Stage F copy (mode=1, no query)");
+                  }
+                }
+
+                if (pContaining != nullptr) pContaining->Release ();
+                if (pSC1        != nullptr) pSC1->Release ();
+              }
             }
             else
             {
@@ -2651,9 +3038,82 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   }
   _LogSlowStage (L"PresentBase", tPresentBase);
 
-  return
+  // ============================================================================
+  // STAGE F DIAGNOSTICS — pre/post real-Present buffer-index & frame-stats
+  // Only sample when overlay_enabled (cheap; rate-limited to once/sec).
+  // ============================================================================
+  bool       diag_present_log    = false;
+  UINT       diag_idx_pre        = 0xFFFFFFFFu;
+  UINT       diag_lpc_pre        = 0;
+  bool       diag_have_fs_pre    = false;
+  DXGI_FRAME_STATISTICS diag_fs_pre = { };
+
+  if (overlay_enabled)
+  {
+    static ULONGLONG s_last_present_diag_ms = 0;
+    const ULONGLONG nowMs2 = GetTickCount64 ();
+    const bool first_burst2 = (s_diag.frames_logged_after_first <= 3u);
+    if (first_burst2 || nowMs2 - s_last_present_diag_ms >= 1000ULL)
+    {
+      s_last_present_diag_ms = nowMs2;
+      diag_present_log = true;
+
+      IDXGISwapChain3* pSC3pre = nullptr;
+      if (SUCCEEDED (pReal->QueryInterface (__uuidof (IDXGISwapChain3), (void**)&pSC3pre)) && pSC3pre != nullptr)
+      {
+        diag_idx_pre = pSC3pre->GetCurrentBackBufferIndex ();
+        pSC3pre->Release ();
+      }
+      pReal->GetLastPresentCount (&diag_lpc_pre);
+      diag_have_fs_pre = SUCCEEDED (pReal->GetFrameStatistics (&diag_fs_pre));
+
+      _SidecarLog (
+        L"[diag/F.pre-present] sc=%p idx=%u lastPresentCount=%u fs_pc=%u fs_pr=%u fs_sr=%u "
+        L"SyncInterval=%u Flags=0x%08X",
+        (void*)pReal,
+        diag_idx_pre, diag_lpc_pre,
+        diag_have_fs_pre ? diag_fs_pre.PresentCount        : 0u,
+        diag_have_fs_pre ? diag_fs_pre.PresentRefreshCount : 0u,
+        diag_have_fs_pre ? diag_fs_pre.SyncRefreshCount    : 0u,
+        SyncInterval, Flags);
+    }
+  }
+
+  HRESULT hrRealPresent =
     SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
                                 nullptr, SK_DXGI_PresentSource::Wrapper );
+
+  if (diag_present_log)
+  {
+    UINT idx_post = 0xFFFFFFFFu;
+    IDXGISwapChain3* pSC3post = nullptr;
+    if (SUCCEEDED (pReal->QueryInterface (__uuidof (IDXGISwapChain3), (void**)&pSC3post)) && pSC3post != nullptr)
+    {
+      idx_post = pSC3post->GetCurrentBackBufferIndex ();
+      pSC3post->Release ();
+    }
+    UINT lpc_post = 0;
+    pReal->GetLastPresentCount (&lpc_post);
+    DXGI_FRAME_STATISTICS fs_post = { };
+    bool have_fs_post = SUCCEEDED (pReal->GetFrameStatistics (&fs_post));
+
+    _SidecarLog (
+      L"[diag/F.post-present] hr=0x%08X idx_pre=%u idx_post=%u Δidx=%d "
+      L"lpc_pre=%u lpc_post=%u Δlpc=%d "
+      L"fs_pc_post=%u Δpc=%d fs_pr_post=%u Δpr=%d fs_sr_post=%u Δsr=%d",
+      (UINT)hrRealPresent,
+      diag_idx_pre, idx_post,
+      (idx_post != 0xFFFFFFFFu && diag_idx_pre != 0xFFFFFFFFu) ? (int)idx_post - (int)diag_idx_pre : 0,
+      diag_lpc_pre, lpc_post, (int)lpc_post - (int)diag_lpc_pre,
+      have_fs_post ? fs_post.PresentCount        : 0u,
+      (have_fs_post && diag_have_fs_pre) ? (int)fs_post.PresentCount        - (int)diag_fs_pre.PresentCount        : 0,
+      have_fs_post ? fs_post.PresentRefreshCount : 0u,
+      (have_fs_post && diag_have_fs_pre) ? (int)fs_post.PresentRefreshCount - (int)diag_fs_pre.PresentRefreshCount : 0,
+      have_fs_post ? fs_post.SyncRefreshCount    : 0u,
+      (have_fs_post && diag_have_fs_pre) ? (int)fs_post.SyncRefreshCount    - (int)diag_fs_pre.SyncRefreshCount    : 0);
+  }
+
+  return hrRealPresent;
 }
 
 HRESULT
