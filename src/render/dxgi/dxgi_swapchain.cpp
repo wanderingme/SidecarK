@@ -2167,7 +2167,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
             IDXGIOutput* pContainingOutput = nullptr;
             IDXGIOutput6* pOutput6 = nullptr;
-            DWORD hwCompFlags = 0;
+            UINT hwCompFlags = 0;
             HRESULT hrHwComp = E_NOINTERFACE;
             const HRESULT hrContaining =
               pReal->GetContainingOutput (&pContainingOutput);
