@@ -1181,6 +1181,54 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                  stackBuf);
   };
 
+  struct SKF1_FullscreenDiagState
+  {
+    std::atomic_bool logged_activation = false;
+    bool             logged_stagef = false;
+    bool             last_overlay_enabled = false;
+    IDXGISwapChain*  last_sc_wrap = nullptr;
+    IDXGISwapChain*  last_sc_real = nullptr;
+    HWND             last_hwnd = nullptr;
+    bool             last_fullscreen_shape_valid = false;
+    bool             last_fullscreen_shape = false;
+    bool             last_has_swapchain3 = false;
+    bool             last_has_backbuffer_idx = false;
+    bool             last_identity_valid = false;
+    int              last_identity_state = -1; // 1=yes, 0=no, -1=unknown
+    ULONGLONG        last_probe_ms = 0;
+  };
+
+  static SKF1_FullscreenDiagState s_fsdiag;
+  static constexpr ULONGLONG kSKF1_DiagProbeIntervalMs = 1000ull;
+  static constexpr LONG      kSKF1_DiagRectTolerancePx = 2;
+
+  if (!s_fsdiag.logged_activation.exchange (true))
+  {
+    wchar_t module_path[MAX_PATH] = { };
+    HMODULE hMod = nullptr;
+
+    if (GetModuleHandleExW ( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                             (LPCWSTR)&SK_DXGI_DispatchPresent, &hMod ))
+    {
+      GetModuleFileNameW (hMod, module_path, MAX_PATH);
+    }
+
+    wchar_t log_path[MAX_PATH] = { };
+    DWORD cch = GetTempPathW (MAX_PATH, log_path);
+    if (cch > 0 && cch < MAX_PATH &&
+        cch + wcslen (L"SidecarK_Overlay.log") + 1 < MAX_PATH)
+      wcscat_s (log_path, L"SidecarK_Overlay.log");
+    else
+      wcscpy_s (log_path, L"<unknown>");
+
+    _SidecarLog (L"SidecarK fullscreen diag active pid=%lu module=%ls diagnostics_enabled=%d log_path=%ls",
+                 (unsigned long)GetCurrentProcessId (),
+                 module_path[0] ? module_path : L"<unknown>",
+                 SidecarK_DiagnosticsEnabled () ? 1 : 0,
+                 log_path);
+  }
+
   auto _ReleaseMappedOverlay = [&]()
   {
     if (s_skf1.tex != nullptr)
@@ -2003,6 +2051,241 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           }
 
           // STAGE F: EPILOGUE - Always blit if we have a valid frame (last-good draw)
+          const ULONGLONG nowDiagMs = GetTickCount64 ();
+          const bool overlay_rise =
+            (overlay_enabled && (! s_fsdiag.last_overlay_enabled));
+          s_fsdiag.last_overlay_enabled = overlay_enabled;
+
+          const bool swapchain_changed =
+            (s_fsdiag.last_sc_wrap != (IDXGISwapChain *)this) ||
+            (s_fsdiag.last_sc_real != pReal);
+
+          const bool probe_due =
+            ((! s_fsdiag.logged_stagef) || overlay_rise || swapchain_changed ||
+             nowDiagMs - s_fsdiag.last_probe_ms >= kSKF1_DiagProbeIntervalMs);
+
+          if (probe_due)
+          {
+            s_fsdiag.last_probe_ms = nowDiagMs;
+
+            DXGI_SWAP_CHAIN_DESC scDesc = { };
+            const HRESULT hrDesc =
+              pReal->GetDesc (&scDesc);
+
+            HWND hwnd = SUCCEEDED (hrDesc) ? scDesc.OutputWindow : hWnd_;
+            if (hwnd == nullptr && ver_ >= 1)
+              static_cast<IDXGISwapChain1 *>(pReal)->GetHwnd (&hwnd);
+
+            RECT rcWnd = { }, rcCli = { }, rcMon = { };
+            DWORD style = 0, exstyle = 0;
+            bool approx_monitor = false;
+            bool ws_popup = false, ws_caption = false, ws_thickframe = false;
+            bool fullscreen_shaped = false;
+
+            if (IsWindow (hwnd))
+            {
+              style   = (DWORD)GetWindowLongPtrW (hwnd, GWL_STYLE);
+              exstyle = (DWORD)GetWindowLongPtrW (hwnd, GWL_EXSTYLE);
+              GetWindowRect (hwnd, &rcWnd);
+              GetClientRect (hwnd, &rcCli);
+
+              HMONITOR hMon = MonitorFromWindow (hwnd, MONITOR_DEFAULTTONEAREST);
+              if (hMon != nullptr)
+              {
+                MONITORINFO mi = { };
+                mi.cbSize = sizeof (mi);
+                if (GetMonitorInfoW (hMon, &mi))
+                {
+                  rcMon = mi.rcMonitor;
+                  auto _approx_eq = [](LONG a, LONG b) -> bool {
+                    const LONG diff = (a > b) ? (a - b) : (b - a);
+                    return diff <= kSKF1_DiagRectTolerancePx;
+                  };
+                  approx_monitor =
+                    _approx_eq (rcWnd.left,   rcMon.left)   &&
+                    _approx_eq (rcWnd.top,    rcMon.top)    &&
+                    _approx_eq (rcWnd.right,  rcMon.right)  &&
+                    _approx_eq (rcWnd.bottom, rcMon.bottom);
+                }
+              }
+
+              ws_popup      = (style & WS_POPUP)      != 0;
+              ws_caption    = (style & WS_CAPTION)    != 0;
+              ws_thickframe = (style & WS_THICKFRAME) != 0;
+              fullscreen_shaped =
+                (approx_monitor && ws_popup && (!ws_caption) && (!ws_thickframe));
+            }
+
+            BOOL fsState = FALSE;
+            IDXGIOutput* pFsOutput = nullptr;
+            const HRESULT hrFs =
+              pReal->GetFullscreenState (&fsState, &pFsOutput);
+            if (pFsOutput != nullptr)
+              pFsOutput->Release ();
+
+            SK_ComQIPtr <IDXGISwapChain3> pSwap3 (pReal);
+            const bool hasSwapChain3 = (pSwap3.p != nullptr);
+            const bool hasBackbufferIdx = hasSwapChain3;
+            UINT backbufferIdx = 0;
+            if (hasBackbufferIdx)
+              backbufferIdx = pSwap3->GetCurrentBackBufferIndex ();
+
+            IUnknown* bbIdentity = nullptr;
+            if (bb != nullptr)
+            {
+              bb->QueryInterface (IID_IUnknown, (void **)&bbIdentity);
+            }
+
+            ID3D11Texture2D* flipperTex = nullptr;
+            IUnknown* flipperIdentity = nullptr;
+            {
+              ID3D11ShaderResourceView* proxySRV = nullptr;
+              UINT proxySize = sizeof (proxySRV);
+              if (SUCCEEDED ( GetPrivateData (SKID_DXGI_SwapChainProxyBackbuffer_D3D11,
+                                              &proxySize, &proxySRV) ) &&
+                  proxySRV != nullptr)
+              {
+                ID3D11Resource* proxyRes = nullptr;
+                proxySRV->GetResource (&proxyRes);
+                if (proxyRes != nullptr)
+                {
+                  proxyRes->QueryInterface (__uuidof (ID3D11Texture2D), (void **)&flipperTex);
+                  proxyRes->Release ();
+                }
+                proxySRV->Release ();
+              }
+
+              if (flipperTex != nullptr)
+              {
+                flipperTex->QueryInterface (IID_IUnknown, (void **)&flipperIdentity);
+              }
+            }
+
+            int identityState = -1;
+            if (bbIdentity != nullptr && flipperIdentity != nullptr)
+              identityState = (bbIdentity == flipperIdentity) ? 1 : 0;
+
+            IDXGIOutput* pContainingOutput = nullptr;
+            IDXGIOutput6* pOutput6 = nullptr;
+            DWORD hwCompFlags = 0;
+            HRESULT hrHwComp = E_NOINTERFACE;
+            const HRESULT hrContaining =
+              pReal->GetContainingOutput (&pContainingOutput);
+            if (SUCCEEDED (hrContaining) && pContainingOutput != nullptr &&
+                SUCCEEDED (pContainingOutput->QueryInterface (__uuidof (IDXGIOutput6), (void **)&pOutput6)) &&
+                pOutput6 != nullptr)
+            {
+              hrHwComp =
+                pOutput6->CheckHardwareCompositionSupport (&hwCompFlags);
+            }
+
+            const bool hwnd_changed = (hwnd != s_fsdiag.last_hwnd);
+            const bool fullscreen_shape_changed =
+              (!s_fsdiag.last_fullscreen_shape_valid) ||
+              (fullscreen_shaped != s_fsdiag.last_fullscreen_shape);
+            const bool bbidx_avail_changed =
+              (hasSwapChain3 != s_fsdiag.last_has_swapchain3) ||
+              (hasBackbufferIdx != s_fsdiag.last_has_backbuffer_idx);
+            const bool identity_changed =
+              (!s_fsdiag.last_identity_valid) ||
+              (identityState != s_fsdiag.last_identity_state);
+
+            const bool emit_diag =
+              (!s_fsdiag.logged_stagef) ||
+              overlay_rise ||
+              swapchain_changed ||
+              hwnd_changed ||
+              fullscreen_shape_changed ||
+              bbidx_avail_changed ||
+              identity_changed;
+
+            if (emit_diag)
+            {
+              _SidecarLog (L"SKF1_DIAG_STAGEF: reason_init=%d reason_overlay_rise=%d reason_swapchain=%d reason_hwnd=%d reason_fullscreen_shape=%d reason_bbidx_avail=%d reason_identity=%d sc_wrap=%p sc_real=%p overlayEnabled=%d bb=%ux%u hdr=%ux%u copy=%ux%u bbfmt=%u texfmt=%u sync=%u flags=0x%08X",
+                           s_fsdiag.logged_stagef ? 0 : 1,
+                           overlay_rise ? 1 : 0,
+                           swapchain_changed ? 1 : 0,
+                           hwnd_changed ? 1 : 0,
+                           fullscreen_shape_changed ? 1 : 0,
+                           bbidx_avail_changed ? 1 : 0,
+                           identity_changed ? 1 : 0,
+                           (void *)this,
+                           (void *)pReal,
+                           overlay_enabled ? 1 : 0,
+                           bbDesc.Width, bbDesc.Height,
+                           s_skf1.width, s_skf1.height,
+                           copyW, copyH,
+                           (UINT)bbDesc.Format,
+                           (UINT)s_skf1.texFmt,
+                           SyncInterval,
+                           Flags);
+
+              _SidecarLog (L"SKF1_DIAG_HWND_DXGI: hwnd=%p output_hwnd=%p style=0x%08lX exstyle=0x%08lX wnd=(%ld,%ld,%ld,%ld) client=(%ld,%ld,%ld,%ld) monitor=(%ld,%ld,%ld,%ld) approx_monitor=%d ws_popup=%d ws_caption=%d ws_thickframe=%d desc_w=%u desc_h=%u desc_fmt=%u swap_effect=%u buffer_count=%u sc_flags=0x%08X windowed=%d fs_hr=0x%08X fs=%d",
+                           hwnd,
+                           SUCCEEDED (hrDesc) ? scDesc.OutputWindow : nullptr,
+                           (unsigned long)style,
+                           (unsigned long)exstyle,
+                           rcWnd.left, rcWnd.top, rcWnd.right, rcWnd.bottom,
+                           rcCli.left, rcCli.top, rcCli.right, rcCli.bottom,
+                           rcMon.left, rcMon.top, rcMon.right, rcMon.bottom,
+                           approx_monitor ? 1 : 0,
+                           ws_popup ? 1 : 0,
+                           ws_caption ? 1 : 0,
+                           ws_thickframe ? 1 : 0,
+                           SUCCEEDED (hrDesc) ? scDesc.BufferDesc.Width : 0,
+                           SUCCEEDED (hrDesc) ? scDesc.BufferDesc.Height : 0,
+                           SUCCEEDED (hrDesc) ? (UINT)scDesc.BufferDesc.Format : 0,
+                           SUCCEEDED (hrDesc) ? (UINT)scDesc.SwapEffect : 0,
+                           SUCCEEDED (hrDesc) ? scDesc.BufferCount : 0,
+                           SUCCEEDED (hrDesc) ? scDesc.Flags : 0u,
+                           SUCCEEDED (hrDesc) ? (scDesc.Windowed ? 1 : 0) : -1,
+                           (unsigned int)hrFs,
+                           SUCCEEDED (hrFs) ? (fsState ? 1 : 0) : -1);
+
+              _SidecarLog (L"SKF1_DIAG_BUFFER_ID: swapchain3=%d bbidx_avail=%d bbidx=%u real_bb0_tex=%p real_bb0_iunk=%p flipper_bb_tex=%p flipper_bb_iunk=%p same_identity=%ls",
+                           hasSwapChain3 ? 1 : 0,
+                           hasBackbufferIdx ? 1 : 0,
+                           backbufferIdx,
+                           bb,
+                           bbIdentity,
+                           flipperTex,
+                           flipperIdentity,
+                           identityState > 0 ? L"yes" :
+                           identityState == 0 ? L"no" : L"unknown");
+
+              _SidecarLog (L"SKF1_DIAG_HWCOMP: containing_output=%p output6=%d hwcomp_hr=0x%08X hwcomp_flags=0x%08X fullscreen=%d windowed=%d cursor_stretched=%d",
+                           pContainingOutput,
+                           pOutput6 != nullptr ? 1 : 0,
+                           (unsigned int)hrHwComp,
+                           (unsigned int)hwCompFlags,
+                           (hwCompFlags & DXGI_HARDWARE_COMPOSITION_SUPPORT_FLAG_FULLSCREEN) ? 1 : 0,
+                           (hwCompFlags & DXGI_HARDWARE_COMPOSITION_SUPPORT_FLAG_WINDOWED) ? 1 : 0,
+                           (hwCompFlags & DXGI_HARDWARE_COMPOSITION_SUPPORT_FLAG_CURSOR_STRETCHED) ? 1 : 0);
+            }
+
+            s_fsdiag.logged_stagef = true;
+            s_fsdiag.last_sc_wrap = (IDXGISwapChain *)this;
+            s_fsdiag.last_sc_real = pReal;
+            s_fsdiag.last_hwnd = hwnd;
+            s_fsdiag.last_fullscreen_shape_valid = true;
+            s_fsdiag.last_fullscreen_shape = fullscreen_shaped;
+            s_fsdiag.last_has_swapchain3 = hasSwapChain3;
+            s_fsdiag.last_has_backbuffer_idx = hasBackbufferIdx;
+            s_fsdiag.last_identity_valid = true;
+            s_fsdiag.last_identity_state = identityState;
+
+            if (pOutput6 != nullptr)
+              pOutput6->Release ();
+            if (pContainingOutput != nullptr)
+              pContainingOutput->Release ();
+            if (flipperIdentity != nullptr)
+              flipperIdentity->Release ();
+            if (flipperTex != nullptr)
+              flipperTex->Release ();
+            if (bbIdentity != nullptr)
+              bbIdentity->Release ();
+          }
+
           static std::atomic<bool> s_logged_blit_check = false;
           if (!s_logged_blit_check.exchange(true))
           {
