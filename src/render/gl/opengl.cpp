@@ -2380,7 +2380,7 @@ SK_GL_CreateInteropSwapChain ( IDXGIFactory2         *pFactory,
 
       DXGI_SWAP_CHAIN_DESC1 fallback_desc = orig_desc;
       fallback_desc.SwapEffect            = DXGI_SWAP_EFFECT_SEQUENTIAL;
-      fallback_desc.BufferCount           = std::max (1u, std::min (orig_desc.BufferCount, 2u));
+      fallback_desc.BufferCount           = std::min (orig_desc.BufferCount, 2u);
       fallback_desc.Flags                &= ~(DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
                                               DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
 
