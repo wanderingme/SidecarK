@@ -2039,6 +2039,10 @@ struct SK_IndirectX_InteropCtx
 
     UINT                                   swapchain_flags = 0x0;
     DXGI_SWAP_EFFECT                       swap_effect     = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    UINT                                   active_swapchain_flags = 0x0;
+    UINT                                   active_buffer_count    = 0;
+    bool                                   has_active_desc        = false;
+    bool                                   suppress_tearing_present = false;
 
     HWND                                   hWnd     = nullptr;
     HMONITOR                               hMonitor = nullptr;
@@ -2170,7 +2174,9 @@ SK_IndirectX_PresentManager::Start (SK_IndirectX_InteropCtx *pCtx)
 
             BOOL bSuccess =
               SUCCEEDED ( pSwapChain->Present ( pCtx->present_man.interval,
-                  (pCtx->output.caps.tearing && pCtx->present_man.interval == 0) ? DXGI_PRESENT_ALLOW_TEARING
+                  (pCtx->output.caps.tearing &&
+                   (! pCtx->output.suppress_tearing_present) &&
+                   pCtx->present_man.interval == 0) ? DXGI_PRESENT_ALLOW_TEARING
                                                                                  : 0x0 ) );
 
 
@@ -2325,6 +2331,108 @@ SK_GL_CreateInteropSwapChain ( IDXGIFactory2         *pFactory,
 {
   // Disable OpenGL HDR ZeroCopy because of a memory leak on HDR10 codepath
   SK_DXGI_ZeroCopy = false;
+
+  if (desc1 != nullptr && IsWindow (hWnd))
+  {
+    RECT  rcWnd  = { };
+    RECT  rcMon  = { };
+    DWORD style  = (DWORD)GetWindowLongPtrW (hWnd, GWL_STYLE);
+
+    const bool ws_popup      = (style & WS_POPUP)      != 0;
+    const bool ws_caption    = (style & WS_CAPTION)    != 0;
+    const bool ws_thickframe = (style & WS_THICKFRAME) != 0;
+
+    bool approx_monitor = false;
+
+    if (GetWindowRect (hWnd, &rcWnd))
+    {
+      if (HMONITOR hMon = MonitorFromWindow (hWnd, MONITOR_DEFAULTTONEAREST);
+                    hMon != nullptr)
+      {
+        MONITORINFO mi = { };
+        mi.cbSize = sizeof (mi);
+
+        if (GetMonitorInfoW (hMon, &mi))
+        {
+          rcMon = mi.rcMonitor;
+
+          auto _approx_eq = [](LONG a, LONG b) -> bool
+          {
+            const LONG diff = (a > b) ? (a - b) : (b - a);
+            return diff <= 2;
+          };
+
+          approx_monitor =
+            _approx_eq (rcWnd.left,   rcMon.left)   &&
+            _approx_eq (rcWnd.top,    rcMon.top)    &&
+            _approx_eq (rcWnd.right,  rcMon.right)  &&
+            _approx_eq (rcWnd.bottom, rcMon.bottom);
+        }
+      }
+    }
+
+    const bool fullscreen_shaped =
+      (approx_monitor && ws_popup && (! ws_caption) && (! ws_thickframe));
+
+    if (fullscreen_shaped)
+    {
+      const DXGI_SWAP_CHAIN_DESC1 orig_desc = *desc1;
+
+      DXGI_SWAP_CHAIN_DESC1 fallback_desc = orig_desc;
+      fallback_desc.SwapEffect            = DXGI_SWAP_EFFECT_SEQUENTIAL;
+      fallback_desc.BufferCount           = std::max (1u, std::min (orig_desc.BufferCount, 2u));
+      fallback_desc.Flags                &= ~(DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
+                                              DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+
+      HRESULT hrFallback =
+        pFactory->CreateSwapChainForHwnd ( pDevice, hWnd,
+                                           &fallback_desc, nullptr,
+                                                           nullptr, ppSwapChain );
+
+      if (FAILED (hrFallback))
+      {
+        fallback_desc             = orig_desc;
+        fallback_desc.SwapEffect  = DXGI_SWAP_EFFECT_DISCARD;
+        fallback_desc.BufferCount = 1;
+        fallback_desc.Flags      &= ~(DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
+                                      DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+
+        hrFallback =
+          pFactory->CreateSwapChainForHwnd ( pDevice, hWnd,
+                                             &fallback_desc, nullptr,
+                                                             nullptr, ppSwapChain );
+      }
+
+      if (SUCCEEDED (hrFallback))
+      {
+        SK_LOGi1 (
+          L"GL interop composed fallback selected: hwnd=%p wnd=(%ld,%ld,%ld,%ld) mon=(%ld,%ld,%ld,%ld) old={se=%u fl=0x%08X bc=%u} new={se=%u fl=0x%08X bc=%u} reason=fullscreen-shaped GL interop hardware-composition avoidance",
+            hWnd,
+            rcWnd.left, rcWnd.top, rcWnd.right, rcWnd.bottom,
+            rcMon.left, rcMon.top, rcMon.right, rcMon.bottom,
+            (unsigned int)orig_desc.SwapEffect,
+            (unsigned int)orig_desc.Flags,
+            (unsigned int)orig_desc.BufferCount,
+            (unsigned int)fallback_desc.SwapEffect,
+            (unsigned int)fallback_desc.Flags,
+            (unsigned int)fallback_desc.BufferCount
+        );
+
+        *desc1 = fallback_desc;
+        return hrFallback;
+      }
+
+      SK_LOGi1 (
+        L"GL interop composed fallback failed: hr=0x%08X attempted={se=%u fl=0x%08X bc=%u} restored_original=1",
+          (unsigned int)hrFallback,
+          (unsigned int)fallback_desc.SwapEffect,
+          (unsigned int)fallback_desc.Flags,
+          (unsigned int)fallback_desc.BufferCount
+      );
+
+      *desc1 = orig_desc;
+    }
+  }
 
   HRESULT hr =
     pFactory->CreateSwapChainForHwnd ( pDevice, hWnd,
@@ -3013,6 +3121,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       IUnknown_AtomicRelease ((void **)&dx_gl_interop.d3d11.staging.colorBuffer.p);
       IUnknown_AtomicRelease ((void **)&dx_gl_interop.output.backbuffer.image.p);
       IUnknown_AtomicRelease ((void **)&dx_gl_interop.output.backbuffer.rtv.p);
+      dx_gl_interop.output.has_active_desc         = false;
+      dx_gl_interop.output.suppress_tearing_present = false;
 
       if (                    0 != dx_gl_interop.gl.fbo) {
         glDeleteFramebuffers  (1, &dx_gl_interop.gl.fbo);
@@ -3084,12 +3194,22 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         //   problems with NVIDIA's driver believing that surface sharing
         //     is failing parameter validation.  * Be explicit about it!
         pSwapChain->ResizeBuffers (
-                   _DXBackBuffers, w, h,
-                    desc1.Format, dx_gl_interop.output.swapchain_flags
+                   dx_gl_interop.output.has_active_desc ? dx_gl_interop.output.active_buffer_count
+                                                        : _DXBackBuffers,
+                   w, h,
+                   desc1.Format,
+                   dx_gl_interop.output.has_active_desc ? dx_gl_interop.output.active_swapchain_flags
+                                                        : dx_gl_interop.output.swapchain_flags
         );
       }
 
       pSwapChain->GetDesc1 (&desc1);
+      dx_gl_interop.output.active_swapchain_flags = desc1.Flags;
+      dx_gl_interop.output.active_buffer_count    = desc1.BufferCount;
+      dx_gl_interop.output.has_active_desc        = true;
+      dx_gl_interop.output.suppress_tearing_present =
+        (desc1.SwapEffect == DXGI_SWAP_EFFECT_DISCARD || desc1.SwapEffect == DXGI_SWAP_EFFECT_SEQUENTIAL) ||
+        ((desc1.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) == 0);
 
       dx_gl_interop.output.viewport = { 0.0f, 0.0f,
                      static_cast <float> (desc1.Width),
