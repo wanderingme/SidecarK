@@ -3052,7 +3052,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   {
     static ULONGLONG s_last_present_diag_ms = 0;
     const ULONGLONG nowMs2 = GetTickCount64 ();
-    const bool first_burst2 = (s_diag.frames_logged_after_first <= 3u);
+    const bool first_burst2 = (s_diag.frames_logged_after_first < 3u);
     if (first_burst2 || nowMs2 - s_last_present_diag_ms >= 1000ULL)
     {
       s_last_present_diag_ms = nowMs2;
