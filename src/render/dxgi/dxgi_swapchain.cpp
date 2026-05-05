@@ -2333,8 +2333,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
             if (pProxyTex != nullptr)
             {
-              if (bb != nullptr)       bb->QueryInterface       (IID_IUnknown, (void **)&pRealIdentity);
-              if (pProxyTex != nullptr) pProxyTex->QueryInterface (IID_IUnknown, (void **)&pProxyIdentity);
+              HRESULT hrRealIdentity  = E_FAIL;
+              HRESULT hrProxyIdentity = E_FAIL;
+              if (bb != nullptr)
+                hrRealIdentity = bb->QueryInterface (IID_IUnknown, (void **)&pRealIdentity);
+              if (pProxyTex != nullptr)
+                hrProxyIdentity = pProxyTex->QueryInterface (IID_IUnknown, (void **)&pProxyIdentity);
 
               if (pRealIdentity != nullptr && pProxyIdentity != nullptr)
               {
@@ -2345,7 +2349,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               }
               else
               {
-                retargetFailReason = L"identity_query_failed";
+                retargetFailReason =
+                  (FAILED (hrRealIdentity) || FAILED (hrProxyIdentity))
+                    ? L"identity_qi_failed"
+                    : L"identity_query_failed";
               }
             }
             else if (retargetFailReason == nullptr)
