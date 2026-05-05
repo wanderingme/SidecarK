@@ -2351,7 +2351,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 retargetFailReason =
                   (FAILED (hrRealIdentity) || FAILED (hrProxyIdentity))
                     ? L"identity_qi_failed"
-                    : L"identity_query_failed";
+                    : L"identity_null_after_qi";
               }
             }
             else if (retargetFailReason == nullptr)
@@ -2360,7 +2360,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             }
 
             static std::atomic<bool> s_logged_retarget_yes = false;
-            if (pCopyDst == pProxyTex && pProxyIdentity != nullptr && pRealIdentity != nullptr)
+            if (pCopyDst == pProxyTex)
             {
               if (!s_logged_retarget_yes.exchange(true))
               {
