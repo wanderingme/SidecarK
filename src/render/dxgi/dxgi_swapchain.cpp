@@ -2383,8 +2383,40 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             if (pCopyDst != nullptr && pCopyDst != bb)
               pCopyDst->GetDesc (&dstDesc);
 
-            if (s_skf1.texFmt == dstDesc.Format)
+            const bool bRetargeted =
+              (pCopyDst == pProxyTex);
+
+            auto SidecarK_FormatsCopyCompatibleForStageF =
+              [] (DXGI_FORMAT srcFmt, DXGI_FORMAT dstFmt) -> bool
             {
+              if (srcFmt == dstFmt)
+                return true;
+
+              const auto _is_r10g10b10a2_family =
+                [] (DXGI_FORMAT fmt) -> bool
+              {
+                return
+                  fmt == DXGI_FORMAT_R10G10B10A2_TYPELESS ||
+                  fmt == DXGI_FORMAT_R10G10B10A2_UNORM;
+              };
+
+              return
+                _is_r10g10b10a2_family (srcFmt) &&
+                _is_r10g10b10a2_family (dstFmt);
+            };
+
+            if (SidecarK_FormatsCopyCompatibleForStageF (s_skf1.texFmt, dstDesc.Format))
+            {
+              if (s_skf1.texFmt != dstDesc.Format)
+              {
+                static std::atomic<bool> s_logged_format_compatible = false;
+                if (!s_logged_format_compatible.exchange(true))
+                {
+                  _SidecarLog (L"SKF1_STAGEF_FORMAT_COMPAT: overlay_fmt=%u dst_fmt=%u compatible=yes family=R10G10B10A2 retargeted=%ls",
+                               s_skf1.texFmt, dstDesc.Format, bRetargeted ? L"yes" : L"no");
+                }
+              }
+
               // Formats match - safe to use CopySubresourceRegion.
               // Use clamped copy rect (copyW×copyH), not full header dims.
               D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
