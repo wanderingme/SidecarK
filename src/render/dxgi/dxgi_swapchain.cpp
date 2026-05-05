@@ -2296,7 +2296,88 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
           {
-            if (s_skf1.texFmt == bbDesc.Format)
+            ID3D11Texture2D* pCopyDst = bb;
+            ID3D11Texture2D* pProxyTex = nullptr;
+            IUnknown* pRealIdentity = nullptr;
+            IUnknown* pProxyIdentity = nullptr;
+            const wchar_t* retargetFailReason = nullptr;
+
+            ID3D11ShaderResourceView* proxySRV = nullptr;
+            UINT proxySize = sizeof (proxySRV);
+            const HRESULT hrProxy =
+              GetPrivateData (SKID_DXGI_SwapChainProxyBackbuffer_D3D11, &proxySize, &proxySRV);
+
+            if (SUCCEEDED (hrProxy) && proxySRV != nullptr)
+            {
+              ID3D11Resource* proxyRes = nullptr;
+              proxySRV->GetResource (&proxyRes);
+              if (proxyRes != nullptr)
+              {
+                proxyRes->QueryInterface (__uuidof (ID3D11Texture2D), (void **)&pProxyTex);
+                proxyRes->Release ();
+              }
+              else
+              {
+                retargetFailReason = L"proxy_resource_null";
+              }
+              proxySRV->Release ();
+            }
+            else if (SUCCEEDED (hrProxy))
+            {
+              retargetFailReason = L"proxy_srv_null";
+            }
+            else
+            {
+              retargetFailReason = L"proxy_private_data_failed";
+            }
+
+            if (pProxyTex != nullptr)
+            {
+              if (bb != nullptr)       bb->QueryInterface       (IID_IUnknown, (void **)&pRealIdentity);
+              if (pProxyTex != nullptr) pProxyTex->QueryInterface (IID_IUnknown, (void **)&pProxyIdentity);
+
+              if (pRealIdentity != nullptr && pProxyIdentity != nullptr)
+              {
+                if (pRealIdentity != pProxyIdentity)
+                  pCopyDst = pProxyTex;
+                else
+                  retargetFailReason = L"same_identity";
+              }
+              else
+              {
+                retargetFailReason = L"identity_query_failed";
+              }
+            }
+            else if (retargetFailReason == nullptr)
+            {
+              retargetFailReason = L"proxy_texture_unavailable";
+            }
+
+            static std::atomic<bool> s_logged_retarget_yes = false;
+            if (pCopyDst == pProxyTex && pProxyIdentity != nullptr && pRealIdentity != nullptr)
+            {
+              if (!s_logged_retarget_yes.exchange(true))
+              {
+                _SidecarLog (L"SKF1_STAGEF_TARGET: real_bb_iunk=%p proxy_bb_iunk=%p retargeted=yes copy=%ux%u",
+                             pRealIdentity, pProxyIdentity, copyW, copyH);
+              }
+            }
+            else
+            {
+              static std::atomic<bool> s_logged_retarget_no = false;
+              if (!s_logged_retarget_no.exchange(true))
+              {
+                _SidecarLog (L"SKF1_STAGEF_TARGET: reason=%ls hr_proxy=0x%08X retargeted=no fallback=real GetBuffer(0)",
+                             retargetFailReason != nullptr ? retargetFailReason : L"unknown",
+                             (unsigned int)hrProxy);
+              }
+            }
+
+            D3D11_TEXTURE2D_DESC dstDesc = bbDesc;
+            if (pCopyDst != nullptr && pCopyDst != bb)
+              pCopyDst->GetDesc (&dstDesc);
+
+            if (s_skf1.texFmt == dstDesc.Format)
             {
               // Formats match - safe to use CopySubresourceRegion.
               // Use clamped copy rect (copyW×copyH), not full header dims.
@@ -2304,14 +2385,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               static std::atomic<bool> s_logged_blit_details = false;
               if (!s_logged_blit_details.exchange(true))
               {
-                _SidecarLog(L"→ Blit destination: bb=%p (backbuffer from GetBuffer(0))", bb);
-                _SidecarLog(L"→ Backbuffer format: %u, Overlay format: %u", bbDesc.Format, s_skf1.texFmt);
+                _SidecarLog(L"→ Blit destination: bb=%p proxy=%p selected=%p", bb, pProxyTex, pCopyDst);
+                _SidecarLog(L"→ Backbuffer format: %u, Overlay format: %u", dstDesc.Format, s_skf1.texFmt);
                 _SidecarLog(L"→ No backbuffer clear performed (composite only)");
                 _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
               }
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
               const ULONGLONG tCopySub11 = GetTickCount64 ();
-              ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
+              ctx->CopySubresourceRegion (pCopyDst, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
               _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
 
               // STAGE F OK
@@ -2325,9 +2406,16 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               static std::atomic<bool> s_logged_format_mismatch = false;
               if (!s_logged_format_mismatch.exchange(true))
               {
-                _SidecarLog(L"→ FORMAT MISMATCH: overlay tex=%u backbuffer=%u", s_skf1.texFmt, bbDesc.Format);
+                _SidecarLog(L"→ FORMAT MISMATCH: overlay tex=%u backbuffer=%u", s_skf1.texFmt, dstDesc.Format);
               }
             }
+
+            if (pProxyIdentity != nullptr)
+              pProxyIdentity->Release ();
+            if (pRealIdentity != nullptr)
+              pRealIdentity->Release ();
+            if (pProxyTex != nullptr)
+              pProxyTex->Release ();
 
             // Health signal: log successful composite periodically
 
