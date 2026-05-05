@@ -2337,8 +2337,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
               HRESULT hrProxyIdentity = E_FAIL;
               if (bb != nullptr)
                 hrRealIdentity = bb->QueryInterface (IID_IUnknown, (void **)&pRealIdentity);
-              if (pProxyTex != nullptr)
-                hrProxyIdentity = pProxyTex->QueryInterface (IID_IUnknown, (void **)&pProxyIdentity);
+              hrProxyIdentity = pProxyTex->QueryInterface (IID_IUnknown, (void **)&pProxyIdentity);
 
               if (pRealIdentity != nullptr && pProxyIdentity != nullptr)
               {
