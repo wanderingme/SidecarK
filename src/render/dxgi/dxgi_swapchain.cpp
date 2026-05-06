@@ -1197,7 +1197,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
          ID3D11DeviceContext*   pProbeCtx,
          ID3D11Texture2D*       pProbeTex,
    const D3D11_TEXTURE2D_DESC*  pProbeDesc,
-         std::atomic_bool&      loggedOnceRef ) -> void
+         std::atomic_bool&      loggedOnce ) -> void
   {
     if (! SidecarK_VisualProbeModeEnabled (wszMode))
       return;
@@ -1215,7 +1215,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     if (! SidecarK_DrawD3D11VisualProbe (pProbeDev, pProbeCtx, pProbeTex, nullptr, &desc))
       return;
 
-    if (! loggedOnceRef.exchange (true))
+    if (! loggedOnce.exchange (true))
     {
       SidecarK_WriteDiagLog (
         L"probe_mode=%ls target=%ls tex=%p dims=%ux%u fmt=%u frame=%llu stage=%ls",
