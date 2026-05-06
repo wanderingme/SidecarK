@@ -181,10 +181,7 @@ SidecarK_WriteDiagLog (const wchar_t* fmt, ...)
     return;
 
   if (! SidecarK_DiagnosticsEnabled () &&
-      ! SidecarK_VisualProbeModeEnabled (L"real_pre_present") &&
-      ! SidecarK_VisualProbeModeEnabled (L"proxy_before_presentbase") &&
-      ! SidecarK_VisualProbeModeEnabled (L"real_after_presentbase") &&
-      ! SidecarK_VisualProbeModeEnabled (L"flipper_pass"))
+      _wcsicmp (SidecarK_GetVisualProbeModeName (), L"off") == 0)
   {
     return;
   }
