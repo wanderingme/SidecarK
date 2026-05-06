@@ -1189,7 +1189,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                  stackBuf);
   };
 
-  auto _TryDrawDXGIProbe =
+  auto tryDrawDXGIProbe =
     [&]( const wchar_t*         wszMode,
          const wchar_t*         wszTarget,
          const wchar_t*         wszPhase,
@@ -2712,14 +2712,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           D3D11_TEXTURE2D_DESC proxyDesc = { };
           _backbuffers [0]->GetDesc (&proxyDesc);
 
-          _TryDrawDXGIProbe ( L"proxy_before_presentbase",
-                              L"proxy_backbuffer",
-                              L"before_presentbase",
-                              pProbeDev.p,
-                              pProbeCtx.p,
-                              _backbuffers [0].p,
-                              &proxyDesc,
-                              s_logged_proxy_probe_once );
+          tryDrawDXGIProbe ( L"proxy_before_presentbase",
+                             L"proxy_backbuffer",
+                             L"before_presentbase",
+                             pProbeDev.p,
+                             pProbeCtx.p,
+                             _backbuffers [0].p,
+                             &proxyDesc,
+                             s_logged_proxy_probe_once );
         }
       }
     }
@@ -2753,14 +2753,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
           D3D11_TEXTURE2D_DESC bbDesc = { };
           pRealBackbuffer->GetDesc (&bbDesc);
 
-          _TryDrawDXGIProbe ( L"real_after_presentbase",
-                              L"real_backbuffer",
-                              L"after_presentbase_before_present",
-                              pProbeDev.p,
-                              pProbeCtx.p,
-                              pRealBackbuffer.p,
-                              &bbDesc,
-                              s_logged_real_after_presentbase_once );
+          tryDrawDXGIProbe ( L"real_after_presentbase",
+                             L"real_backbuffer",
+                             L"after_presentbase_before_present",
+                             pProbeDev.p,
+                             pProbeCtx.p,
+                             pRealBackbuffer.p,
+                             &bbDesc,
+                             s_logged_real_after_presentbase_once );
         }
       }
     }

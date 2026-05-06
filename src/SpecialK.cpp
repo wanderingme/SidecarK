@@ -279,7 +279,7 @@ SidecarK_DrawD3D11VisualProbe ( ID3D11Device*           pDevice,
     pRTV = pProbeRTV.p;
   }
 
-  static constexpr FLOAT fProbeColor [4] = { 1.0f, 0.0f, 1.0f, 1.0f };
+  static constexpr FLOAT kVisualProbeColor [4] = { 1.0f, 0.0f, 1.0f, 1.0f };
 
   if (SK_ComQIPtr <ID3D11DeviceContext1> pDevCtx1 (pDevCtx); pDevCtx1.p != nullptr)
   {
@@ -289,12 +289,12 @@ SidecarK_DrawD3D11VisualProbe ( ID3D11Device*           pDevice,
     if (right > 0 && bottom > 0)
     {
       const D3D11_RECT rect = { 0, 0, right, bottom };
-      pDevCtx1->ClearView (pRTV, fProbeColor, &rect, 1);
+      pDevCtx1->ClearView (pRTV, kVisualProbeColor, &rect, 1);
       return true;
     }
   }
 
-  pDevCtx->ClearRenderTargetView (pRTV, fProbeColor);
+  pDevCtx->ClearRenderTargetView (pRTV, kVisualProbeColor);
   return true;
 }
 
