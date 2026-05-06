@@ -746,8 +746,63 @@ IWrapDXGISwapChain::PresentBase (void)
         SK_ScopedBool auto_bool2 (flag_result.first);
                                  *flag_result.first = flag_result.second;
 
+        UINT        selectedRealBufferIndex = 0;
+        UINT        bufferCount             = 0;
+        const wchar_t* fallbackReason       = L"default_index_0";
+        bool        usedSwapChain3          = false;
+
+        DXGI_SWAP_CHAIN_DESC scDesc = { };
+        if (SUCCEEDED (pReal->GetDesc (&scDesc)))
+          bufferCount = scDesc.BufferCount;
+        else
+          fallbackReason = L"getdesc_failed";
+
+        SK_ComQIPtr <IDXGISwapChain3>
+            pSwapChain3 (pReal);
+        if (pSwapChain3 != nullptr)
+        {
+          const UINT currentIdx = pSwapChain3->GetCurrentBackBufferIndex ();
+          if (bufferCount > 0u && currentIdx < bufferCount)
+          {
+            selectedRealBufferIndex = currentIdx;
+            usedSwapChain3          = true;
+            fallbackReason          = L"none";
+          }
+          else if (bufferCount == 0u)
+          {
+            fallbackReason = L"invalid_buffer_count";
+          }
+          else
+          {
+            fallbackReason = L"invalid_current_index";
+          }
+        }
+        else if (bufferCount == 0u)
+        {
+          fallbackReason = L"swapchain3_unavailable_invalid_buffer_count";
+        }
+        else
+        {
+          fallbackReason = L"swapchain3_unavailable";
+        }
+
+        {
+          static ULONGLONG s_last_presentbase_idx_log_ms = 0;
+          const ULONGLONG nowMs = GetTickCount64 ();
+          if ((selectedRealBufferIndex != 0u || SidecarK_DiagnosticsEnabled ()) &&
+               nowMs - s_last_presentbase_idx_log_ms >= 1000ULL)
+          {
+            s_last_presentbase_idx_log_ms = nowMs;
+            _SidecarLog (L"PresentBase real-bb select: selected_real_buffer_index=%u buffer_count=%u used_swapchain3=%ls fallback_reason=%ls",
+                         selectedRealBufferIndex,
+                         bufferCount,
+                         usedSwapChain3 ? L"yes" : L"no",
+                         fallbackReason);
+          }
+        }
+
         SK_ComPtr               <ID3D11Texture2D>           pBackbuffer;
-        pReal->GetBuffer (0, IID_ID3D11Texture2D, (void **)&pBackbuffer.p);
+        pReal->GetBuffer (selectedRealBufferIndex, IID_ID3D11Texture2D, (void **)&pBackbuffer.p);
 
         if (pBackbuffer.p != nullptr)
         {
