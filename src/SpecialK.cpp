@@ -199,7 +199,7 @@ SidecarK_WriteDiagLog (const wchar_t* fmt, ...)
   wcscat_s (wszTempPath, L"SidecarK_Overlay.log");
 
   FILE* f = nullptr;
-  _wfopen_s (&f, wszTempPath, L"a+, ccs=UTF-8");
+  _wfopen_s (&f, wszTempPath, L"a+,ccs=UTF-8");
   if (f == nullptr)
     return;
 
