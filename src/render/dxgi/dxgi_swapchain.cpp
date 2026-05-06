@@ -793,11 +793,11 @@ IWrapDXGISwapChain::PresentBase (void)
                nowMs - s_last_presentbase_idx_log_ms >= 1000ULL)
           {
             s_last_presentbase_idx_log_ms = nowMs;
-            _SidecarLog (L"PresentBase real-bb select: selected_real_buffer_index=%u buffer_count=%u used_swapchain3=%ls fallback_reason=%ls",
-                         selectedRealBufferIndex,
-                         bufferCount,
-                         usedSwapChain3 ? L"yes" : L"no",
-                         fallbackReason);
+            SK_LOGi0  (L"PresentBase real-bb select: selected_real_buffer_index=%u buffer_count=%u used_swapchain3=%ls fallback_reason=%ls",
+                       selectedRealBufferIndex,
+                       bufferCount,
+                       usedSwapChain3 ? L"yes" : L"no",
+                       fallbackReason);
           }
         }
 
