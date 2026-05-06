@@ -29,6 +29,14 @@
 #include <SpecialK/render/d3d11/d3d11_core.h>
 
 extern bool SidecarK_DiagnosticsEnabled ();
+extern const wchar_t* SidecarK_GetVisualProbeModeName ();
+extern bool SidecarK_VisualProbeModeEnabled (const wchar_t* wszMode);
+extern void __cdecl SidecarK_WriteDiagLog (const wchar_t* fmt, ...);
+extern bool SidecarK_DrawD3D11VisualProbe ( ID3D11Device*           pDevice,
+                                            ID3D11DeviceContext*    pDevCtx,
+                                            ID3D11Texture2D*        pTexture,
+                                            ID3D11RenderTargetView* pRTV,
+                                      const D3D11_TEXTURE2D_DESC*   pDesc );
 
 static constexpr bool kEnableSKF1_PresentHitCounter = true;
 static constexpr bool kEnableSKF1_SkipCounters      = true;
@@ -1179,6 +1187,48 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                  (unsigned long long)deltaMs,
                  (unsigned long)GetCurrentThreadId (),
                  stackBuf);
+  };
+
+  auto _TryDrawDXGIProbe =
+    [&]( const wchar_t*         wszMode,
+         const wchar_t*         wszTarget,
+         const wchar_t*         wszPhase,
+         ID3D11Device*          pProbeDev,
+         ID3D11DeviceContext*   pProbeCtx,
+         ID3D11Texture2D*       pProbeTex,
+   const D3D11_TEXTURE2D_DESC*  pProbeDesc,
+         std::atomic_bool&      loggedOnce ) -> void
+  {
+    if (! SidecarK_VisualProbeModeEnabled (wszMode))
+      return;
+
+    if (pProbeDev == nullptr || pProbeCtx == nullptr || pProbeTex == nullptr)
+      return;
+
+    D3D11_TEXTURE2D_DESC desc = { };
+
+    if (pProbeDesc != nullptr)
+      desc = *pProbeDesc;
+    else
+      pProbeTex->GetDesc (&desc);
+
+    if (! SidecarK_DrawD3D11VisualProbe (pProbeDev, pProbeCtx, pProbeTex, nullptr, &desc))
+      return;
+
+    if (! loggedOnce.exchange (true))
+    {
+      SidecarK_WriteDiagLog (
+        L"probe_mode=%ls target=%ls tex=%p dims=%ux%u fmt=%u frame=%llu stage=%ls",
+        SidecarK_GetVisualProbeModeName (),
+        wszTarget != nullptr ? wszTarget : L"(null)",
+        pProbeTex,
+        desc.Width,
+        desc.Height,
+        (UINT)desc.Format,
+        (unsigned long long)SK_GetFramesDrawn (),
+        wszPhase != nullptr ? wszPhase : L"(null)"
+      );
+    }
   };
 
   auto _ReleaseMappedOverlay = [&]()
@@ -2643,6 +2693,38 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                   s_skf1.view_ptr, s_skf1.width, s_skf1.height, s_skf1.stride, s_skf1.pixel_format);
   }
 
+  static std::atomic_bool s_logged_proxy_probe_once { false };
+  if (SidecarK_VisualProbeModeEnabled (L"proxy_before_presentbase"))
+  {
+    SK_ComQIPtr <ID3D11Device> pProbeDev (pDev);
+
+    if (pProbeDev.p != nullptr)
+    {
+      SK_ComPtr <ID3D11DeviceContext> pProbeCtx;
+      pProbeDev->GetImmediateContext (&pProbeCtx.p);
+
+      if (pProbeCtx.p != nullptr)
+      {
+        std::scoped_lock lock (_backbufferLock);
+
+        if (_backbuffers.contains (0) && _backbuffers [0].p != nullptr)
+        {
+          D3D11_TEXTURE2D_DESC proxyDesc = { };
+          _backbuffers [0]->GetDesc (&proxyDesc);
+
+          _TryDrawDXGIProbe ( L"proxy_before_presentbase",
+                              L"proxy_backbuffer",
+                              L"before_presentbase",
+                              pProbeDev.p,
+                              pProbeCtx.p,
+                              _backbuffers [0].p,
+                              &proxyDesc,
+                              s_logged_proxy_probe_once );
+        }
+      }
+    }
+  }
+
   // Now that overlay is composited, do the actual Present
   const ULONGLONG tPresentBase = GetTickCount64 ();
   if (0 == PresentBase ())
@@ -2650,6 +2732,39 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     SyncInterval = 0;
   }
   _LogSlowStage (L"PresentBase", tPresentBase);
+
+  static std::atomic_bool s_logged_real_after_presentbase_once { false };
+  if (SidecarK_VisualProbeModeEnabled (L"real_after_presentbase"))
+  {
+    SK_ComQIPtr <ID3D11Device> pProbeDev (pDev);
+
+    if (pProbeDev.p != nullptr)
+    {
+      SK_ComPtr <ID3D11DeviceContext> pProbeCtx;
+      pProbeDev->GetImmediateContext (&pProbeCtx.p);
+
+      if (pProbeCtx.p != nullptr)
+      {
+        SK_ComPtr <ID3D11Texture2D> pRealBackbuffer;
+
+        if (SUCCEEDED (pReal->GetBuffer (0, IID_ID3D11Texture2D, (void **)&pRealBackbuffer.p)) &&
+            pRealBackbuffer.p != nullptr)
+        {
+          D3D11_TEXTURE2D_DESC bbDesc = { };
+          pRealBackbuffer->GetDesc (&bbDesc);
+
+          _TryDrawDXGIProbe ( L"real_after_presentbase",
+                              L"real_backbuffer",
+                              L"after_presentbase_before_present",
+                              pProbeDev.p,
+                              pProbeCtx.p,
+                              pRealBackbuffer.p,
+                              &bbDesc,
+                              s_logged_real_after_presentbase_once );
+        }
+      }
+    }
+  }
 
   return
     SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,

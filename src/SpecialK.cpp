@@ -27,6 +27,7 @@
 #include <Aux_ulib.h>
 
 #include <SpecialK/render/d3d9/d3d9_backend.h>
+#include <SpecialK/render/dxgi/dxgi_util.h>
 #include <SpecialK/render/gl/opengl_backend.h>
 
 #ifndef _M_AMD64
@@ -131,6 +132,173 @@ bool SidecarK_DiagnosticsEnabled ()
   }
 
   return ok;
+}
+
+const wchar_t*
+SidecarK_GetVisualProbeModeName ()
+{
+  static const wchar_t* s_mode = []() -> const wchar_t*
+  {
+    wchar_t wszMode [64] = { };
+
+    const DWORD cchMode =
+      GetEnvironmentVariableW (L"SIDECARK_VIS_PROBE", wszMode, (DWORD)_countof (wszMode));
+
+    if (cchMode == 0 || cchMode >= _countof (wszMode))
+      return L"off";
+
+    if (_wcsicmp (wszMode, L"real_pre_present") == 0)
+      return L"real_pre_present";
+
+    if (_wcsicmp (wszMode, L"proxy_before_presentbase") == 0)
+      return L"proxy_before_presentbase";
+
+    if (_wcsicmp (wszMode, L"real_after_presentbase") == 0)
+      return L"real_after_presentbase";
+
+    if (_wcsicmp (wszMode, L"flipper_pass") == 0)
+      return L"flipper_pass";
+
+    return L"off";
+  } ();
+
+  return s_mode;
+}
+
+bool
+SidecarK_VisualProbeModeEnabled (const wchar_t* wszMode)
+{
+  return ( wszMode != nullptr                          &&
+           _wcsicmp (SidecarK_GetVisualProbeModeName (),
+                     wszMode) == 0 );
+}
+
+void
+__cdecl
+SidecarK_WriteDiagLog (const wchar_t* fmt, ...)
+{
+  if (fmt == nullptr)
+    return;
+
+  if (! SidecarK_DiagnosticsEnabled () &&
+      ! SidecarK_VisualProbeModeEnabled (L"real_pre_present") &&
+      ! SidecarK_VisualProbeModeEnabled (L"proxy_before_presentbase") &&
+      ! SidecarK_VisualProbeModeEnabled (L"real_after_presentbase") &&
+      ! SidecarK_VisualProbeModeEnabled (L"flipper_pass"))
+  {
+    return;
+  }
+
+  wchar_t wszTempPath [MAX_PATH] = { };
+  const DWORD cchTemp =
+    GetTempPathW ((DWORD)_countof (wszTempPath), wszTempPath);
+
+  if (cchTemp == 0 || cchTemp >= (DWORD)_countof (wszTempPath))
+    return;
+
+  if (wszTempPath [cchTemp - 1] != L'\\')
+    wcscat_s (wszTempPath, L"\\");
+
+  wcscat_s (wszTempPath, L"SidecarK_Overlay.log");
+
+  FILE* f = nullptr;
+  _wfopen_s (&f, wszTempPath, L"a+, ccs=UTF-8");
+  if (f == nullptr)
+    return;
+
+  SYSTEMTIME st = { };
+  GetLocalTime (&st);
+
+  fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu ",
+            st.wYear, st.wMonth, st.wDay,
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+            (unsigned long)GetCurrentProcessId ());
+
+  va_list args;
+  va_start (args, fmt);
+  vfwprintf (f, fmt, args);
+  va_end (args);
+
+  fwprintf (f, L"\n");
+  fclose (f);
+}
+
+bool
+SidecarK_DrawD3D11VisualProbe ( ID3D11Device*           pDevice,
+                                ID3D11DeviceContext*    pDevCtx,
+                                ID3D11Texture2D*        pTexture,
+                                ID3D11RenderTargetView* pRTV,
+                          const D3D11_TEXTURE2D_DESC*   pDesc )
+{
+  if (pDevice == nullptr || pDevCtx == nullptr)
+    return false;
+
+  D3D11_TEXTURE2D_DESC desc = { };
+
+  if (pDesc != nullptr)
+  {
+    desc = *pDesc;
+  }
+  else if (pTexture != nullptr)
+  {
+    pTexture->GetDesc (&desc);
+  }
+  else
+  {
+    return false;
+  }
+
+  if (desc.Width == 0 || desc.Height == 0)
+    return false;
+
+  SK_ComPtr <ID3D11RenderTargetView> pProbeRTV;
+
+  if (pRTV == nullptr)
+  {
+    if (pTexture == nullptr)
+      return false;
+
+    D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = { };
+    rtvDesc.Format =
+      DirectX::MakeTypelessUNORM (
+        DirectX::MakeTypelessFLOAT (desc.Format)
+      );
+
+    rtvDesc.ViewDimension =
+      (desc.SampleDesc.Count > 1)
+        ? D3D11_RTV_DIMENSION_TEXTURE2DMS
+        : D3D11_RTV_DIMENSION_TEXTURE2D;
+
+    if (FAILED (pDevice->CreateRenderTargetView (pTexture, &rtvDesc, &pProbeRTV.p)) ||
+        pProbeRTV.p == nullptr)
+    {
+      if (FAILED (pDevice->CreateRenderTargetView (pTexture, nullptr, &pProbeRTV.p)) ||
+          pProbeRTV.p == nullptr)
+      {
+        return false;
+      }
+    }
+
+    pRTV = pProbeRTV.p;
+  }
+
+  static constexpr FLOAT fProbeColor [4] = { 1.0f, 0.0f, 1.0f, 1.0f };
+
+  if (SK_ComQIPtr <ID3D11DeviceContext1> pDevCtx1 (pDevCtx); pDevCtx1.p != nullptr)
+  {
+    const LONG right  = (LONG)std::min <UINT> (desc.Width,  200u);
+    const LONG bottom = (LONG)std::min <UINT> (desc.Height, 200u);
+
+    if (right > 0 && bottom > 0)
+    {
+      const D3D11_RECT rect = { 0, 0, right, bottom };
+      pDevCtx1->ClearView (pRTV, fProbeColor, &rect, 1);
+      return true;
+    }
+  }
+
+  pDevCtx->ClearRenderTargetView (pRTV, fProbeColor);
+  return true;
 }
 
 #pragma comment (lib, "Aux_ulib.lib")

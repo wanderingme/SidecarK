@@ -63,6 +63,14 @@ DXGI_SWAP_CHAIN_DESC  _ORIGINAL_SWAP_CHAIN_DESC  = { };
 DXGI_SWAP_CHAIN_DESC1 _ORIGINAL_SWAP_CHAIN_DESC1 = { };
 
 extern bool SidecarK_DiagnosticsEnabled();
+extern const wchar_t* SidecarK_GetVisualProbeModeName ();
+extern bool SidecarK_VisualProbeModeEnabled (const wchar_t* wszMode);
+extern void __cdecl SidecarK_WriteDiagLog (const wchar_t* fmt, ...);
+extern bool SidecarK_DrawD3D11VisualProbe ( ID3D11Device*           pDevice,
+                                            ID3D11DeviceContext*    pDevCtx,
+                                            ID3D11Texture2D*        pTexture,
+                                            ID3D11RenderTargetView* pRTV,
+                                      const D3D11_TEXTURE2D_DESC*   pDesc );
 
 static void SK_DXGI_WriteDetourHitMarker (const wchar_t* wszEventName, void* pSwapChainThis, void* pDetourFn)
 {
@@ -3017,6 +3025,44 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
       // Change the FAIL'ing HRESULT to a SUCCESS status code instead; SK will
       //   finish the flip model swapchain resize on the next call to Present (...).
     };
+
+    static std::atomic_bool s_logged_real_pre_present_once { false };
+    if (SidecarK_VisualProbeModeEnabled (L"real_pre_present"))
+    {
+      SK_ComPtr <ID3D11Device>        pProbeDev;
+      SK_ComPtr <ID3D11DeviceContext> pProbeCtx;
+      SK_ComPtr <ID3D11Texture2D>     pProbeTex;
+
+      if (SUCCEEDED (This->GetDevice (IID_ID3D11Device, (void **)&pProbeDev.p)) &&
+          pProbeDev.p != nullptr)
+      {
+        pProbeDev->GetImmediateContext (&pProbeCtx.p);
+
+        if (pProbeCtx.p != nullptr &&
+            SUCCEEDED (This->GetBuffer (0, IID_ID3D11Texture2D, (void **)&pProbeTex.p)) &&
+            pProbeTex.p != nullptr)
+        {
+          D3D11_TEXTURE2D_DESC desc = { };
+          pProbeTex->GetDesc (&desc);
+
+          if (SidecarK_DrawD3D11VisualProbe (pProbeDev.p, pProbeCtx.p, pProbeTex.p, nullptr, &desc) &&
+              ! s_logged_real_pre_present_once.exchange (true))
+          {
+            SidecarK_WriteDiagLog (
+              L"probe_mode=%ls target=%ls tex=%p dims=%ux%u fmt=%u frame=%llu stage=%ls",
+              SidecarK_GetVisualProbeModeName (),
+              L"real_backbuffer",
+              pProbeTex.p,
+              desc.Width,
+              desc.Height,
+              (UINT)desc.Format,
+              (unsigned long long)SK_GetFramesDrawn (),
+              L"before_present"
+            );
+          }
+        }
+      }
+    }
 
     if (Source == SK_DXGI_PresentSource::Hook)
     {

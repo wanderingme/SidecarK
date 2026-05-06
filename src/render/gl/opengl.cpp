@@ -25,6 +25,14 @@
 #define SIDECARK_DIAGNOSTICS_ENABLED_EXTERN
 extern bool SidecarK_DiagnosticsEnabled ();
 #endif
+extern const wchar_t* SidecarK_GetVisualProbeModeName ();
+extern bool SidecarK_VisualProbeModeEnabled (const wchar_t* wszMode);
+extern void __cdecl SidecarK_WriteDiagLog (const wchar_t* fmt, ...);
+extern bool SidecarK_DrawD3D11VisualProbe ( ID3D11Device*           pDevice,
+                                            ID3D11DeviceContext*    pDevCtx,
+                                            ID3D11Texture2D*        pTexture,
+                                            ID3D11RenderTargetView* pRTV,
+                                      const D3D11_TEXTURE2D_DESC*   pDesc );
 
 #pragma warning ( disable : 4273 )
 
@@ -2159,6 +2167,37 @@ SK_IndirectX_PresentManager::Start (SK_IndirectX_InteropCtx *pCtx)
               pDevCtx->OMSetRenderTargets ( 1,
                         &pCtx->output.backbuffer.rtv.p, nullptr );
               pDevCtx->Draw  (              4,                0 );
+
+              static std::atomic_bool s_logged_flipper_probe_once { false };
+              if (SidecarK_VisualProbeModeEnabled (L"flipper_pass") &&
+                  pCtx->d3d11.pDevice != nullptr                 &&
+                  pCtx->output.backbuffer.image.p != nullptr     &&
+                  pCtx->output.backbuffer.rtv.p != nullptr)
+              {
+                D3D11_TEXTURE2D_DESC bbDesc = { };
+                pCtx->output.backbuffer.image->GetDesc (&bbDesc);
+
+                if (SidecarK_DrawD3D11VisualProbe ( pCtx->d3d11.pDevice,
+                                                    pDevCtx,
+                                                    pCtx->output.backbuffer.image.p,
+                                                    pCtx->output.backbuffer.rtv.p,
+                                                   &bbDesc ) &&
+                    ! s_logged_flipper_probe_once.exchange (true))
+                {
+                  SidecarK_WriteDiagLog (
+                    L"probe_mode=%ls target=%ls tex=%p dims=%ux%u fmt=%u frame=%llu stage=%ls",
+                    SidecarK_GetVisualProbeModeName (),
+                    L"flipper_output",
+                    pCtx->output.backbuffer.image.p,
+                    bbDesc.Width,
+                    bbDesc.Height,
+                    (UINT)bbDesc.Format,
+                    (unsigned long long)ReadAcquire64 (&pCtx->present_man.frames),
+                    L"after_flipper_draw_before_present"
+                  );
+                }
+              }
+
               pDevCtx->OMSetRenderTargets ( 0, nullptr, nullptr );
             }
 
