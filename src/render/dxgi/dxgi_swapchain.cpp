@@ -2027,6 +2027,10 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                 _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
               }
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
+
+              // SidecarK timing: emit first composite-ready marker (once only).
+              SK_RunOnce (OutputDebugStringA ("SidecarK: first SKF1 D3D11 composite blit executed\n"));
+
               const ULONGLONG tCopySub11 = GetTickCount64 ();
               ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
               _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);

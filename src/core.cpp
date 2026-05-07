@@ -237,6 +237,7 @@ SK_StartPerfMonThreads (void)
   //
   // Spawn CPU Refresh Thread
   //
+#ifndef SK_SIDECAR_MINIMAL
   if (config.cpu.show || ( SK_ImGui_Widgets->cpu_monitor != nullptr &&
                            SK_ImGui_Widgets->cpu_monitor->isActive () ))
   {
@@ -255,6 +256,7 @@ SK_StartPerfMonThreads (void)
     SpawnMonitorThread ( &SK_WMI_PagefileStats->hThread,
                          L"Pagefile Monitor", SK_MonitorPagefile );
   }
+#endif // !SK_SIDECAR_MINIMAL
 }
 
 void
@@ -706,11 +708,13 @@ extern void BasicInit (void);
 
   if (SK_GetDLLRole () != DLL_ROLE::DInput8)
   {
+#ifndef SK_SIDECAR_MINIMAL
     if (SK_GetModuleHandle (L"dinput8.dll"))
       SK_Input_HookDI8  ();
 
     if (SK_GetModuleHandle (L"dinput.dll"))
       SK_Input_HookDI7  ();
+#endif
   }
 
   SK_Input_Init ();
@@ -1141,6 +1145,7 @@ void BasicInit (void)
   // Cleanup any leftover temporary files from the last launch
   SK_DeleteTemporaryFiles ();
 
+#ifndef SK_SIDECAR_MINIMAL
   // Add a notification that will not go away until a user reads it...
   SK_ImGui_CreateNotification (
     "Notification.HelloWorld", SK_ImGui_Toast::Success,
@@ -1162,6 +1167,7 @@ void BasicInit (void)
   SK_PreInitLoadLibrary ();
   SK_StageTraceW (L"10_preinit_loadlib_end");
 
+#ifndef SK_SIDECAR_MINIMAL
   if (config.system.handle_crashes)
     SK::Diagnostics::CrashHandler::Init   ();
 #ifndef SK_SIDECAR_MINIMAL
@@ -1190,7 +1196,9 @@ void BasicInit (void)
   {
     // TODO: Split this into Keyboard hooks and Mouse hooks
     //         and allow picking them individually
+#ifndef SK_SIDECAR_MINIMAL
     SK_Input_PreInit        (); // Hook only symbols in user32 and kernel32
+#endif
   }
   SK_HookWinAPI             ();
 #ifndef SK_SIDECAR_MINIMAL
@@ -1345,7 +1353,9 @@ DllThread (LPVOID user)
       // This must initialize COM, do it from a separate thread to avoid
       //   ReShade constructing objects that require COM and keeping them
       //     active after this function goes out of scope.
+#ifndef SK_SIDECAR_MINIMAL
       SK::Xbox::Init             ();
+#endif
       SK_D3D_SetupShaderCompiler ();
 
       WritePointerRelease ( (volatile PVOID *)(&hInitThread),
@@ -2416,7 +2426,14 @@ SK_StartupCore (const wchar_t* backend, void* callback)
   if (! __SK_bypass)
   {
     SK_D3D11_InitMutexes ();
+
+    // SidecarK mode: skip ImGui context + font-atlas construction entirely.
+    // The SKF1 overlay blits pixels directly from shared memory — it does not
+    // use ImGui for rendering.  Font loading is the single largest DllMain
+    // synchronous cost; eliminating it removes the visible injection hitch.
+#ifndef SK_SIDECAR_MINIMAL
     SK_ImGui_Init        ();
+#endif
 
 #ifndef _THREADED_BASIC_INIT
     BasicInit ();
@@ -2651,11 +2668,13 @@ SK_StartupCore (const wchar_t* backend, void* callback)
       // Excluded backends:  Vulkan, D3D9, D3D8, DDraw (no SKF1 consumer).
       SK_Thread_CreateEx ([] (LPVOID) -> DWORD
       {
-        constexpr DWORD kPollIntervalMs = 50UL;
-        constexpr ULONGLONG kPollTimeoutMs = 30000ULL;
-        const ULONGLONG t0 = GetTickCount64 ();
+        constexpr DWORD     kPollIntervalMs = 25UL;
+        constexpr ULONGLONG kPollTimeoutMs  = 30000ULL;
+        const ULONGLONG     t0              = GetTickCount64 ();
         bool dxgi_detected = false;
         bool gl_detected   = false;
+
+        OutputDebugStringA ("SidecarK: bootstrap thread started; polling for graphics API\n");
 
         // Wait until d3d11.dll, d3d12.dll, or opengl32.dll is loaded.
         // Use wall-clock time so the limit is accurate even when GetModuleHandleW
@@ -2679,11 +2698,15 @@ SK_StartupCore (const wchar_t* backend, void* callback)
           Sleep (kPollIntervalMs);
         }
 
-        OutputDebugStringA (
-          dxgi_detected ? "SidecarK: DXGI/D3D11/D3D12 detected; installing DXGI QuickHook\n" :
-          gl_detected   ? "SidecarK: OpenGL detected; hooks deferred to SK_BootOpenGL\n"      :
-                          "SidecarK: graphics module poll timed out\n"
-        );
+        {
+          char __t[112] = {};
+          wsprintfA (__t,
+            dxgi_detected ? "SidecarK: DXGI/D3D detected dt_ms=%llu; installing DXGI QuickHook\n"    :
+            gl_detected   ? "SidecarK: OpenGL detected dt_ms=%llu; hooks deferred to SK_BootOpenGL\n" :
+                            "SidecarK: graphics module poll timed out dt_ms=%llu\n",
+            (unsigned long long)(GetTickCount64 () - t0));
+          OutputDebugStringA (__t);
+        }
 
         // Install minimal trampoline hooks for the detected backend only.
         // D3D9 / D3D8 / DDraw / Vulkan are intentionally excluded here;
@@ -2691,7 +2714,14 @@ SK_StartupCore (const wchar_t* backend, void* callback)
         if (dxgi_detected && ( config.apis.dxgi.d3d11.hook ||
                                config.apis.dxgi.d3d12.hook   ))
         {
+          const ULONGLONG tHook0 = GetTickCount64 ();
           SK_DXGI_QuickHook ();
+          {
+            char __t[80] = {};
+            wsprintfA (__t, "SidecarK: DXGI QuickHook installed dt_ms=%llu\n",
+                       (unsigned long long)(GetTickCount64 () - tHook0));
+            OutputDebugStringA (__t);
+          }
         }
 
         // OpenGL hooks are set up through SK_BootOpenGL → SK_HookGL when the
@@ -2709,6 +2739,8 @@ SK_StartupCore (const wchar_t* backend, void* callback)
           }
           if (! bEnable) SK_DisableApplyQueuedHooks ();
         }
+
+        OutputDebugStringA ("SidecarK: bootstrap thread complete; hooks applied\n");
 
         return 0;
       }, nullptr, nullptr);
@@ -3230,6 +3262,7 @@ SK_ShutdownCore (const wchar_t* backend)
 
   // Reset haptics
   //
+#ifndef SK_SIDECAR_MINIMAL
   for (auto& ps_controller : SK_HID_PlayStationControllers)
   {
     if (ps_controller._vibration.last_set > SK::ControlPanel::current_time - 500UL)
@@ -3239,6 +3272,7 @@ SK_ShutdownCore (const wchar_t* backend)
       SK_SleepEx (15UL, FALSE);
     }
   }
+#endif
 
 
 
@@ -3344,7 +3378,9 @@ SK_ShutdownCore (const wchar_t* backend)
   SK_Win32_CleanupDummyWindow ();
 
   // No more exit rumble, please :)
+#ifndef SK_SIDECAR_MINIMAL
   SK_XInput_Enable (FALSE);
+#endif
 
   if (config.window.background_mute)
     SK_SetGameMute (false);
@@ -3450,6 +3486,7 @@ SK_ShutdownCore (const wchar_t* backend)
                     SK_timeGetTime () - dwTime_WMIShutdown );
   };
 
+#ifndef SK_SIDECAR_MINIMAL
   static auto& cpu_stats      = *SK_WMI_CPUStats;
   static auto& disk_stats     = *SK_WMI_DiskStats;
   static auto& pagefile_stats = *SK_WMI_PagefileStats;
@@ -3460,6 +3497,7 @@ SK_ShutdownCore (const wchar_t* backend)
                      disk_stats.hThread,              L"Disk Monitor"    );
   ShutdownWMIThread (pagefile_stats.hShutdownSignal,
                      pagefile_stats.hThread,          L"Pagefile Monitor");
+#endif // !SK_SIDECAR_MINIMAL
 
   // Does power scheme need a reset? If not, skip this to avoid Windows Event Viewer spam
   if (! IsEqualGUID (config.cpu.power_scheme_guid_orig,
@@ -3877,7 +3915,9 @@ SK_FrameCallback ( SK_RenderBackend& rb,
           }
         }
 
+#ifndef SK_SIDECAR_MINIMAL
         SK_RunOnce (SK_Input_HookScePad ());
+#endif
 
         if (rb.api != SK_RenderAPI::D3D12  &&
             rb.api != SK_RenderAPI::D3D11  &&
@@ -4844,7 +4884,9 @@ SK_EndBufferSwap (HRESULT hr, IUnknown* device, SK_TLS* pTLS)
 
   // Always refresh at the beginning of a frame rather than the end,
   //   a failure event may cause a lengthy delay, missing VBLANK.
+#ifndef SK_SIDECAR_MINIMAL
   SK_XInput_DeferredStatusChecks ();
+#endif
 
 
   SK_ScePad_PaceMaker ();

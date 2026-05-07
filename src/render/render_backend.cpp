@@ -276,13 +276,13 @@ SK_BootD3D9 (void)
 
     SK_D3D9_InitShaderModTools  ();
 
+#ifndef SK_SIDECAR_MINIMAL
     SK::D3D9::TextureManager& tex_mgr =
       SK_D3D9_GetTextureManager ();
 
     if (config.textures.d3d9_mod)
-    {
       tex_mgr.Init ();
-    }
+#endif
 
     dll_log->Log (
       L"[API Detect]  <!> [ Bootstrapping Direct3D 9 (d3d9.dll) ] <!>\t(Initialization tid=%x)",
@@ -296,11 +296,13 @@ SK_BootD3D9 (void)
                               SK_LoadEarlyImports32 () );
     }
 
+#ifndef SK_SIDECAR_MINIMAL
     if ( config.textures.d3d9_mod ||
          config.render.d3d9.force_d3d9ex )
     {
       tex_mgr.Hook ();
     }
+#endif
 
     SK_HookD3D9    ();
 

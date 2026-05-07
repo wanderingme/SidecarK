@@ -480,7 +480,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <LargeAddressAware>true</LargeAddressAware>
       <EntryPointSymbol>
       </EntryPointSymbol>
-      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;psapi.lib;legacy_stdio_definitions.lib;mmdevapi.lib;%(AdditionalDependencies);imm32.lib;wininet.lib;tdh.lib;userenv.lib;comctl32.lib</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;psapi.lib;legacy_stdio_definitions.lib;mmdevapi.lib;%(AdditionalDependencies);imm32.lib;wininet.lib;tdh.lib;userenv.lib;comctl32.lib;runtimeobject.lib</AdditionalDependencies>
       <ImportLibrary />
       <AssemblyDebug>false</AssemblyDebug>
       <SetChecksum>true</SetChecksum>
@@ -599,7 +599,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <LargeAddressAware>true</LargeAddressAware>
       <EntryPointSymbol>
       </EntryPointSymbol>
-      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;psapi.lib;legacy_stdio_definitions.lib;mmdevapi.lib;%(AdditionalDependencies);imm32.lib;wininet.lib;tdh.lib;userenv.lib;comctl32.lib</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;psapi.lib;legacy_stdio_definitions.lib;mmdevapi.lib;%(AdditionalDependencies);imm32.lib;wininet.lib;tdh.lib;userenv.lib;comctl32.lib;runtimeobject.lib</AdditionalDependencies>
       <ImportLibrary>
       </ImportLibrary>
       <AssemblyDebug>false</AssemblyDebug>
@@ -716,7 +716,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <EntryPointSymbol>
       </EntryPointSymbol>
       <FullProgramDatabaseFile>true</FullProgramDatabaseFile>
-      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;psapi.lib;legacy_stdio_definitions.lib;mmdevapi.lib;%(AdditionalDependencies);imm32.lib;wininet.lib;tdh.lib;userenv.lib;comctl32.lib</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;psapi.lib;legacy_stdio_definitions.lib;mmdevapi.lib;%(AdditionalDependencies);imm32.lib;wininet.lib;tdh.lib;userenv.lib;comctl32.lib;runtimeobject.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>
       </AdditionalLibraryDirectories>
       <ImportLibrary />
@@ -840,7 +840,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <EntryPointSymbol>
       </EntryPointSymbol>
       <FullProgramDatabaseFile>true</FullProgramDatabaseFile>
-      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;psapi.lib;legacy_stdio_definitions.lib;mmdevapi.lib;%(AdditionalDependencies);imm32.lib;wininet.lib;tdh.lib;userenv.lib;comctl32.lib</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;psapi.lib;legacy_stdio_definitions.lib;mmdevapi.lib;%(AdditionalDependencies);imm32.lib;wininet.lib;tdh.lib;userenv.lib;comctl32.lib;runtimeobject.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>
       </AdditionalLibraryDirectories>
       <ImportLibrary>
@@ -1945,25 +1945,49 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">stdcpp20</LanguageStandard>
     </ClCompile>
     <ClCompile Include="src\control_panel\cfg_compatibility.cpp" />
-    <ClCompile Include="src\control_panel\cfg_d3d11.cpp" />
-    <ClCompile Include="src\control_panel\cfg_d3d9.cpp" />
-    <ClCompile Include="src\control_panel\cfg_epic.cpp" />
-    <ClCompile Include="src\control_panel\cfg_galaxy.cpp" />
-    <ClCompile Include="src\control_panel\cfg_input.cpp" />
+    <ClCompile Include="src\control_panel\cfg_d3d11.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\control_panel\cfg_d3d9.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\control_panel\cfg_epic.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\control_panel\cfg_galaxy.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\control_panel\cfg_input.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\control_panel\cfg_notifications.cpp" />
     <ClCompile Include="src\control_panel\cfg_opengl.cpp" />
     <ClCompile Include="src\control_panel\cfg_osd.cpp" />
-    <ClCompile Include="src\control_panel\cfg_platform.cpp" />
+    <ClCompile Include="src\control_panel\cfg_platform.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\control_panel\cfg_plugins.cpp" />
-    <ClCompile Include="src\control_panel\cfg_sound.cpp" />
-    <ClCompile Include="src\control_panel\cfg_steam.cpp" />
+    <ClCompile Include="src\control_panel\cfg_sound.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\control_panel\cfg_steam.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\control_panel\cfg_window.cpp" />
     <ClCompile Include="src\crc32.cpp" />
-    <ClCompile Include="src\diagnostics\cpu.cpp" />
-    <ClCompile Include="src\diagnostics\file.cpp" />
+    <ClCompile Include="src\diagnostics\cpu.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\diagnostics\file.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\diagnostics\load_library.cpp" />
-    <ClCompile Include="src\diagnostics\memory.cpp" />
-    <ClCompile Include="src\diagnostics\net.cpp" />
+    <ClCompile Include="src\diagnostics\memory.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\diagnostics\net.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\imgui\backends\imgui_d3d12.cpp" />
     <ClCompile Include="src\imgui\imgui_tables.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
@@ -1979,7 +2003,9 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="src\input\bluetooth.cpp" />
+    <ClCompile Include="src\input\bluetooth.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\input\cursor.cpp" />
     <ClCompile Include="src\input\game_input.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
@@ -1988,19 +2014,37 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="src\input\game_input_stub.cpp" />
-    <ClCompile Include="src\input\hid.cpp" />
-    <ClCompile Include="src\input\hid_reports\dualsense.cpp" />
-    <ClCompile Include="src\input\hid_reports\dualshock4.cpp" />
-    <ClCompile Include="src\input\hid_reports\playstation.cpp" />
+    <ClCompile Include="src\input\game_input_stub.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\input\hid.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\input\hid_reports\dualsense.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\input\hid_reports\dualshock4.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\input\hid_reports\playstation.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\input\input.cpp" />
     <ClCompile Include="src\input\keyboard.cpp" />
     <ClCompile Include="src\input\raw_input.cpp" />
-    <ClCompile Include="src\input\sce_pad.cpp" />
-    <ClCompile Include="src\input\windows.gaming.input.cpp" />
+    <ClCompile Include="src\input\sce_pad.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\input\windows.gaming.input.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\input\winhook_input.cpp" />
-    <ClCompile Include="src\input\winmm_joystick.cpp" />
+    <ClCompile Include="src\input\winmm_joystick.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\lazy_global.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">false</ExcludedFromBuild>
@@ -2119,7 +2163,9 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="src\popups\achievement.cpp" />
+    <ClCompile Include="src\popups\achievement.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\process.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Use</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">Use</PrecompiledHeader>
@@ -2127,7 +2173,9 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">Use</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="src\render\d3d11\d3d11_debug.cpp" />
-    <ClCompile Include="src\render\d3d11\d3d11_screenshot.cpp" />
+    <ClCompile Include="src\render\d3d11\d3d11_screenshot.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\render\d3d11\d3d11_shader.cpp" />
     <ClCompile Include="src\render\d3d11\d3d11_stateblock.cpp" />
     <ClCompile Include="src\render\d3d11\hdr\d3d11_hdr.cpp" />
@@ -2149,107 +2197,163 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
     <ClCompile Include="src\render\d3d12\d3d12_device.cpp" />
     <ClCompile Include="src\render\d3d12\d3d12_pipeline_library.cpp" />
     <ClCompile Include="src\render\d3d12\d3d12_screenshot.cpp" />
-    <ClCompile Include="src\render\d3d12\d3d12_pipeline_stats.cpp" />
-    <ClCompile Include="src\render\d3d9\d3d9_screenshot.cpp" />
-    <ClCompile Include="src\render\d3dkmt\d3dkmt.cpp" />
-    <ClCompile Include="src\render\dstorage\dstorage.cpp" />
-    <ClCompile Include="src\render\dstorage\dstorage_factory.cpp" />
-    <ClCompile Include="src\render\dstorage\dstorage_queue.cpp" />
+    <ClCompile Include="src\render\d3d12\d3d12_pipeline_stats.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\d3d9\d3d9_screenshot.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\d3dkmt\d3dkmt.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\dstorage\dstorage.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\dstorage\dstorage_factory.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\dstorage\dstorage_queue.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\render\dxgi\dxgi_debug.cpp" />
     <ClCompile Include="src\render\dxgi\dxgi_util.cpp" />
     <ClCompile Include="src\render\gl\opengl_screenshot.cpp" />
-    <ClCompile Include="src\render\ngx\ngx.cpp" />
-    <ClCompile Include="src\render\ngx\ngx_d3d11.cpp" />
-    <ClCompile Include="src\render\ngx\ngx_d3d12.cpp" />
-    <ClCompile Include="src\render\ngx\ngx_vulkan.cpp" />
+    <ClCompile Include="src\render\ngx\ngx.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\ngx\ngx_d3d11.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\ngx\ngx_d3d12.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\ngx\ngx_vulkan.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\render\present_mon\CommandLine.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\PM_Console.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\ConsumerThread.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\CsvOutput.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\LateStageReprojectionData.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\MainThread.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\MixedRealityTraceConsumer.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\OutputThread.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\PD_TraceSession.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\PM_Debug.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\PM_TraceSession.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\PresentMonTraceConsumer.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\Privilege.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\present_mon\TraceConsumer.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="src\render\reflex\pclstats.cpp" />
-    <ClCompile Include="src\render\reflex\reflex.cpp" />
-    <ClCompile Include="src\render\screenshot.cpp" />
-    <ClCompile Include="src\render\streamline\streamline.cpp" />
+    <ClCompile Include="src\render\reflex\pclstats.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\reflex\reflex.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\screenshot.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\streamline\streamline.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\scheduler.cpp">
       <TreatWarningAsError Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">false</TreatWarningAsError>
       <TreatWarningAsError Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">false</TreatWarningAsError>
@@ -2267,20 +2371,38 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
     <ClCompile Include="src\render\d3d11\d3d11.cpp" />
     <ClCompile Include="src\render\d3d11\d3d11_dev_ctx.cpp" />
     <ClCompile Include="src\render\d3d12\d3d12.cpp" />
-    <ClCompile Include="src\render\d3d8\d3d8.cpp" />
-    <ClCompile Include="src\render\d3d9\d3d9_texmgr.cpp" />
-    <ClCompile Include="src\render\ddraw\ddraw.cpp" />
+    <ClCompile Include="src\render\d3d8\d3d8.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\d3d9\d3d9_texmgr.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\render\ddraw\ddraw.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\diagnostics\compatibility.cpp" />
-    <ClCompile Include="src\diagnostics\crash_handler.cpp" />
-    <ClCompile Include="src\diagnostics\debug_utils.cpp" />
+    <ClCompile Include="src\diagnostics\crash_handler.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\diagnostics\debug_utils.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\hash.cpp" />
     <ClCompile Include="src\hooks.cpp" />
-    <ClCompile Include="src\control_panel.cpp" />
+    <ClCompile Include="src\control_panel.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\imgui\backends\imgui_d3d11.cpp" />
-    <ClCompile Include="src\imgui\backends\imgui_d3d9.cpp" />
+    <ClCompile Include="src\imgui\backends\imgui_d3d9.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\imgui\backends\imgui_gl3.cpp" />
-    <ClCompile Include="src\imgui\backends\imgui_vk.cpp" />
-    <ClCompile Include="src\imgui\EULA.cpp" />
+    <ClCompile Include="src\imgui\backends\imgui_vk.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\imgui\EULA.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\imgui\imgui.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
@@ -2296,6 +2418,8 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
+    
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\imgui\imgui_draw.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
@@ -2306,11 +2430,21 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="src\injection\injection.cpp" />
-    <ClCompile Include="src\input\dinput7.cpp" />
-    <ClCompile Include="src\input\dinput8.cpp" />
-    <ClCompile Include="src\input\steam.cpp" />
-    <ClCompile Include="src\input\xinput_core.cpp" />
-    <ClCompile Include="src\input\xinput_hotplug.cpp" />
+    <ClCompile Include="src\input\dinput7.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\input\dinput8.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\input\steam.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\input\xinput_core.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\input\xinput_hotplug.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\osd\popup.cpp" />
     <ClCompile Include="src\plugins\blue_reflection.cpp">
       <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
@@ -2332,27 +2466,38 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
     </ClCompile>
     <ClCompile Include="src\plugins\plugin_mgr.cpp" />
     <ClCompile Include="src\plugins\plugin_stubs.cpp" />
+    <ClCompile Include="src\stubs\api_stubs.cpp" />
     <ClCompile Include="src\plugins\reshade.cpp">
       <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="src\render\d3d9\d3d9_device.cpp" />
-    <ClCompile Include="src\render\d3d9\d3d9_swapchain.cpp" />
+    <ClCompile Include="src\render\d3d9\d3d9_swapchain.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\render\dxgi\dxgi_swapchain.cpp" />
     <ClCompile Include="src\render\render_backend.cpp" />
     <ClCompile Include="src\sha1.cpp" />
-    <ClCompile Include="src\sound.cpp" />
+    <ClCompile Include="src\sound.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\SpecialK.cpp" />
     <ClCompile Include="src\command.cpp" />
     <ClCompile Include="src\config.cpp" />
     <ClCompile Include="src\console.cpp" />
     <ClCompile Include="src\core.cpp" />
-    <ClCompile Include="src\render\d3d9\d3d9.cpp" />
+    <ClCompile Include="src\render\d3d9\d3d9.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\render\dxgi\dxgi.cpp" />
     <ClCompile Include="src\framerate.cpp" />
-    <ClCompile Include="src\performance\gpu_monitor.cpp" />
+    <ClCompile Include="src\performance\gpu_monitor.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\import.cpp" />
     <ClCompile Include="src\ini.cpp" />
-    <ClCompile Include="src\performance\io_monitor.cpp" />
+    <ClCompile Include="src\performance\io_monitor.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\log.cpp" />
     <ClCompile Include="src\nvapi.cpp" />
     <ClCompile Include="src\render\gl\opengl.cpp">
@@ -2369,35 +2514,87 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="src\steam\client.cpp" />
-    <ClCompile Include="src\steam\steam_api.cpp" />
-    <ClCompile Include="src\steam\steam_tier0.cpp" />
-    <ClCompile Include="src\steam\user.cpp" />
-    <ClCompile Include="src\steam\utils.cpp" />
-    <ClCompile Include="src\storefront\achievements.cpp" />
-    <ClCompile Include="src\storefront\epic.cpp" />
-    <ClCompile Include="src\storefront\gog.cpp" />
-    <ClCompile Include="src\storefront\platform.cpp" />
-    <ClCompile Include="src\storefront\xbox.cpp" />
+    <ClCompile Include="src\steam\client.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\steam\steam_api.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\steam\steam_tier0.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\steam\user.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\steam\utils.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\storefront\achievements.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\storefront\epic.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\storefront\gog.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\storefront\platform.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\storefront\xbox.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\thread.cpp" />
     <ClCompile Include="src\tls.cpp" />
-    <ClCompile Include="src\update\archive.cpp" />
-    <ClCompile Include="src\update\network.cpp" />
-    <ClCompile Include="src\update\version.cpp" />
+    <ClCompile Include="src\update\archive.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\update\network.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\update\version.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\utility.cpp" />
-    <ClCompile Include="src\render\vulkan\vulkan.cpp" />
-    <ClCompile Include="src\widgets\achievement_tracker.cpp" />
-    <ClCompile Include="src\widgets\cpu_widget.cpp" />
-    <ClCompile Include="src\widgets\d3d11_pipeline_widget.cpp" />
-    <ClCompile Include="src\widgets\denuvo.cpp" />
-    <ClCompile Include="src\widgets\frame_pacing.cpp" />
-    <ClCompile Include="src\widgets\gpu_widget.cpp" />
-    <ClCompile Include="src\widgets\hdr.cpp" />
-    <ClCompile Include="src\widgets\latency.cpp" />
-    <ClCompile Include="src\widgets\threads.cpp" />
-    <ClCompile Include="src\widgets\tobii.cpp" />
-    <ClCompile Include="src\widgets\volume_control.cpp" />
-    <ClCompile Include="src\widgets\widget.cpp" />
+    <ClCompile Include="src\render\vulkan\vulkan.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\achievement_tracker.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\cpu_widget.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\d3d11_pipeline_widget.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\denuvo.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\frame_pacing.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\gpu_widget.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\hdr.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\latency.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\threads.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\tobii.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\volume_control.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\widgets\widget.cpp">
+      <ExcludedFromBuild Condition="'$(SidecarK_MinimalBuild)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\win32_isolation.cpp" />
     <ClCompile Include="src\window.cpp" />
   </ItemGroup>

@@ -709,22 +709,26 @@ SK_Steam_ThreadContext::Cleanup (SK_TLS_CleanupReason_e reason)
 
     if (utils != nullptr && client_user != 0 && reason == Unload)
     {
+#ifndef SK_SIDECAR_MINIMAL
       if (steam_ctx.ReleaseThreadUser ())
       {
       //freed += 4;
 
         client_user = 0;
       }
+#endif
     }
 
     if (utils != nullptr && client_pipe != 0 && reason == Unload)
     {
+#ifndef SK_SIDECAR_MINIMAL
       if (steam_ctx.ReleaseThreadPipe ())
       {
       //freed += 4;
 
         client_pipe = 0;
       }
+#endif
     }
 
     if (text != nullptr && text_capacity > 0)
