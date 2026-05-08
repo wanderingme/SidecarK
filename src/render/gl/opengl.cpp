@@ -25,6 +25,13 @@
 #define SIDECARK_DIAGNOSTICS_ENABLED_EXTERN
 extern bool SidecarK_DiagnosticsEnabled ();
 #endif
+
+struct ID3D11Device;
+struct ID3D11DeviceContext;
+struct ID3D11Texture2D;
+struct ID3D11RenderTargetView;
+struct D3D11_TEXTURE2D_DESC;
+
 extern const wchar_t* SidecarK_GetVisualProbeModeName ();
 extern bool SidecarK_VisualProbeModeEnabled (const wchar_t* wszMode);
 extern void __cdecl SidecarK_WriteDiagLog (const wchar_t* fmt, ...);
