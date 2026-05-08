@@ -45,6 +45,7 @@ Notes:
 - `SidecarKHost.exe` is named the same in both architecture folders.
 - The injected DLL name is architecture-specific: `SidecarK32.dll` vs `SidecarK64.dll`.
 - The build pipeline must select the folder matching the target game bitness and stage those binaries into the final wrapped output.
+- On the SidecarK side, the patched DLL build outputs remain `build/Release/Win32/SidecarK32.dll` and `build/Release/x64/SidecarK64.dll`; those are the exact runtime DLL names Virule must stage into the packaged `.virule/bin` runtime payload.
 
 ### 2.2 Virule Must NOT Own
 
@@ -240,6 +241,32 @@ SidecarKHost exposes `\\.\pipe\SidecarK_Control_<pid>` for overlay on/off comman
 | Game exits unexpectedly | Wrapper detects process exit, signals shutdown to SidecarKHost and producer |
 | CEF fails to render | Producer stops advancing frame_counter; consumer shows last good frame |
 | Control pipe unavailable | Wrapper logs error; overlay toggle unavailable but game continues |
+
+---
+
+## 5.5 SidecarK Visible Probe Ladder
+
+SidecarK exposes a hardcoded visible probe ladder for fullscreen troubleshooting through the `SIDECARK_VIS_PROBE` environment variable.
+
+Accepted values:
+
+- `off` (default)
+- `real_after_presentbase`
+- `flipper_pass`
+
+Behavior:
+
+- `real_after_presentbase` draws a magenta border directly into the real DXGI swapchain backbuffer after `PresentBase()` and immediately before the final real `Present`.
+- `flipper_pass` draws a green border in the GL→D3D11 flipper pass immediately after the game-content draw into `output.backbuffer.rtv`.
+
+When the probe is active, SidecarK logs these exact once-per-activation markers to `%TEMP%\\SidecarK_Overlay.log` even if `SIDECARK_DIAGNOSTICS` is not enabled:
+
+- `SIDECARK_VIS_PROBE_ACTIVE mode=real_after_presentbase`
+- `SIDECARK_VIS_PROBE_DRAW mode=real_after_presentbase target=real_backbuffer w=... h=... fmt=... success=...`
+- `SIDECARK_VIS_PROBE_ACTIVE mode=flipper_pass`
+- `SIDECARK_VIS_PROBE_DRAW mode=flipper_pass target=flipper_rtv w=... h=... fmt=... success=...`
+
+The probe draw runs every eligible frame while the mode remains active; only the `ACTIVE` and `DRAW` log lines are once-per-activation.
 
 ---
 

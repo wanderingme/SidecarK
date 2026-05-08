@@ -46,6 +46,177 @@ std::atomic_bool g_dxgi_present_seen{ false };
 
 std::atomic_bool g_dxgi_overlay_owner{ false };
 
+enum class SK_SidecarVisProbeMode
+{
+  Off = 0,
+  RealAfterPresentBase,
+  FlipperPass
+};
+
+static void
+SK_SidecarVisProbe_Log (const wchar_t* fmt, ...)
+{
+  wchar_t path [MAX_PATH] = { };
+  const DWORD cch = GetTempPathW (MAX_PATH, path);
+  if (cch == 0 || cch >= MAX_PATH)
+    return;
+
+  wcscat_s (path, L"SidecarK_Overlay.log");
+
+  FILE* f = nullptr;
+  _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+  if (f == nullptr)
+    return;
+
+  SYSTEMTIME st = { };
+  GetLocalTime (&st);
+
+  fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu ",
+            st.wYear, st.wMonth, st.wDay,
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+            (unsigned long)GetCurrentProcessId ());
+
+  va_list args;
+  va_start (args, fmt);
+  vfwprintf (f, fmt, args);
+  va_end (args);
+
+  fwprintf (f, L"\n");
+  fclose (f);
+}
+
+static SK_SidecarVisProbeMode
+SK_SidecarVisProbe_GetMode (void)
+{
+  static volatile LONG          s_init = 0;
+  static SK_SidecarVisProbeMode s_mode = SK_SidecarVisProbeMode::Off;
+
+  if (InterlockedCompareExchange (&s_init, 1, 0) == 0)
+  {
+    wchar_t wszMode [64] = { };
+    const DWORD cch =
+      GetEnvironmentVariableW (L"SIDECARK_VIS_PROBE", wszMode, _countof (wszMode));
+
+    if (cch == 0 || cch >= _countof (wszMode))
+      s_mode = SK_SidecarVisProbeMode::Off;
+    else if (_wcsicmp (wszMode, L"real_after_presentbase") == 0)
+      s_mode = SK_SidecarVisProbeMode::RealAfterPresentBase;
+    else if (_wcsicmp (wszMode, L"flipper_pass") == 0)
+      s_mode = SK_SidecarVisProbeMode::FlipperPass;
+    else
+      s_mode = SK_SidecarVisProbeMode::Off;
+  }
+
+  return s_mode;
+}
+
+static void
+SK_SidecarVisProbe_LogActiveOnce (SK_SidecarVisProbeMode mode)
+{
+  static volatile LONG s_real_once    = 0;
+  static volatile LONG s_flipper_once = 0;
+
+  if (mode == SK_SidecarVisProbeMode::RealAfterPresentBase)
+  {
+    if (InterlockedCompareExchange (&s_real_once, 1, 0) == 0)
+      SK_SidecarVisProbe_Log (L"SIDECARK_VIS_PROBE_ACTIVE mode=real_after_presentbase");
+  }
+
+  else if (mode == SK_SidecarVisProbeMode::FlipperPass)
+  {
+    if (InterlockedCompareExchange (&s_flipper_once, 1, 0) == 0)
+      SK_SidecarVisProbe_Log (L"SIDECARK_VIS_PROBE_ACTIVE mode=flipper_pass");
+  }
+}
+
+static void
+SK_SidecarVisProbe_LogDrawOnce (SK_SidecarVisProbeMode mode,
+                                const wchar_t*         target,
+                                UINT                   width,
+                                UINT                   height,
+                                DXGI_FORMAT            format,
+                                bool                   success)
+{
+  static volatile LONG s_real_once    = 0;
+  static volatile LONG s_flipper_once = 0;
+
+  if (mode == SK_SidecarVisProbeMode::RealAfterPresentBase)
+  {
+    if (InterlockedCompareExchange (&s_real_once, 1, 0) == 0)
+    {
+      SK_SidecarVisProbe_Log (
+        L"SIDECARK_VIS_PROBE_DRAW mode=real_after_presentbase target=%ls w=%u h=%u fmt=%u success=%d",
+        target != nullptr ? target : L"(null)",
+        width, height, (UINT)format, success ? 1 : 0
+      );
+    }
+  }
+
+  else if (mode == SK_SidecarVisProbeMode::FlipperPass)
+  {
+    if (InterlockedCompareExchange (&s_flipper_once, 1, 0) == 0)
+    {
+      SK_SidecarVisProbe_Log (
+        L"SIDECARK_VIS_PROBE_DRAW mode=flipper_pass target=%ls w=%u h=%u fmt=%u success=%d",
+        target != nullptr ? target : L"(null)",
+        width, height, (UINT)format, success ? 1 : 0
+      );
+    }
+  }
+}
+
+static bool
+SK_SidecarVisProbe_DrawBorder (ID3D11DeviceContext*       pDevCtx,
+                               ID3D11RenderTargetView*    pRTV,
+                               UINT                       width,
+                               UINT                       height,
+                               const FLOAT                color [4])
+{
+  if (pDevCtx == nullptr || pRTV == nullptr || width == 0 || height == 0)
+    return false;
+
+  UINT border = ((width < height) ? width : height) / 10u;
+  if (border < 32u)
+    border = 32u;
+  if (border > width)
+    border = width;
+  if (border > height)
+    border = height;
+
+  SK_ComQIPtr <ID3D11DeviceContext1> pDevCtx1 (pDevCtx);
+  if (pDevCtx1 != nullptr)
+  {
+    const LONG right  = static_cast<LONG> (width);
+    const LONG bottom = static_cast<LONG> (height);
+    const LONG thick  = static_cast<LONG> (border);
+
+    const D3D11_RECT rects [4] =
+    {
+      { 0,           0,           right,       thick        },
+      { 0,           bottom-thick,right,       bottom       },
+      { 0,           thick,       thick,       bottom-thick },
+      { right-thick, thick,       right,       bottom-thick }
+    };
+
+    pDevCtx1->ClearView (pRTV, color, rects, _countof (rects));
+    return true;
+  }
+
+  SK_ComPtr <ID3D11DepthStencilView> pOrigDSV;
+  SK_ComPtr <ID3D11RenderTargetView> pOrigRTVs [D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+  pDevCtx->OMGetRenderTargets (D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                               &pOrigRTVs [0].p, &pOrigDSV.p);
+  pDevCtx->OMSetRenderTargets (1, &pRTV, nullptr);
+  pDevCtx->ClearRenderTargetView (pRTV, color);
+  pDevCtx->OMSetRenderTargets (
+    calc_count (&pOrigRTVs [0].p, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT),
+    &pOrigRTVs [0].p,
+    pOrigDSV.p
+  );
+
+  return true;
+}
+
 // Target swapchain: the first swapchain whose backbuffer exactly matches header dims.
 // All other swapchains skip compositing until a device/pid reset clears this.
 // File-scope so the wrapper's Release() teardown path can lifetime-bind it (clear the
@@ -2650,6 +2821,51 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     SyncInterval = 0;
   }
   _LogSlowStage (L"PresentBase", tPresentBase);
+
+  if (SK_SidecarVisProbe_GetMode () == SK_SidecarVisProbeMode::RealAfterPresentBase)
+  {
+    SK_SidecarVisProbe_LogActiveOnce (SK_SidecarVisProbeMode::RealAfterPresentBase);
+
+    static constexpr FLOAT kProbeColor [4] = { 1.0f, 0.0f, 1.0f, 1.0f };
+
+    UINT        probeW   = 0;
+    UINT        probeH   = 0;
+    DXGI_FORMAT probeFmt = DXGI_FORMAT_UNKNOWN;
+    bool        success  = false;
+
+    SK_ComPtr <ID3D11Device>        pDev11;
+    SK_ComPtr <ID3D11DeviceContext> pDevCtx;
+    SK_ComPtr <ID3D11Texture2D>     pBackbuffer;
+    SK_ComPtr <ID3D11RenderTargetView> pRTV;
+
+    if (SUCCEEDED (pReal->GetDevice (__uuidof (ID3D11Device), (void **)&pDev11.p)) &&
+        pDev11 != nullptr)
+    {
+      pDev11->GetImmediateContext (&pDevCtx.p);
+
+      if (pDevCtx != nullptr &&
+          SUCCEEDED (pReal->GetBuffer (0, __uuidof (ID3D11Texture2D), (void **)&pBackbuffer.p)) &&
+          pBackbuffer != nullptr)
+      {
+        D3D11_TEXTURE2D_DESC bbDesc = { };
+        pBackbuffer->GetDesc (&bbDesc);
+
+        probeW   = bbDesc.Width;
+        probeH   = bbDesc.Height;
+        probeFmt = bbDesc.Format;
+
+        if (SUCCEEDED (pDev11->CreateRenderTargetView (pBackbuffer.p, nullptr, &pRTV.p)) &&
+            pRTV != nullptr)
+        {
+          success =
+            SK_SidecarVisProbe_DrawBorder (pDevCtx.p, pRTV.p, probeW, probeH, kProbeColor);
+        }
+      }
+    }
+
+    SK_SidecarVisProbe_LogDrawOnce (SK_SidecarVisProbeMode::RealAfterPresentBase,
+                                    L"real_backbuffer", probeW, probeH, probeFmt, success);
+  }
 
   return
     SK_DXGI_DispatchPresent ( pReal, SyncInterval, Flags,
