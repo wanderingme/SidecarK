@@ -56,12 +56,14 @@ enum class SK_SidecarVisProbeMode
 static void
 SK_SidecarVisProbe_Log (const wchar_t* fmt, ...)
 {
+  static constexpr wchar_t kProbeLogName [] = L"SidecarK_Overlay.log";
+
   wchar_t path [MAX_PATH] = { };
   const DWORD cch = GetTempPathW (MAX_PATH, path);
-  if (cch == 0 || cch >= MAX_PATH)
+  if (cch == 0 || cch >= MAX_PATH || cch + _countof (kProbeLogName) > MAX_PATH)
     return;
 
-  wcscat_s (path, L"SidecarK_Overlay.log");
+  wcscat_s (path, kProbeLogName);
 
   FILE* f = nullptr;
   _wfopen_s (&f, path, L"a+, ccs=UTF-8");
