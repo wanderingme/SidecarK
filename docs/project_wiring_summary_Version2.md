@@ -259,7 +259,7 @@ Behavior:
 - `real_after_presentbase` draws a magenta border directly into the real DXGI swapchain backbuffer after `PresentBase()` and immediately before the final real `Present`.
 - `flipper_pass` draws a green border in the GL→D3D11 flipper pass immediately after the game-content draw into `output.backbuffer.rtv`.
 
-When the probe is active, SidecarK logs these exact once-per-activation markers to `%TEMP%\\SidecarK_Overlay.log` even if `SIDECARK_DIAGNOSTICS` is not enabled:
+When the probe is active, SidecarK logs these exact once-per-activation markers to `%TEMP%\SidecarK_Overlay.log` even if `SIDECARK_DIAGNOSTICS` is not enabled:
 
 - `SIDECARK_VIS_PROBE_ACTIVE mode=real_after_presentbase`
 - `SIDECARK_VIS_PROBE_DRAW mode=real_after_presentbase target=real_backbuffer w=... h=... fmt=... success=...`
