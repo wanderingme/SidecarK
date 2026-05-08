@@ -146,6 +146,8 @@ SK_SidecarVisProbe_GetMode (void)
 
     if (cch == 0 || cch >= _countof (wszMode))
       s_mode = SK_SidecarVisProbeMode::Off;
+    else if (_wcsicmp (wszMode, L"off") == 0)
+      s_mode = SK_SidecarVisProbeMode::Off;
     else if (_wcsicmp (wszMode, L"real_after_presentbase") == 0)
       s_mode = SK_SidecarVisProbeMode::RealAfterPresentBase;
     else if (_wcsicmp (wszMode, L"flipper_pass") == 0)
