@@ -202,19 +202,7 @@ SK_SidecarVisProbe_DrawBorder (ID3D11DeviceContext*       pDevCtx,
     return true;
   }
 
-  SK_ComPtr <ID3D11DepthStencilView> pOrigDSV;
-  SK_ComPtr <ID3D11RenderTargetView> pOrigRTVs [D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
-  pDevCtx->OMGetRenderTargets (D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
-                               &pOrigRTVs [0].p, &pOrigDSV.p);
-  pDevCtx->OMSetRenderTargets (1, &pRTV, nullptr);
-  pDevCtx->ClearRenderTargetView (pRTV, color);
-  pDevCtx->OMSetRenderTargets (
-    calc_count (&pOrigRTVs [0].p, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT),
-    &pOrigRTVs [0].p,
-    pOrigDSV.p
-  );
-
-  return true;
+  return false;
 }
 
 // Target swapchain: the first swapchain whose backbuffer exactly matches header dims.

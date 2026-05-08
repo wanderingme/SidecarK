@@ -268,6 +268,8 @@ When the probe is active, SidecarK logs these exact once-per-activation markers 
 
 The probe draw runs every eligible frame while the mode remains active; only the `ACTIVE` and `DRAW` log lines are once-per-activation.
 
+For the `DRAW` log line, `success=1` means SidecarK found the target and emitted the hardcoded border for that activation; `success=0` means the probe mode was active but the required D3D11 target/context setup was unavailable for the draw attempt that produced the one-shot log line.
+
 ---
 
 ## 6. What Must Change
