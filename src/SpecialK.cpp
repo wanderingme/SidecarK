@@ -80,6 +80,40 @@ _SidecarK_WriteDiagHeader (const char* szMsg)
   }
 }
 
+static void
+_SidecarK_LogVisProbeBoot (void)
+{
+  static LONG s_logged_once = 0;
+  if (InterlockedCompareExchange (&s_logged_once, 1, 0) != 0)
+    return;
+
+  wchar_t wszEnv [128] = { };
+  const DWORD cchEnv =
+    GetEnvironmentVariableW (L"SIDECARK_VIS_PROBE", wszEnv, _countof (wszEnv));
+
+  char szEnv [256] = { };
+
+  if (cchEnv == 0)
+  {
+    strcpy_s (szEnv, _countof (szEnv), "<unset>");
+  }
+
+  else if (cchEnv >= _countof (wszEnv))
+  {
+    strcpy_s (szEnv, _countof (szEnv), "<truncated>");
+  }
+
+  else
+  {
+    WideCharToMultiByte (CP_UTF8, 0, wszEnv, -1, szEnv,
+                         (int)_countof (szEnv), nullptr, nullptr);
+  }
+
+  char szLine [320] = { };
+  sprintf_s (szLine, _countof (szLine), "SIDECARK_VIS_PROBE_BOOT env=%s", szEnv);
+  _SidecarK_WriteDiagHeader (szLine);
+}
+
 bool SidecarK_DiagnosticsEnabled ()
 {
 #if defined(SIDECARK_DIAGNOSTICS_ALWAYS_ON)
@@ -2000,6 +2034,8 @@ BOOL
 __stdcall
 SK_Attach (DLL_ROLE role)
 {
+  _SidecarK_LogVisProbeBoot ();
+
   {
     static LONG once = 0;
     if (InterlockedCompareExchange (&once, 1, 0) == 0)

@@ -261,12 +261,15 @@ Behavior:
 
 When the probe is active, SidecarK logs these exact once-per-activation markers to `%TEMP%\SidecarK_Overlay.log` even if `SIDECARK_DIAGNOSTICS` is not enabled:
 
+- `SIDECARK_VIS_PROBE_BOOT env=...`
 - `SIDECARK_VIS_PROBE_ACTIVE mode=real_after_presentbase`
 - `SIDECARK_VIS_PROBE_DRAW mode=real_after_presentbase target=real_backbuffer w=... h=... fmt=... success=...`
 - `SIDECARK_VIS_PROBE_ACTIVE mode=flipper_pass`
 - `SIDECARK_VIS_PROBE_DRAW mode=flipper_pass target=flipper_rtv w=... h=... fmt=... success=...`
 
-The probe draw runs every eligible frame while the mode remains active; only the `ACTIVE` and `DRAW` log lines are once-per-activation.
+`SIDECARK_VIS_PROBE_BOOT env=...` is emitted once during early SidecarK startup and records the raw `SIDECARK_VIS_PROBE` environment value (`<unset>` when absent).
+
+The probe draw runs every eligible frame while the mode remains active; the `BOOT`, `ACTIVE`, and `DRAW` log lines are once-per-activation/startup markers.
 
 For the `DRAW` log line, `success=1` means SidecarK found the target and emitted the hardcoded border for that activation; `success=0` means the probe mode was active but the required D3D11 target/context setup was unavailable for the draw attempt that produced the one-shot log line.
 
