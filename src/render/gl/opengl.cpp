@@ -3523,12 +3523,15 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // -- Step 1: open / maintain the SKF1 shared-memory mapping ----------
         if (s_fs_base == nullptr)
         {
-          HANDLE h = OpenFileMappingW (FILE_MAP_READ, FALSE, map_name);
-          if (h != nullptr)
+          if (s_fs_hMap != nullptr)
           {
-            if (s_fs_hMap != nullptr && s_fs_hMap != h)
-              CloseHandle (s_fs_hMap);
-            s_fs_hMap = h;
+            CloseHandle (s_fs_hMap);
+            s_fs_hMap = nullptr;
+          }
+
+          s_fs_hMap = OpenFileMappingW (FILE_MAP_READ, FALSE, map_name);
+          if (s_fs_hMap != nullptr)
+          {
             s_fs_base = (uint8_t *)MapViewOfFile (s_fs_hMap, FILE_MAP_READ, 0, 0, 0);
             if (s_fs_base != nullptr)
             {
@@ -3539,7 +3542,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             if (s_fs_base == nullptr || s_fs_map_bytes == 0)
             {
               if (s_fs_base) { UnmapViewOfFile (s_fs_base); s_fs_base = nullptr; }
-              if (s_fs_hMap) { CloseHandle (s_fs_hMap);     s_fs_hMap = nullptr; }
+              CloseHandle (s_fs_hMap);
+              s_fs_hMap      = nullptr;
               s_fs_map_bytes = 0;
             }
           }
