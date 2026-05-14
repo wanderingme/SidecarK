@@ -3558,17 +3558,17 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
           if (magic == 0x31464B53u && ver == 1u) // 'SKF1' v1
           {
-            const uint32_t hdr_bytes   = *(const uint32_t *)(base + 0x08);
-            const uint32_t data_off    = *(const uint32_t *)(base + 0x0C);
-            const uint32_t pix_fmt     = *(const uint32_t *)(base + 0x10);
-            const uint32_t width       = *(const uint32_t *)(base + 0x14);
-            const uint32_t height      = *(const uint32_t *)(base + 0x18);
-            const uint32_t stride      = *(const uint32_t *)(base + 0x1C);
+            const uint32_t skf1_hdr_bytes = *(const uint32_t *)(base + 0x08);
+            const uint32_t data_off       = *(const uint32_t *)(base + 0x0C);
+            const uint32_t pix_fmt        = *(const uint32_t *)(base + 0x10);
+            const uint32_t width          = *(const uint32_t *)(base + 0x14);
+            const uint32_t height         = *(const uint32_t *)(base + 0x18);
+            const uint32_t stride         = *(const uint32_t *)(base + 0x1C);
 
             const uint64_t ctr_off  = (uint64_t)data_off - 4ull;
             const uint64_t px_bytes = (uint64_t)stride * (uint64_t)height;
             const bool layout_ok    =
-              ( hdr_bytes  == 0x20u && data_off == 0x24u  &&
+              ( skf1_hdr_bytes == 0x20u && data_off == 0x24u  &&
                 pix_fmt    == 1u    && width > 0u && height > 0u &&
                 stride     == (uint32_t)((uint64_t)width * 4u)  &&
                 ((uint64_t)data_off + px_bytes) <= (uint64_t)s_fs_map_bytes );
