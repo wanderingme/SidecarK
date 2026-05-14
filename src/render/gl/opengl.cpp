@@ -3520,6 +3520,88 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         static bool                s_fs_has_frame = false;
         static std::vector<uint8_t> s_fs_snapshot;
 
+        // Control-plane state: mirrors the DXGI path (SidecarK_Control_<pid>).
+        static HANDLE              s_fs_ctrlMap         = nullptr;
+        static uint8_t*            s_fs_ctrlBase        = nullptr;
+        static volatile LONG*      s_fs_overlayEnabled  = nullptr;
+        static DWORD               s_fs_ctrlPid         = 0;
+        static ULONGLONG           s_fs_ctrlLastAttempt = 0;
+
+        // -- Step 0: open / maintain the SidecarK_Control overlay-enable map --
+        {
+          const DWORD pidNow = GetCurrentProcessId ();
+
+          // Invalidate cached map if the PID changed (new game session).
+          if (s_fs_ctrlPid != pidNow)
+          {
+            if (s_fs_ctrlBase != nullptr)
+            {
+              UnmapViewOfFile (s_fs_ctrlBase);
+              s_fs_ctrlBase       = nullptr;
+              s_fs_overlayEnabled = nullptr;
+            }
+            if (s_fs_ctrlMap != nullptr)
+            {
+              CloseHandle (s_fs_ctrlMap);
+              s_fs_ctrlMap = nullptr;
+            }
+            s_fs_ctrlPid         = pidNow;
+            s_fs_ctrlLastAttempt = 0;  // force retry immediately
+          }
+
+          // Rate-limited open attempt (once per second until established).
+          if (s_fs_overlayEnabled == nullptr)
+          {
+            const ULONGLONG nowMs = GetTickCount64 ();
+            if (nowMs - s_fs_ctrlLastAttempt >= 1000ull)
+            {
+              s_fs_ctrlLastAttempt = nowMs;
+
+              wchar_t ctrl_name [64] = { };
+              wsprintfW (ctrl_name, L"Local\\SidecarK_Control_%lu", (unsigned long)pidNow);
+
+              HANDLE hCtrl = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
+              if (hCtrl != nullptr)
+              {
+                uint8_t* ctrlBase = (uint8_t *)MapViewOfFile (hCtrl, FILE_MAP_READ, 0, 0, 0);
+                if (ctrlBase != nullptr)
+                {
+                  char sig [4] = { };
+                  memcpy (sig, ctrlBase, sizeof (sig));
+                  const uint32_t ctrlVer = *reinterpret_cast<const uint32_t *> (ctrlBase + 0x04);
+                  if (memcmp (sig, "SKC1", sizeof (sig)) == 0 && ctrlVer == 1u)
+                  {
+                    s_fs_ctrlMap        = hCtrl;
+                    s_fs_ctrlBase       = ctrlBase;
+                    s_fs_overlayEnabled = reinterpret_cast<volatile LONG *> (ctrlBase + 0x08);
+                  }
+                  else
+                  {
+                    UnmapViewOfFile (ctrlBase);
+                    CloseHandle (hCtrl);
+                  }
+                }
+                else
+                {
+                  CloseHandle (hCtrl);
+                }
+              }
+            }
+          }
+        }
+
+        // Read the authoritative overlay-enabled flag (fail-closed: off if map
+        // not yet established, matching the DXGI control-plane behaviour).
+        const bool s_fs_overlay_enabled =
+          (s_fs_overlayEnabled != nullptr) &&
+          (*s_fs_overlayEnabled != 0);
+
+        // When the overlay is turned off, invalidate the cached frame so that
+        // the stale texture is never composited and fresh frames are uploaded
+        // on the next ON transition.
+        if (!s_fs_overlay_enabled)
+          s_fs_has_frame = false;
+
         // -- Step 1: open / maintain the SKF1 shared-memory mapping ----------
         if (s_fs_base == nullptr)
         {
@@ -3550,7 +3632,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         }
 
         // -- Step 2: parse header, snapshot pixels, upload texture on change -
-        if (s_fs_base != nullptr)
+        if (s_fs_overlay_enabled && s_fs_base != nullptr)
         {
           const uint8_t* base  = s_fs_base;
           const uint32_t magic = *(const uint32_t *)(base + 0x00);
@@ -3647,7 +3729,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         }
 
         // -- Step 3: composite overlay over FBO 0 if a frame is available ----
-        if (s_fs_has_frame && s_fs_tex != 0)
+        if (s_fs_overlay_enabled && s_fs_has_frame && s_fs_tex != 0)
         {
           // Save GL state.
           GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
