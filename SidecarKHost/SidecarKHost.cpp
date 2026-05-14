@@ -14,6 +14,10 @@
 static constexpr bool kEnableLegacySKOF_DebugOnly = false;
 // User-editable: set true to enable SidecarK diagnostics token creation.
 static constexpr bool kEnableSidecarKDiagnosticsToken = false;
+// User-editable: set true to log every WM_MOUSEMOVE event received on the
+// input pipe.  Off by default because WM_MOUSEMOVE is high-frequency and
+// spams the console during any mouse movement while the overlay is active.
+static constexpr bool kLogMouseMoveEvents = false;
 
 static HANDLE g_diag_enable_map = nullptr;
 
@@ -1698,6 +1702,22 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
 // ---------------------------------------------------------------------------
 // Input event pipe server: receives SKI1-framed events from the injected DLL
 // while the overlay is active and logs them for end-to-end validation.
+//
+// FORWARDING GAP (diagnostic note): this function currently logs received
+// events to stdout but does NOT forward them to the Virule OverlayProducerCEF
+// process.  The Virule OverlayProducerCEF is responsible for constructing
+// CefMouseEvent / CefKeyEvent structs and calling:
+//   CefBrowserHost::SendMouseClickEvent   (down/up, with button modifiers)
+//   CefBrowserHost::SendMouseMoveEvent    (with EVENTFLAG_LEFT_MOUSE_BUTTON
+//                                          etc. set while a button is held)
+//   CefBrowserHost::SendMouseWheelEvent
+//   CefBrowserHost::SendKeyEvent
+// The button state for drag moves is carried in SKI1_WinMsgMouse::buttonFlags
+// as LOWORD(wParam) from the original Windows message, which includes MK_LBUTTON
+// (0x01) while the left button is held — the Virule producer must translate
+// MK_LBUTTON -> EVENTFLAG_LEFT_MOUSE_BUTTON when calling SendMouseMoveEvent.
+// If click-and-drag fails after confirming events reach this function, the
+// root cause is in the Virule OverlayProducerCEF (separate Virule repo task).
 // ---------------------------------------------------------------------------
 #pragma pack(push, 1)
 struct SKI1_Header
@@ -1834,9 +1854,16 @@ static void RunInputEventPipeServer(const std::wstring& pipeName)
             {
               SKI1_WinMsgMouse p;
               memcpy(&p, payload, sizeof(p));
-              wprintf(L"input_mouse: msg=%u x=%d y=%d wheel=%d btns=0x%X keys=0x%X\n",
-                      (unsigned)p.msg, (int)p.x, (int)p.y, (int)p.wheel,
-                      (unsigned)p.buttonFlags, (unsigned)p.keyFlags);
+              // WM_MOUSEMOVE (0x0200) is high-frequency; gate its log behind
+              // kLogMouseMoveEvents to avoid console spam during any mouse
+              // movement while the overlay is active.
+              const bool isMove = (p.msg == 0x0200u); // WM_MOUSEMOVE
+              if (!isMove || kLogMouseMoveEvents)
+              {
+                wprintf(L"input_mouse: msg=%u x=%d y=%d wheel=%d btns=0x%X keys=0x%X\n",
+                        (unsigned)p.msg, (int)p.x, (int)p.y, (int)p.wheel,
+                        (unsigned)p.buttonFlags, (unsigned)p.keyFlags);
+              }
             }
             break;
           case SKI1_Type_WinMsgKey:

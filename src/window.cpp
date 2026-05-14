@@ -6290,6 +6290,20 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
       if ((uMsg >= WM_KEYFIRST   && uMsg <= WM_KEYLAST   && bIgnoreKeyboard) ||
           (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST && bIgnoreMouse))
       {
+        // Forward to the SKI1 input pipe before swallowing when the SKC
+        // overlay is active.  Events arriving via SendMessage or other
+        // direct-to-WndProc paths bypass PeekMessage (which has its own
+        // forwarding at PM_REMOVE time) and must be captured here.
+        // Only forward for the game window; only when the overlay is the
+        // specific reason we are swallowing (not ImGui capture alone).
+        if (bOverlayActive && hWnd == game_window.hWnd)
+        {
+          if (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST)
+            SKI1_SendWinMsgMouse (uMsg, wParam, lParam);
+          else
+            SKI1_SendWinMsgKey   (uMsg, wParam, lParam);
+        }
+
         IsWindowUnicode (hWnd)                       ?
          DefWindowProcW (hWnd, uMsg, wParam, lParam) :
          DefWindowProcA (hWnd, uMsg, wParam, lParam);
