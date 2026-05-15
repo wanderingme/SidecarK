@@ -374,6 +374,7 @@ SK_ImGui_CreateNotificationEx ( const char* szID,
                                       void*                        draw_data )
 {
   if (g_ExternalHost_DisableAllSKUI)
+    return false;
 
   SK_ImGui_Toast toast;
 
