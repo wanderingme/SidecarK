@@ -373,7 +373,7 @@ SK_ImGui_CreateNotificationEx ( const char* szID,
                                       SK_ImGui_ToastOwnerDrawn_pfn draw_fn,
                                       void*                        draw_data )
 {
-  if (g_Virule_DisableAllSKUI)
+  if (g_SidecarK_DisableAllSKUI)
     return false;
 
   SK_ImGui_Toast toast;
@@ -576,7 +576,7 @@ SK_ImGui_UnsilenceNotifications (void)
 void
 SK_ImGui_DrawNotifications (void)
 {
-  if (g_Virule_DisableAllSKUI)
+  if (g_SidecarK_DisableAllSKUI)
   {
     SK_ImGui_Toast toast;
     while (SK_ImGui_Notifications.try_pop (toast))

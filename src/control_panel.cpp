@@ -8564,7 +8564,7 @@ SK_ImGui_StageNextFrame (void)
 
 
   static DWORD dwStartTime = current_time;
-  if ((! g_Virule_DisableAllSKUI) &&
+  if ((! g_SidecarK_DisableAllSKUI) &&
       ((current_time < dwStartTime + 1000 * config.version_banner.duration) || eula.show))
   {
     ImGui::PushStyleColor    (ImGuiCol_Text,     ImVec4 (1.f,   1.f,   1.f,   1.f));

@@ -223,7 +223,7 @@ extern BOOL          __SK_DisableQuickHook;
 
 void        SK_ImGui_Init (void);
 extern bool SK_ImGui_WantExit;
-extern bool g_Virule_DisableAllSKUI;
+extern bool g_SidecarK_DisableAllSKUI;
 void
 __stdcall   SK_ImGui_DrawEULA      (LPVOID reserved);
 bool        SK_ImGui_IsEULAVisible (void);
