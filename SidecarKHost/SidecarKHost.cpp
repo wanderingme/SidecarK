@@ -1822,7 +1822,8 @@ static uint32_t SKI1R_MkToCefModifiers(uint32_t buttonFlags, uint32_t keyFlags)
 static std::wstring RelayPipeNameForTarget(DWORD pid)
 {
   wchar_t buf[128]{};
-  swprintf(buf, _countof(buf), L"\\\\.\\pipe\\SidecarK_InputRelay_%lu", (unsigned long)pid);
+  if (swprintf(buf, _countof(buf), L"\\\\.\\pipe\\SidecarK_InputRelay_%lu", (unsigned long)pid) < 0)
+    return L"";
   return buf;
 }
 
@@ -1962,10 +1963,11 @@ static void RunInputEventPipeServer(const std::wstring& pipeName,
   };
 
   // Relay a non-mouse SKI1 frame unchanged (key / raw / focus events).
+  static constexpr uint32_t SKI1_MAX_PASSTHROUGH_PAYLOAD_SIZE = 256u;
   auto RelayPassThrough = [&](const SKI1_Header* fhdr, const uint8_t* fpayload)
   {
-    if (fhdr->size > 256u) return; // guard against unexpectedly large payloads
-    uint8_t frameBuf[sizeof(SKI1_Header) + 256u];
+    if (fhdr->size > SKI1_MAX_PASSTHROUGH_PAYLOAD_SIZE) return; // guard against unexpectedly large payloads
+    uint8_t frameBuf[sizeof(SKI1_Header) + SKI1_MAX_PASSTHROUGH_PAYLOAD_SIZE];
     memcpy(frameBuf,                        fhdr,     sizeof(SKI1_Header));
     memcpy(frameBuf + sizeof(SKI1_Header),  fpayload, fhdr->size);
     RelayPipeWrite(frameBuf, static_cast<uint32_t>(sizeof(SKI1_Header) + fhdr->size));
@@ -2093,14 +2095,13 @@ static void RunInputEventPipeServer(const std::wstring& pipeName,
               SKI1_WinMsgMouse p;
               memcpy(&p, payload, sizeof(p));
 
-              const bool     isMove   = (p.msg == 0x0200u); // WM_MOUSEMOVE
+              const bool     isMove   = (p.msg == WM_MOUSEMOVE);
               const uint32_t cefMods  = SKI1R_MkToCefModifiers(p.buttonFlags, p.keyFlags);
 
               // Log mouse button down/up always; mouse move only if kLogMouseMoveEvents.
               // cef_mods shows the EVENTFLAG_* value that the relay carries for
               // this event — check that 0x10 (EVENTFLAG_LEFT_MOUSE_BUTTON) is
-              // present during scrollbar-thumb drag.
-              if (!isMove || kLogMouseMoveEvents)
+              // present during scrollbar-thumb drag.              if (!isMove || kLogMouseMoveEvents)
               {
                 wprintf(L"input_mouse: msg=0x%04X x=%d y=%d wheel=%d btns=0x%02X keys=0x%02X cef_mods=0x%02X\n",
                         (unsigned)p.msg, (int)p.x, (int)p.y, (int)p.wheel,
