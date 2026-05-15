@@ -1822,7 +1822,8 @@ static uint32_t SKI1R_MkToCefModifiers(uint32_t buttonFlags, uint32_t keyFlags)
 static std::wstring RelayPipeNameForTarget(DWORD pid)
 {
   wchar_t buf[128]{};
-  if (swprintf(buf, _countof(buf), L"\\\\.\\pipe\\SidecarK_InputRelay_%lu", (unsigned long)pid) < 0)
+  const int written = swprintf(buf, _countof(buf), L"\\\\.\\pipe\\SidecarK_InputRelay_%lu", (unsigned long)pid);
+  if (written < 0 || written >= static_cast<int>(_countof(buf)))
     return L"";
   return buf;
 }
