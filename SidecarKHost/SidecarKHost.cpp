@@ -1701,23 +1701,25 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
 
 // ---------------------------------------------------------------------------
 // Input event pipe server: receives SKI1-framed events from the injected DLL
-// while the overlay is active and logs them for end-to-end validation.
+// while the overlay is active; computes CEF modifier flags; and publishes
+// enriched SKI1R events to the SidecarK_InputRelay_{pid} output pipe.
 //
-// FORWARDING GAP (diagnostic note): this function currently logs received
-// events to stdout but does NOT forward them to the Virule OverlayProducerCEF
-// process.  The Virule OverlayProducerCEF is responsible for constructing
-// CefMouseEvent / CefKeyEvent structs and calling:
-//   CefBrowserHost::SendMouseClickEvent   (down/up, with button modifiers)
-//   CefBrowserHost::SendMouseMoveEvent    (with EVENTFLAG_LEFT_MOUSE_BUTTON
-//                                          etc. set while a button is held)
-//   CefBrowserHost::SendMouseWheelEvent
-//   CefBrowserHost::SendKeyEvent
-// The button state for drag moves is carried in SKI1_WinMsgMouse::buttonFlags
-// as LOWORD(wParam) from the original Windows message, which includes MK_LBUTTON
-// (0x01) while the left button is held — the Virule producer must translate
-// MK_LBUTTON -> EVENTFLAG_LEFT_MOUSE_BUTTON when calling SendMouseMoveEvent.
-// If click-and-drag fails after confirming events reach this function, the
-// root cause is in the Virule OverlayProducerCEF (separate Virule repo task).
+// SKI1R relay protocol:
+//   Mouse events use type SKI1_Type_WinMsgMouseEx (6) with payload
+//   SKI1R_WinMsgMouse.  The additional cefModifiers field carries pre-computed
+//   EVENTFLAG_* bits ready for CefMouseEvent.modifiers.  The Virule
+//   OverlayProducerCEF must:
+//     1. Open SidecarK_InputRelay_{pid} with GENERIC_READ.
+//     2. For each type-6 frame: copy cefModifiers into CefMouseEvent.modifiers
+//        before calling SendMouseMoveEvent or SendMouseClickEvent.
+//     3. Key / raw / focus events (types 2–5) are relayed unchanged.
+//
+//   ScrollBar-thumb drag fix: WM_MOUSEMOVE events arrive with
+//   buttonFlags = MK_LBUTTON (0x01) while the left button is held, which
+//   maps to EVENTFLAG_LEFT_MOUSE_BUTTON (bit 4 = 0x10) in cefModifiers.
+//   The Virule OverlayProducerCEF must pass this non-zero cefModifiers value
+//   to SendMouseMoveEvent for CEF to treat the move as a mouse-drag event
+//   and track the scrollbar thumb.
 // ---------------------------------------------------------------------------
 #pragma pack(push, 1)
 struct SKI1_Header
@@ -1741,8 +1743,238 @@ static constexpr uint16_t SKI1_Type_RawMouse    = 3;
 static constexpr uint16_t SKI1_Type_RawKey      = 4;
 static constexpr uint16_t SKI1_Type_Focus       = 5;
 
-static void RunInputEventPipeServer(const std::wstring& pipeName)
+// ---------------------------------------------------------------------------
+// SKI1R relay protocol: SidecarKHost publishes enriched mouse events to
+// SidecarK_InputRelay_{pid} so the Virule OverlayProducerCEF can forward
+// them directly to CEF OSR APIs with correct button modifiers.
+//
+// Type 6 (WinMsgMouseEx) extends SKI1_WinMsgMouse with a cefModifiers field
+// that maps Windows MK_* flags to CEF EVENTFLAG_* values.  The consumer
+// (Virule OverlayProducerCEF) copies cefModifiers straight into
+// CefMouseEvent.modifiers before calling:
+//   SendMouseMoveEvent  — must include EVENTFLAG_LEFT_MOUSE_BUTTON while held
+//   SendMouseClickEvent — down/up with correct held-button modifiers
+//   SendMouseWheelEvent — with shift/ctrl/alt modifier state
+//
+// All other event types (key, raw input, focus) are relayed unchanged using
+// their original type IDs.  The relay pipe uses the same SKI1 framing.
+//
+// buttonFlags in SKI1_WinMsgMouse equals LOWORD(wParam) from the original
+// WM_MOUSE* message and therefore always reflects the instantaneous
+// held-button state for ALL mouse messages, including WM_MOUSEMOVE during a
+// drag.  MK_LBUTTON (0x0001) is present in WM_MOUSEMOVE.wParam while the
+// left button is held — this is the field that becomes EVENTFLAG_LEFT_MOUSE_
+// BUTTON (bit 4) in cefModifiers, enabling scrollbar-thumb dragging in CEF.
+// ---------------------------------------------------------------------------
+
+// CEF cef_event_flags_t values (from cef_types.h).
+static constexpr uint32_t SKI1R_CEFMOD_SHIFT   = 1u << 1u; // EVENTFLAG_SHIFT_DOWN
+static constexpr uint32_t SKI1R_CEFMOD_CTRL    = 1u << 2u; // EVENTFLAG_CONTROL_DOWN
+static constexpr uint32_t SKI1R_CEFMOD_ALT     = 1u << 3u; // EVENTFLAG_ALT_DOWN
+static constexpr uint32_t SKI1R_CEFMOD_LBUTTON = 1u << 4u; // EVENTFLAG_LEFT_MOUSE_BUTTON
+static constexpr uint32_t SKI1R_CEFMOD_MBUTTON = 1u << 5u; // EVENTFLAG_MIDDLE_MOUSE_BUTTON
+static constexpr uint32_t SKI1R_CEFMOD_RBUTTON = 1u << 6u; // EVENTFLAG_RIGHT_MOUSE_BUTTON
+
+// Relay frame type for the extended mouse payload.
+static constexpr uint16_t SKI1_Type_WinMsgMouseEx = 6u;
+
+// Extended mouse payload: identical prefix to SKI1_WinMsgMouse (backward-
+// compatible) followed by cefModifiers at byte offset 24.
+#pragma pack(push, 1)
+struct SKI1R_WinMsgMouse
 {
+  uint32_t msg;
+  int32_t  x;
+  int32_t  y;
+  int32_t  wheel;
+  uint32_t buttonFlags;   // MK_* flags: instantaneous button state from wParam
+  uint32_t keyFlags;      // bit0=Shift, bit1=Ctrl, bit2=Alt (GetKeyState at capture)
+  uint32_t cefModifiers;  // EVENTFLAG_* bits; copy directly into CefMouseEvent.modifiers
+};
+#pragma pack(pop)
+
+static_assert(sizeof(SKI1R_WinMsgMouse) == 28u,
+              "SKI1R_WinMsgMouse size changed — update Virule consumer");
+
+// Translate Windows MK_* button flags and SKI1 keyFlags to CEF EVENTFLAG_*.
+//
+// buttonFlags = LOWORD(wParam) from WM_MOUSE* messages:
+//   MK_LBUTTON  = 0x0001  ->  SKI1R_CEFMOD_LBUTTON (1<<4)
+//   MK_RBUTTON  = 0x0002  ->  SKI1R_CEFMOD_RBUTTON (1<<6)
+//   MK_SHIFT    = 0x0004  ->  SKI1R_CEFMOD_SHIFT   (1<<1)
+//   MK_CONTROL  = 0x0008  ->  SKI1R_CEFMOD_CTRL    (1<<2)
+//   MK_MBUTTON  = 0x0010  ->  SKI1R_CEFMOD_MBUTTON (1<<5)
+//
+// keyFlags from SKI1: bit0=Shift, bit1=Ctrl, bit2=Alt (from GetKeyState).
+// The shift/ctrl bits may also appear in buttonFlags (MK_SHIFT, MK_CONTROL).
+static uint32_t SKI1R_MkToCefModifiers(uint32_t buttonFlags, uint32_t keyFlags)
+{
+  uint32_t cef = 0u;
+  if (buttonFlags & 0x0001u) cef |= SKI1R_CEFMOD_LBUTTON; // MK_LBUTTON
+  if (buttonFlags & 0x0002u) cef |= SKI1R_CEFMOD_RBUTTON; // MK_RBUTTON
+  if (buttonFlags & 0x0010u) cef |= SKI1R_CEFMOD_MBUTTON; // MK_MBUTTON
+  if ((buttonFlags & 0x0004u) || (keyFlags & 0x01u)) cef |= SKI1R_CEFMOD_SHIFT;   // MK_SHIFT
+  if ((buttonFlags & 0x0008u) || (keyFlags & 0x02u)) cef |= SKI1R_CEFMOD_CTRL;    // MK_CONTROL
+  if (keyFlags & 0x04u)                              cef |= SKI1R_CEFMOD_ALT;
+  return cef;
+}
+
+static std::wstring RelayPipeNameForTarget(DWORD pid)
+{
+  wchar_t buf[128]{};
+  swprintf(buf, _countof(buf), L"\\\\.\\pipe\\SidecarK_InputRelay_%lu", (unsigned long)pid);
+  return buf;
+}
+
+static void RunInputEventPipeServer(const std::wstring& pipeName,
+                                    const std::wstring& relayPipeName)
+{
+  // ---- Relay pipe state: persists across SidecarK.dll reconnections ----
+  // SidecarKHost creates an OUTBOUND named pipe server; the Virule
+  // OverlayProducerCEF connects as a client (GENERIC_READ) to receive
+  // enriched SKI1R events with pre-computed cefModifiers.
+  HANDLE     relayPipe       = INVALID_HANDLE_VALUE;
+  HANDLE     relayConnEv     = nullptr;
+  OVERLAPPED relayConnOv     = {};
+  bool       relayConnecting = false;
+  bool       relayReady      = false;
+
+  // Open a new relay pipe server instance waiting for the Virule client.
+  // Non-blocking: uses overlapped ConnectNamedPipe; connection is polled each
+  // iteration of the inner read loop.
+  auto RelayEnsureServer = [&]()
+  {
+    if (relayPipe != INVALID_HANDLE_VALUE) return;
+    if (relayPipeName.empty())            return;
+
+    HANDLE h = CreateNamedPipeW(
+      relayPipeName.c_str(),
+      PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED,
+      PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+      1, 65536, 0, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+
+    HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ev) { CloseHandle(h); return; }
+
+    ZeroMemory(&relayConnOv, sizeof(relayConnOv));
+    relayConnOv.hEvent = ev;
+    relayConnEv        = ev;
+
+    BOOL conn = ConnectNamedPipe(h, &relayConnOv);
+    if (!conn)
+    {
+      const DWORD err = GetLastError();
+      if (err == ERROR_IO_PENDING)
+      {
+        relayPipe       = h;
+        relayConnecting = true;
+        relayReady      = false;
+        return;
+      }
+      if (err == ERROR_PIPE_CONNECTED)
+      {
+        CloseHandle(ev);
+        relayConnEv        = nullptr;
+        relayConnOv.hEvent = nullptr;
+        relayPipe          = h;
+        relayConnecting    = false;
+        relayReady         = true;
+        wprintf(L"relay_pipe_connected_immediate\n");
+        return;
+      }
+    }
+    // ConnectNamedPipe returned TRUE (rare) or unrecoverable error
+    CloseHandle(ev);
+    CloseHandle(h);
+  };
+
+  // Poll for relay connection completion (non-blocking).
+  auto RelayPollConnect = [&]()
+  {
+    if (!relayConnecting || relayPipe == INVALID_HANDLE_VALUE) return;
+    DWORD d = 0;
+    if (GetOverlappedResult(relayPipe, &relayConnOv, &d, FALSE))
+    {
+      relayConnecting = false;
+      relayReady      = true;
+      if (relayConnEv)
+      {
+        CloseHandle(relayConnEv);
+        relayConnEv        = nullptr;
+        relayConnOv.hEvent = nullptr;
+      }
+      wprintf(L"relay_pipe_connected ts=%llu\n", (unsigned long long)GetTickCount64());
+    }
+  };
+
+  // Write data to the relay pipe synchronously.
+  // Named pipe buffers up to 65536 bytes so small frames (<100 bytes) never
+  // block.  Returns false if the relay pipe is broken; caller must clean up.
+  auto RelayPipeWrite = [&](const void* data, uint32_t size) -> bool
+  {
+    if (!relayReady || relayPipe == INVALID_HANDLE_VALUE)
+      return true; // not connected; skip silently
+    DWORD bw = 0;
+    if (!WriteFile(relayPipe, data, size, &bw, nullptr) || bw != size)
+    {
+      // Virule client disconnected or pipe error; tear down.
+      if (relayConnEv)
+      {
+        CloseHandle(relayConnEv);
+        relayConnEv        = nullptr;
+        relayConnOv.hEvent = nullptr;
+      }
+      DisconnectNamedPipe(relayPipe);
+      CloseHandle(relayPipe);
+      relayPipe       = INVALID_HANDLE_VALUE;
+      relayReady      = false;
+      relayConnecting = false;
+      return false;
+    }
+    return true;
+  };
+
+  // Build and write an SKI1R extended mouse frame (type 6) to the relay pipe.
+  // cefModifiers is derived from buttonFlags (instantaneous MK_* state) and
+  // keyFlags — both already populated correctly by SidecarK.dll before
+  // sending the SKI1 event.
+  auto RelayMouseEx = [&](const SKI1_WinMsgMouse& p)
+  {
+    SKI1R_WinMsgMouse r{};
+    r.msg          = p.msg;
+    r.x            = p.x;
+    r.y            = p.y;
+    r.wheel        = p.wheel;
+    r.buttonFlags  = p.buttonFlags;
+    r.keyFlags     = p.keyFlags;
+    r.cefModifiers = SKI1R_MkToCefModifiers(p.buttonFlags, p.keyFlags);
+
+    uint8_t frameBuf[sizeof(SKI1_Header) + sizeof(SKI1R_WinMsgMouse)];
+    SKI1_Header fhdr{};
+    fhdr.magic[0] = 'S'; fhdr.magic[1] = 'K'; fhdr.magic[2] = 'I'; fhdr.magic[3] = '1';
+    fhdr.version  = 1u;
+    fhdr.type     = SKI1_Type_WinMsgMouseEx;
+    fhdr.size     = static_cast<uint32_t>(sizeof(SKI1R_WinMsgMouse));
+    memcpy(frameBuf,                 &fhdr, sizeof(fhdr));
+    memcpy(frameBuf + sizeof(fhdr),  &r,    sizeof(r));
+    RelayPipeWrite(frameBuf, static_cast<uint32_t>(sizeof(frameBuf)));
+  };
+
+  // Relay a non-mouse SKI1 frame unchanged (key / raw / focus events).
+  auto RelayPassThrough = [&](const SKI1_Header* fhdr, const uint8_t* fpayload)
+  {
+    if (fhdr->size > 256u) return; // guard against unexpectedly large payloads
+    uint8_t frameBuf[sizeof(SKI1_Header) + 256u];
+    memcpy(frameBuf,                        fhdr,     sizeof(SKI1_Header));
+    memcpy(frameBuf + sizeof(SKI1_Header),  fpayload, fhdr->size);
+    RelayPipeWrite(frameBuf, static_cast<uint32_t>(sizeof(SKI1_Header) + fhdr->size));
+  };
+
+  // Create the initial relay server instance before the main loop so that the
+  // Virule OverlayProducerCEF can connect at any time.
+  RelayEnsureServer();
+
   while (!g_shutdown.load())
   {
     HANDLE hPipe = CreateNamedPipeW(
@@ -1756,12 +1988,12 @@ static void RunInputEventPipeServer(const std::wstring& pipeName)
       nullptr);
 
     if (hPipe == INVALID_HANDLE_VALUE)
-      return;
+      break;
 
     // Wait for client connection with timeout so we can check g_shutdown
     OVERLAPPED ovConnect{};
     ovConnect.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!ovConnect.hEvent) { CloseHandle(hPipe); return; }
+    if (!ovConnect.hEvent) { CloseHandle(hPipe); break; }
 
     BOOL connected = ConnectNamedPipe(hPipe, &ovConnect);
     if (!connected)
@@ -1801,6 +2033,12 @@ static void RunInputEventPipeServer(const std::wstring& pipeName)
 
     while (!g_shutdown.load())
     {
+      // Non-blocking check: has the Virule relay client connected?
+      RelayPollConnect();
+      // If relay was torn down by a write failure, re-create the server.
+      if (relayPipe == INVALID_HANDLE_VALUE)
+        RelayEnsureServer();
+
       ResetEvent(ovRead.hEvent);
       DWORD br = 0;
       const BOOL ok = ReadFile(hPipe, readBuf + accumulated,
@@ -1854,28 +2092,37 @@ static void RunInputEventPipeServer(const std::wstring& pipeName)
             {
               SKI1_WinMsgMouse p;
               memcpy(&p, payload, sizeof(p));
-              // WM_MOUSEMOVE (0x0200) is high-frequency; gate its log behind
-              // kLogMouseMoveEvents to avoid console spam during any mouse
-              // movement while the overlay is active.
-              const bool isMove = (p.msg == 0x0200u); // WM_MOUSEMOVE
+
+              const bool     isMove   = (p.msg == 0x0200u); // WM_MOUSEMOVE
+              const uint32_t cefMods  = SKI1R_MkToCefModifiers(p.buttonFlags, p.keyFlags);
+
+              // Log mouse button down/up always; mouse move only if kLogMouseMoveEvents.
+              // cef_mods shows the EVENTFLAG_* value that the relay carries for
+              // this event — check that 0x10 (EVENTFLAG_LEFT_MOUSE_BUTTON) is
+              // present during scrollbar-thumb drag.
               if (!isMove || kLogMouseMoveEvents)
               {
-                wprintf(L"input_mouse: msg=%u x=%d y=%d wheel=%d btns=0x%X keys=0x%X\n",
+                wprintf(L"input_mouse: msg=0x%04X x=%d y=%d wheel=%d btns=0x%02X keys=0x%02X cef_mods=0x%02X\n",
                         (unsigned)p.msg, (int)p.x, (int)p.y, (int)p.wheel,
-                        (unsigned)p.buttonFlags, (unsigned)p.keyFlags);
+                        (unsigned)p.buttonFlags, (unsigned)p.keyFlags, (unsigned)cefMods);
               }
+
+              RelayMouseEx(p);
             }
             break;
+
           case SKI1_Type_WinMsgKey:
             if (hdr->size >= sizeof(SKI1_WinMsgKey))
             {
               SKI1_WinMsgKey p;
               memcpy(&p, payload, sizeof(p));
-              wprintf(L"input_key:   msg=%u vk=%u scan=%u flags=0x%X down=%u\n",
+              wprintf(L"input_key:   msg=0x%04X vk=%u scan=%u flags=0x%X down=%u\n",
                       (unsigned)p.msg, (unsigned)p.vk, (unsigned)p.scancode,
                       (unsigned)p.flags, (unsigned)p.isDown);
+              RelayPassThrough(hdr, payload);
             }
             break;
+
           case SKI1_Type_RawMouse:
             if (hdr->size >= sizeof(SKI1_RawMouse))
             {
@@ -1883,8 +2130,10 @@ static void RunInputEventPipeServer(const std::wstring& pipeName)
               memcpy(&p, payload, sizeof(p));
               wprintf(L"raw_mouse:   dx=%d dy=%d btns=0x%X wheel=%d\n",
                       (int)p.dx, (int)p.dy, (unsigned)p.buttonFlags, (int)p.wheelDelta);
+              RelayPassThrough(hdr, payload);
             }
             break;
+
           case SKI1_Type_RawKey:
             if (hdr->size >= sizeof(SKI1_RawKey))
             {
@@ -1893,8 +2142,10 @@ static void RunInputEventPipeServer(const std::wstring& pipeName)
               wprintf(L"raw_key:     vkey=%u make=%u flags=0x%X msg=%u\n",
                       (unsigned)p.vkey, (unsigned)p.makeCode,
                       (unsigned)p.flags, (unsigned)p.message);
+              RelayPassThrough(hdr, payload);
             }
             break;
+
           case SKI1_Type_Focus:
             if (hdr->size >= sizeof(SKI1_Focus))
             {
@@ -1902,8 +2153,10 @@ static void RunInputEventPipeServer(const std::wstring& pipeName)
               memcpy(&p, payload, sizeof(p));
               wprintf(L"SKI1 Focus   msg=0x%04X active=%u\n",
                       (unsigned)p.msg, (unsigned)p.active);
+              RelayPassThrough(hdr, payload);
             }
             break;
+
           default:
             break;
         }
@@ -1930,6 +2183,29 @@ static void RunInputEventPipeServer(const std::wstring& pipeName)
     CloseHandle(ovRead.hEvent);
     DisconnectNamedPipe(hPipe);
     CloseHandle(hPipe);
+
+    // SidecarK.dll disconnected.  Do NOT close the relay pipe — the Virule
+    // client may remain connected across game-side reconnections.  If the
+    // relay was torn down by a write failure, create a new server instance so
+    // the next Virule client can connect.
+    if (relayPipe == INVALID_HANDLE_VALUE)
+      RelayEnsureServer();
+  }
+
+  // Shutdown: clean up relay pipe state.
+  if (relayConnEv)
+  {
+    if (relayPipe != INVALID_HANDLE_VALUE)
+      CancelIo(relayPipe);
+    CloseHandle(relayConnEv);
+    relayConnEv        = nullptr;
+    relayConnOv.hEvent = nullptr;
+  }
+  if (relayPipe != INVALID_HANDLE_VALUE)
+  {
+    DisconnectNamedPipe(relayPipe);
+    CloseHandle(relayPipe);
+    relayPipe = INVALID_HANDLE_VALUE;
   }
 }
 // ---------------------------------------------------------------------------
@@ -2474,18 +2750,20 @@ int wmain(int argc, wchar_t** argv)
   CreateHostFrameMappingForPid(targetPid);
 
   // Start input event pipe server: receives intercepted mouse/keyboard events
-  // from the DLL while the overlay is active.
+  // from the DLL while the overlay is active.  Also manages the relay output
+  // pipe (SidecarK_InputRelay_{pid}) for the Virule OverlayProducerCEF.
   {
     const std::wstring inputPipeName = InputPipeNameForTarget(targetPid);
+    const std::wstring relayPipeName = RelayPipeNameForTarget(targetPid);
     g_input_pipe_thread = CreateThread(
       nullptr, 0,
       [](LPVOID p) -> DWORD {
-        auto* name = reinterpret_cast<std::wstring*>(p);
-        RunInputEventPipeServer(*name);
-        delete name;
+        auto* names = reinterpret_cast<std::pair<std::wstring, std::wstring>*>(p);
+        RunInputEventPipeServer(names->first, names->second);
+        delete names;
         return 0;
       },
-      new std::wstring(inputPipeName),
+      new std::pair<std::wstring, std::wstring>(inputPipeName, relayPipeName),
       0, nullptr);
   }
 
