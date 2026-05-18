@@ -1,4 +1,5 @@
 ﻿#include <windows.h>
+#include <intrin.h>
 #include <tlhelp32.h>
 #include <cwchar>
 #include <cstdio>
@@ -462,6 +463,47 @@ static void* g_control_view = nullptr;
 static volatile uint32_t* g_control_overlay_enabled = nullptr;
 static HANDLE g_control_pipe_thread = nullptr;
 static HANDLE g_input_pipe_thread   = nullptr;
+
+// SKC1 v1 toast sub-block (additive; does not change the frozen
+// magic/version/overlay_enabled semantics).  All fields live within the same
+// 4096-byte Local\SidecarK_Control_<pid> mapping.  Layout is documented in
+// README.md under "SidecarK control-plane ABI".
+//
+//   0x10  uint32 toast_seq          (incremented each new toast; 0 = none)
+//   0x14  uint64 toast_expires_ms   (GetTickCount64 value when toast hides)
+//   0x1C  uint32 toast_text_bytes   (UTF-8 byte length, <= kToastTextMax-1)
+//   0x20  uint32 toast_icon_bytes   (UTF-8 byte length, <= kToastIconMax-1)
+//   0x24  uint8  toast_text [kToastTextMax]   (UTF-8, NUL-padded)
+//   0x224 uint8  toast_icon [kToastIconMax]   (UTF-8 generic key, NUL-padded)
+//
+// Publication ordering on the host:
+//   1. zero the byte counts (declares "no payload")
+//   2. write text + icon + expiry + new byte counts
+//   3. _WriteBarrier(); then atomically bump toast_seq
+// A DLL consumer reads toast_seq first, then the rest, then re-reads seq to
+// detect a torn write.  toast_seq=0 means no toast has ever been posted.
+static constexpr uint32_t kToastTextMax        = 512u;       // includes trailing NUL
+static constexpr uint32_t kToastIconMax        = 260u;       // includes trailing NUL
+static constexpr uint32_t kToastBlockOffset    = 0x10u;
+static constexpr uint32_t kToastSeqOffset      = 0x10u;
+static constexpr uint32_t kToastExpiresOffset  = 0x14u;
+static constexpr uint32_t kToastTextLenOffset  = 0x1Cu;
+static constexpr uint32_t kToastIconLenOffset  = 0x20u;
+static constexpr uint32_t kToastTextOffset     = 0x24u;
+static constexpr uint32_t kToastIconOffset     = kToastTextOffset + kToastTextMax;  // 0x224
+static constexpr uint32_t kToastBlockEnd       = kToastIconOffset + kToastIconMax;  // 0x328
+static_assert(kToastBlockEnd <= 4096u, "SKC1 toast block exceeds control mapping size");
+
+// Toast duration bounds (host clamps caller-supplied values).
+static constexpr uint32_t kToastDurationMinMs = 100u;
+static constexpr uint32_t kToastDurationMaxMs = 30000u;
+
+static volatile uint32_t* g_control_toast_seq      = nullptr;
+static volatile uint64_t* g_control_toast_expires  = nullptr;
+static volatile uint32_t* g_control_toast_text_len = nullptr;
+static volatile uint32_t* g_control_toast_icon_len = nullptr;
+static uint8_t*           g_control_toast_text     = nullptr;
+static uint8_t*           g_control_toast_icon     = nullptr;
 
 static HANDLE g_frame_host_map = nullptr;
 static void* g_frame_host_view = nullptr;
@@ -1531,14 +1573,26 @@ static bool InitSidecarKControlPlaneForPid(DWORD pid)
   uint32_t* ver = reinterpret_cast<uint32_t*>(base + 0x04);
   uint32_t* overlay_enabled = reinterpret_cast<uint32_t*>(base + 0x08);
 
-  if (memcmp(base + 0x00, "SKC1", 4) != 0 || *ver != 1u)
+  const bool sig_match = (memcmp(base + 0x00, "SKC1", 4) == 0) && (*ver == 1u);
+  if (!sig_match)
   {
     memcpy(base + 0x00, "SKC1", 4);
     *ver = 1u;
     *overlay_enabled = 0u;
+
+    // Initialize the toast sub-block to "no toast" on first creation only.
+    // We never clobber existing toast state when re-attaching to an existing
+    // mapping; doing so would race with the DLL-side reader.
+    ZeroMemory(base + kToastBlockOffset, kToastBlockEnd - kToastBlockOffset);
   }
 
   g_control_overlay_enabled = reinterpret_cast<volatile uint32_t*>(overlay_enabled);
+  g_control_toast_seq       = reinterpret_cast<volatile uint32_t*>(base + kToastSeqOffset);
+  g_control_toast_expires   = reinterpret_cast<volatile uint64_t*>(base + kToastExpiresOffset);
+  g_control_toast_text_len  = reinterpret_cast<volatile uint32_t*>(base + kToastTextLenOffset);
+  g_control_toast_icon_len  = reinterpret_cast<volatile uint32_t*>(base + kToastIconLenOffset);
+  g_control_toast_text      = base + kToastTextOffset;
+  g_control_toast_icon      = base + kToastIconOffset;
   return true;
 }
 
@@ -1552,6 +1606,12 @@ static void ShutdownSidecarKControlPlane()
   }
 
   g_control_overlay_enabled = nullptr;
+  g_control_toast_seq       = nullptr;
+  g_control_toast_expires   = nullptr;
+  g_control_toast_text_len  = nullptr;
+  g_control_toast_icon_len  = nullptr;
+  g_control_toast_text      = nullptr;
+  g_control_toast_icon      = nullptr;
 
   if (g_control_view)
   {
@@ -1564,6 +1624,157 @@ static void ShutdownSidecarKControlPlane()
     CloseHandle(g_control_map);
     g_control_map = nullptr;
   }
+}
+
+// Publish a toast into the SKC1 toast sub-block.
+//
+// SidecarK is a generic toast primitive: it does NOT inspect, brand, or
+// re-interpret the text/icon payloads.  The icon is treated as an opaque
+// caller-supplied UTF-8 key (typically a path to an image file owned by the
+// caller); SidecarK never hardcodes paths or assets.
+//
+// Inputs are bounded; oversize payloads are truncated.  An empty icon ("" or
+// "-") is allowed and means "no icon".
+//
+// Returns true if the toast was published.  Returns false only if the
+// shared-memory control plane is not yet initialized.
+//
+// Thread-safety: only the control-pipe thread calls this; readers (the
+// injected DLL) use a seq-lock style protocol where seq is bumped LAST after a
+// release fence, so readers either see the new payload or the previous one.
+static bool PublishToast_LL(const char* text, uint32_t text_len,
+                            const char* icon, uint32_t icon_len,
+                            uint32_t duration_ms)
+{
+  if (g_control_toast_seq == nullptr || g_control_toast_text == nullptr)
+    return false;
+
+  // Clamp duration to documented bounds.
+  if (duration_ms < kToastDurationMinMs) duration_ms = kToastDurationMinMs;
+  if (duration_ms > kToastDurationMaxMs) duration_ms = kToastDurationMaxMs;
+
+  // Truncate over-long payloads (reserve room for NUL).
+  if (text_len > kToastTextMax - 1u) text_len = kToastTextMax - 1u;
+  if (icon == nullptr) { icon = ""; icon_len = 0u; }
+  if (icon_len > kToastIconMax - 1u) icon_len = kToastIconMax - 1u;
+
+  const ULONGLONG now_ms     = GetTickCount64();
+  const ULONGLONG expires_ms = now_ms + duration_ms;
+
+  // ---- Step 1: declare "no payload" so a reader that races sees no toast.
+  *g_control_toast_text_len = 0u;
+  *g_control_toast_icon_len = 0u;
+
+  // ---- Step 2: write payload bytes.
+  ZeroMemory(g_control_toast_text, kToastTextMax);
+  ZeroMemory(g_control_toast_icon, kToastIconMax);
+  if (text_len > 0 && text != nullptr)
+    memcpy(g_control_toast_text, text, text_len);
+  if (icon_len > 0)
+    memcpy(g_control_toast_icon, icon, icon_len);
+
+  *g_control_toast_expires  = expires_ms;
+  *g_control_toast_text_len = text_len;
+  *g_control_toast_icon_len = icon_len;
+
+  // ---- Step 3: release fence + publish via seq bump.
+  // _WriteBarrier prevents the compiler from reordering the payload writes
+  // below the seq increment; on x86/x64 the hardware already provides the
+  // store-store ordering we need, so no full MemoryBarrier is required.
+  _WriteBarrier();
+  const uint32_t new_seq = (*g_control_toast_seq) + 1u;
+  // seq=0 means "never posted"; skip 0 on wrap so consumers can keep using it
+  // as a sentinel.
+  *g_control_toast_seq = (new_seq == 0u) ? 1u : new_seq;
+  return true;
+}
+
+// Parse and execute a `toast` control-pipe command.
+//
+// Wire format (ASCII, line-terminated `\n`):
+//
+//   toast <duration_ms> <icon_or_-> <text...>
+//
+//   <duration_ms>  : decimal unsigned integer; clamped to
+//                    [kToastDurationMinMs, kToastDurationMaxMs] by the host.
+//   <icon_or_->    : a single whitespace-free token.  Use "-" or "" to send a
+//                    toast with no icon.  Any other value is forwarded
+//                    verbatim as an opaque UTF-8 key (typically a file path
+//                    chosen by the caller — SidecarK does not bundle assets).
+//   <text...>      : the remainder of the line (may contain spaces).  Must be
+//                    non-empty and not contain '\n' (the pipe framer strips
+//                    the trailing newline already).
+//
+// `cmd` points at the line buffer starting with the literal "toast" keyword.
+// `lineLen` is the length of the full trimmed line.
+//
+// Returns true on success (writes "ok\n" via *resp/*respLen), false on parse
+// failure (caller emits "err\n").
+static bool HandleToastCommand(const char* cmd, DWORD lineLen,
+                               const char** resp, DWORD* respLen)
+{
+  // Already matched "toast" prefix by caller; locate the argument span.
+  static constexpr size_t kPrefixLen = 5;  // strlen("toast")
+  if (lineLen < kPrefixLen + 2)            // at minimum: "toast X Y"
+    return false;
+  if (cmd[kPrefixLen] != ' ' && cmd[kPrefixLen] != '\t')
+    return false;
+
+  const char* p   = cmd + kPrefixLen;
+  const char* end = cmd + lineLen;
+  while (p < end && (*p == ' ' || *p == '\t')) ++p;
+  if (p >= end) return false;
+
+  // ---- duration_ms (decimal) ----
+  if (*p < '0' || *p > '9') return false;
+  uint64_t duration = 0;
+  while (p < end && *p >= '0' && *p <= '9')
+  {
+    duration = duration * 10u + (uint64_t)(*p - '0');
+    if (duration > 0xFFFFFFFFull) return false;  // overflow guard
+    ++p;
+  }
+  if (p >= end || (*p != ' ' && *p != '\t')) return false;
+  while (p < end && (*p == ' ' || *p == '\t')) ++p;
+  if (p >= end) return false;
+
+  // ---- icon token (whitespace-free; "-" means none) ----
+  const char* icon_begin = p;
+  while (p < end && *p != ' ' && *p != '\t') ++p;
+  const char* icon_end = p;
+  if (p >= end || (*p != ' ' && *p != '\t')) return false;  // need text after
+  while (p < end && (*p == ' ' || *p == '\t')) ++p;
+  if (p >= end) return false;  // empty text is not allowed
+
+  // ---- text (rest of line) ----
+  const char* text_begin = p;
+  const char* text_end   = end;
+  // Reject embedded NULs (defensive — the line framer is byte-based).
+  for (const char* q = text_begin; q < text_end; ++q)
+    if (*q == '\0') return false;
+
+  uint32_t icon_len = (uint32_t)(icon_end - icon_begin);
+  const char* icon_ptr = icon_begin;
+  if (icon_len == 1 && icon_begin[0] == '-')
+  {
+    icon_ptr = "";
+    icon_len = 0u;
+  }
+
+  const uint32_t text_len = (uint32_t)(text_end - text_begin);
+
+  const bool ok = PublishToast_LL(text_begin, text_len,
+                                  icon_ptr,   icon_len,
+                                  (uint32_t)duration);
+  if (!ok)
+    return false;
+
+  HostLogAppendf(L"toast_published duration_ms=%u text_bytes=%u icon_bytes=%u",
+                 (unsigned)duration, (unsigned)text_len, (unsigned)icon_len);
+
+  *resp    = "ok\n";
+  *respLen = 3;
+  return true;
 }
 
 static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t* overlayEnabled, DWORD targetPid)
@@ -1593,13 +1804,17 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
 
     HostLogAppendf(L"ctrl_pipe_client_connected ts=%llu pid=%lu", (unsigned long long)GetTickCount64(), (unsigned long)targetPid);
 
-    char line[65]{};
+    // Line buffer sized to comfortably hold a `toast` command:
+    //   "toast " (6) + duration (up to 10 digits) + " " + icon (up to 259) + " "
+    //   + text (up to 511) + CR + NUL  ≈  800 bytes.  We round up to 1024.
+    static constexpr size_t kLineBufSize = 1024;
+    char line[kLineBufSize]{};
     DWORD lineLen = 0;
     bool done = false;
 
     while (!g_shutdown.load())
     {
-      char tmp[32]{};
+      char tmp[128]{};
       DWORD br = 0;
       if (!ReadFile(hPipe, tmp, (DWORD)sizeof(tmp), &br, nullptr) || br == 0)
         break;
@@ -1614,7 +1829,7 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
           break;
         }
 
-        if (lineLen >= 64)
+        if (lineLen >= kLineBufSize - 1)
         {
           const char* resp = "err\n";
           DWORD bw = 0;
@@ -1687,6 +1902,21 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
         g_dll_ready_idle.store(true);
         HostLogAppendf(L"dll_ready_idle_received ts=%llu pid=%lu", (unsigned long long)GetTickCount64(), (unsigned long)targetPid);
         resp = "ok\n"; respLen = 3;
+      }
+      else if (_strnicmp(cmd, "toast", 5) == 0 &&
+               (cmd[5] == ' ' || cmd[5] == '\t'))
+      {
+        // Compute the trimmed line length from `cmd` (cmd may have been
+        // advanced past leading whitespace; lineLen above is from `line`).
+        const DWORD cmdLen = (DWORD)strlen(cmd);
+        if (HandleToastCommand(cmd, cmdLen, &resp, &respLen))
+        {
+          // resp/respLen set to "ok\n" by the helper.
+        }
+        else
+        {
+          resp = "err\n"; respLen = 4;
+        }
       }
     }
 

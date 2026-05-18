@@ -1101,6 +1101,18 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static HANDLE   g_ctrlMap = nullptr;
   static uint8_t* g_ctrlBase = nullptr;
   static volatile LONG* g_overlayEnabled = nullptr;
+  // SKC1 v1 toast sub-block pointers (additive ABI extension; see README and
+  // SidecarKHost.cpp).  All three are bound together when the control map is
+  // first opened.  Toast rendering is intentionally independent of
+  // g_overlayEnabled: per product spec, the toast HUD is unconditional
+  // render-only output and must not depend on overlay open-state.
+  static volatile LONG*     g_toastSeqPtr      = nullptr;
+  static volatile uint64_t* g_toastExpiresPtr  = nullptr;
+  static volatile LONG*     g_toastTextLenPtr  = nullptr;
+  static volatile LONG*     g_toastIconLenPtr  = nullptr;
+  static const uint8_t*     g_toastTextPtr     = nullptr;
+  static const uint8_t*     g_toastIconPtr     = nullptr;
+  static LONG               s_lastToastSeqSeen = 0;
   static DWORD    g_ctrlPid = 0;
   static ULONGLONG g_ctrlLastAttemptMs = 0;
   static bool      g_ctrlLogged = false;
@@ -1261,7 +1273,14 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       g_ctrlBase = nullptr;
     }
 
-    g_overlayEnabled = nullptr;
+    g_overlayEnabled    = nullptr;
+    g_toastSeqPtr       = nullptr;
+    g_toastExpiresPtr   = nullptr;
+    g_toastTextLenPtr   = nullptr;
+    g_toastIconLenPtr   = nullptr;
+    g_toastTextPtr      = nullptr;
+    g_toastIconPtr      = nullptr;
+    s_lastToastSeqSeen  = 0;
 
     if (g_ctrlMap != nullptr)
     {
@@ -1360,6 +1379,15 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             g_ctrlBase = base;
             g_overlayEnabled = reinterpret_cast<volatile LONG *> (base + 0x08);
 
+            // Bind the SKC1 v1 toast sub-block.  Offsets MUST match
+            // SidecarKHost.cpp; see README "SidecarK control-plane ABI".
+            g_toastSeqPtr     = reinterpret_cast<volatile LONG *>     (base + 0x10);
+            g_toastExpiresPtr = reinterpret_cast<volatile uint64_t *> (base + 0x14);
+            g_toastTextLenPtr = reinterpret_cast<volatile LONG *>     (base + 0x1C);
+            g_toastIconLenPtr = reinterpret_cast<volatile LONG *>     (base + 0x20);
+            g_toastTextPtr    = base + 0x24;
+            g_toastIconPtr    = base + 0x224;
+
             if (!g_ctrlLogged)
             {
               g_ctrlLogged = true;
@@ -1398,6 +1426,71 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       s_overlayEnabledLast = value;
       _SidecarLog (L"SKF1 ctrl overlayEnabled=%ld", (long)value);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Toast HUD render hook (SKC1 v1 toast sub-block).
+  //
+  // Runs UNCONDITIONALLY on every Present once the control map is bound — the
+  // toast HUD must not depend on overlay open-state, input capture, focus, or
+  // game suspension (per product spec).  The body is a pure-read, render-only
+  // sampling of transient state published by SidecarKHost.
+  //
+  // MVP status: this entry point reads the active-toast snapshot and emits a
+  // single diagnostic log line on each new toast_seq.  Per-backend GPU
+  // rasterization of the icon + text plugs in here in a follow-up without any
+  // further control-plane changes.
+  //
+  // No input capture.  No cursor/focus changes.  No game suspension.  No
+  // Producer/CEF/React/Shell involvement.
+  // ---------------------------------------------------------------------------
+  if (g_toastSeqPtr != nullptr)
+  {
+    // Seq-lock style read: grab seq, read body, re-grab seq; retry on tear.
+    LONG     seq_a = *g_toastSeqPtr;
+    uint64_t expires_ms;
+    LONG     text_len;
+    LONG     icon_len;
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+      _ReadBarrier ();
+      expires_ms = *g_toastExpiresPtr;
+      text_len   = *g_toastTextLenPtr;
+      icon_len   = *g_toastIconLenPtr;
+      _ReadBarrier ();
+      const LONG seq_b = *g_toastSeqPtr;
+      if (seq_b == seq_a)
+        break;
+      seq_a = seq_b;
+    }
+
+    if (seq_a != 0 && seq_a != s_lastToastSeqSeen)
+    {
+      // Bound payload reads to the documented maxima.
+      LONG safe_text_len = text_len;
+      if (safe_text_len < 0)                  safe_text_len = 0;
+      if (safe_text_len > 511)                safe_text_len = 511;
+      LONG safe_icon_len = icon_len;
+      if (safe_icon_len < 0)                  safe_icon_len = 0;
+      if (safe_icon_len > 259)                safe_icon_len = 259;
+
+      const ULONGLONG now_ms = GetTickCount64 ();
+      const bool active = (now_ms < expires_ms);
+
+      _SidecarLog (L"SKToast event: seq=%ld active=%d expires_ms=%llu "
+                   L"text_bytes=%ld icon_bytes=%ld",
+                   (long)seq_a, active ? 1 : 0,
+                   (unsigned long long)expires_ms,
+                   (long)safe_text_len, (long)safe_icon_len);
+      s_lastToastSeqSeen = seq_a;
+    }
+
+    // TODO(SKToast Phase-2 D3D11/12): when toast is active
+    // (GetTickCount64() < *g_toastExpiresPtr), draw a small primitive into
+    // the backbuffer using a backend-specific path: load an icon texture from
+    // g_toastIconPtr (UTF-8 path; treat as opaque key, never hardcode) and
+    // rasterize the UTF-8 text at g_toastTextPtr with a built-in font.  This
+    // is a pure render-only path; no input capture, no focus changes.
   }
 
   // Early-out: when overlay is disabled skip ALL Stage A-F work (no mapping,

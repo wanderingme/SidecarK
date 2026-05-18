@@ -3524,6 +3524,15 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         static HANDLE              s_fs_ctrlMap         = nullptr;
         static uint8_t*            s_fs_ctrlBase        = nullptr;
         static volatile LONG*      s_fs_overlayEnabled  = nullptr;
+        // SKC1 v1 toast sub-block pointers (additive ABI extension; see README
+        // and SidecarKHost.cpp).  Bound together with overlayEnabled.
+        static volatile LONG*      s_fs_toastSeqPtr     = nullptr;
+        static volatile uint64_t*  s_fs_toastExpiresPtr = nullptr;
+        static volatile LONG*      s_fs_toastTextLenPtr = nullptr;
+        static volatile LONG*      s_fs_toastIconLenPtr = nullptr;
+        static const uint8_t*      s_fs_toastTextPtr    = nullptr;
+        static const uint8_t*      s_fs_toastIconPtr    = nullptr;
+        static LONG                s_fs_lastToastSeq    = 0;
         static DWORD               s_fs_ctrlPid         = 0;
         static ULONGLONG           s_fs_ctrlLastAttempt = 0;
 
@@ -3545,6 +3554,13 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               CloseHandle (s_fs_ctrlMap);
               s_fs_ctrlMap = nullptr;
             }
+            s_fs_toastSeqPtr     = nullptr;
+            s_fs_toastExpiresPtr = nullptr;
+            s_fs_toastTextLenPtr = nullptr;
+            s_fs_toastIconLenPtr = nullptr;
+            s_fs_toastTextPtr    = nullptr;
+            s_fs_toastIconPtr    = nullptr;
+            s_fs_lastToastSeq    = 0;
             s_fs_ctrlPid         = pidNow;
             s_fs_ctrlLastAttempt = 0;  // force retry immediately
           }
@@ -3574,6 +3590,15 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                     s_fs_ctrlMap        = hCtrl;
                     s_fs_ctrlBase       = ctrlBase;
                     s_fs_overlayEnabled = reinterpret_cast<volatile LONG *> (ctrlBase + 0x08);
+
+                    // Bind the SKC1 v1 toast sub-block.  Offsets MUST match
+                    // SidecarKHost.cpp (see README "SidecarK control-plane ABI").
+                    s_fs_toastSeqPtr     = reinterpret_cast<volatile LONG *>     (ctrlBase + 0x10);
+                    s_fs_toastExpiresPtr = reinterpret_cast<volatile uint64_t *> (ctrlBase + 0x14);
+                    s_fs_toastTextLenPtr = reinterpret_cast<volatile LONG *>     (ctrlBase + 0x1C);
+                    s_fs_toastIconLenPtr = reinterpret_cast<volatile LONG *>     (ctrlBase + 0x20);
+                    s_fs_toastTextPtr    = ctrlBase + 0x24;
+                    s_fs_toastIconPtr    = ctrlBase + 0x224;
                   }
                   else
                   {
@@ -3595,6 +3620,63 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         const bool s_fs_overlay_enabled =
           (s_fs_overlayEnabled != nullptr) &&
           (*s_fs_overlayEnabled != 0);
+
+        // ---------------------------------------------------------------------
+        // Toast HUD render hook (SKC1 v1 toast sub-block) — OpenGL path.
+        //
+        // Runs UNCONDITIONALLY once the control map is bound — the toast HUD
+        // must not depend on overlay open-state, input capture, focus, or
+        // game suspension (per product spec).  MVP body is a pure-read,
+        // diagnostic-only sampling of transient state published by
+        // SidecarKHost.  Per-backend GL rasterization of the icon + text
+        // plugs in here in a follow-up without any control-plane changes.
+        // ---------------------------------------------------------------------
+        if (s_fs_toastSeqPtr != nullptr)
+        {
+          LONG     seq_a = *s_fs_toastSeqPtr;
+          uint64_t expires_ms = 0;
+          LONG     text_len   = 0;
+          LONG     icon_len   = 0;
+          for (int attempt = 0; attempt < 4; ++attempt)
+          {
+            _ReadBarrier ();
+            expires_ms = *s_fs_toastExpiresPtr;
+            text_len   = *s_fs_toastTextLenPtr;
+            icon_len   = *s_fs_toastIconLenPtr;
+            _ReadBarrier ();
+            const LONG seq_b = *s_fs_toastSeqPtr;
+            if (seq_b == seq_a) break;
+            seq_a = seq_b;
+          }
+
+          if (seq_a != 0 && seq_a != s_fs_lastToastSeq)
+          {
+            LONG safe_text_len = text_len;
+            if (safe_text_len < 0)   safe_text_len = 0;
+            if (safe_text_len > 511) safe_text_len = 511;
+            LONG safe_icon_len = icon_len;
+            if (safe_icon_len < 0)   safe_icon_len = 0;
+            if (safe_icon_len > 259) safe_icon_len = 259;
+            const ULONGLONG now_ms = GetTickCount64 ();
+            const bool active = (now_ms < expires_ms);
+            // OutputDebugStringW is safe even when stdout is unattached and
+            // matches the lightweight diagnostic-only intent of the MVP body.
+            wchar_t dbg [256] = { };
+            _snwprintf_s (dbg, _TRUNCATE,
+                          L"SKToast event (GL): seq=%ld active=%d expires_ms=%llu "
+                          L"text_bytes=%ld icon_bytes=%ld\n",
+                          (long)seq_a, active ? 1 : 0,
+                          (unsigned long long)expires_ms,
+                          (long)safe_text_len, (long)safe_icon_len);
+            OutputDebugStringW (dbg);
+            s_fs_lastToastSeq = seq_a;
+          }
+
+          // TODO(SKToast Phase-2 GL): when toast is active (now < expires_ms),
+          // upload the icon at s_fs_toastIconPtr (UTF-8 path, treat as opaque
+          // key) and rasterize s_fs_toastTextPtr (UTF-8) with a built-in font.
+          // Render-only; no input capture, no focus changes.
+        }
 
         // When the overlay is turned off, invalidate the cached frame so that
         // the stale texture is never composited and fresh frames are uploaded

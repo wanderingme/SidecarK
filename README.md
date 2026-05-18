@@ -68,6 +68,30 @@ This section is the single source of truth for the `SidecarKHost` control-plane 
 - `ping\n`        -> `pong\n`
 - `overlay off\n` -> `ok\n`
 - `overlay on\n`  -> `ok\n`
+- `toast <duration_ms> <icon_or_-> <text...>\n` -> `ok\n` (on parse OK)
+
+#### `toast` command (additive, MVP)
+
+Generic runtime toast HUD command. SidecarK is a generic toast primitive and
+does **not** inspect, brand, or re-interpret the payloads — `icon_or_-` and
+`text...` are forwarded verbatim from caller to renderer.
+
+- `<duration_ms>`: decimal unsigned integer. Host clamps to `[100, 30000]` ms.
+- `<icon_or_->`  : a single whitespace-free token. Use `-` (or an empty token
+  — disallowed in this grammar, use `-`) for "no icon". Any other value is
+  treated as an opaque UTF-8 key chosen by the caller (typically an absolute
+  file path to a caller-owned icon image). **SidecarK never hardcodes paths
+  or assets and never ships caller-specific icons or copy.**
+- `<text...>`   : the remainder of the line up to the trailing `\n` (may
+  contain spaces). UTF-8. Must be non-empty. Truncated server-side to
+  fit the bounded slot (see "Shared memory mapping" below).
+
+Maximum line length is 1023 bytes (server enforces; oversized lines respond
+`err\n` and reset the per-line parser).
+
+Errors: `err\n` on malformed input (missing duration, missing icon token,
+missing/empty text, non-numeric duration, duration overflow, embedded NUL,
+etc.). Successful parses respond `ok\n`.
 
 ### Shared memory mapping
 
@@ -77,10 +101,39 @@ This section is the single source of truth for the `SidecarKHost` control-plane 
   - offset `0x04`: `uint32` version = `1`
   - offset `0x08`: `uint32` overlay_enabled
 
+  Toast HUD sub-block (additive; same magic/version, does **not** change the
+  frozen `overlay_enabled` semantics — readers that only inspect 0x00–0x0B
+  are unaffected):
+
+  - offset `0x10`: `uint32` toast_seq          — monotonically incremented on
+    each new toast.  `0` means "no toast ever posted".  Wraps from `UINT32_MAX`
+    back to `1` (never `0`).  Readers use this as a seq-lock token: read seq,
+    read body, re-read seq; retry on mismatch.
+  - offset `0x14`: `uint64` toast_expires_ms   — `GetTickCount64()` value at
+    which the toast should stop being rendered.
+  - offset `0x1C`: `uint32` toast_text_bytes   — UTF-8 byte length of
+    `toast_text`, `<= 511`.
+  - offset `0x20`: `uint32` toast_icon_bytes   — UTF-8 byte length of
+    `toast_icon`, `<= 259`.  `0` means "no icon".
+  - offset `0x24`: `uint8[512]` toast_text     — UTF-8, NUL-padded.
+  - offset `0x224`: `uint8[260]` toast_icon    — UTF-8 opaque key (typically
+    a caller-supplied icon file path), NUL-padded.
+
+  Total: `0x328` bytes; well within the 4 KiB mapping.
+
+  Write ordering (host): clear byte counts → write payload → write expiry →
+  write byte counts → release fence → bump `toast_seq`.
+
 ### Semantics
 
 - `overlay_enabled` gates OSD visibility ONLY.
 - ImGui control panel is NOT gated in this version.
+- Toast HUD rendering is **independent** of `overlay_enabled` and of any
+  overlay open-state: it is unconditional render-only output drawn from the
+  injected DLL's existing compositor/present hooks (windowed and fullscreen
+  wherever those hooks already work).  No Producer / CEF / React / Shell
+  involvement.  No input capture, no cursor/focus changes, no game
+  suspension.
 
 ## SidecarK Phase-1 backend coverage (code review status)
 
