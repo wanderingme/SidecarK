@@ -27,6 +27,7 @@
 #include <SpecialK/render/dxgi/dxgi_swapchain.h>
 #include <SpecialK/render/dxgi/dxgi_util.h>
 #include <SpecialK/render/d3d11/d3d11_core.h>
+#include <SpecialK/render/sk_toast_render.h>
 
 extern bool SidecarK_DiagnosticsEnabled ();
 
@@ -1113,6 +1114,17 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static const uint8_t*     g_toastTextPtr     = nullptr;
   static const uint8_t*     g_toastIconPtr     = nullptr;
   static LONG               s_lastToastSeqSeen = 0;
+  // Cached toast D3D11 resources.  s_toast_tex is recreated whenever the
+  // backbuffer format changes; s_toast_bitmap_seq tracks which toast_seq is
+  // currently uploaded to s_toast_tex (so we re-rasterize text only when seq
+  // changes, not every present).  See product spec: toast is independent of
+  // overlay_enabled and overlay open-state.
+  static ID3D11Texture2D*   s_toast_tex          = nullptr;
+  static DXGI_FORMAT        s_toast_tex_fmt      = DXGI_FORMAT_UNKNOWN;
+  static LONG               s_toast_bitmap_seq   = 0;
+  static std::vector<uint8_t> s_toast_bitmap;  // BGRA, top-down, kSurfaceWidth*kSurfaceHeight*4
+  static std::vector<uint8_t> s_toast_bitmap_rgba;  // Lazily-built R8G8B8A8 copy for non-BGRA backbuffers
+  static LONG               s_toast_bitmap_rgba_seq = 0;
   static DWORD    g_ctrlPid = 0;
   static ULONGLONG g_ctrlLastAttemptMs = 0;
   static bool      g_ctrlLogged = false;
@@ -1281,6 +1293,16 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
     g_toastTextPtr      = nullptr;
     g_toastIconPtr      = nullptr;
     s_lastToastSeqSeen  = 0;
+    // Release any cached toast GPU resources held over from the previous PID;
+    // they belong to a stale ID3D11Device.
+    if (s_toast_tex != nullptr)
+    {
+      s_toast_tex->Release ();
+      s_toast_tex = nullptr;
+    }
+    s_toast_tex_fmt         = DXGI_FORMAT_UNKNOWN;
+    s_toast_bitmap_seq      = 0;
+    s_toast_bitmap_rgba_seq = 0;
 
     if (g_ctrlMap != nullptr)
     {
@@ -1433,30 +1455,43 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   //
   // Runs UNCONDITIONALLY on every Present once the control map is bound — the
   // toast HUD must not depend on overlay open-state, input capture, focus, or
-  // game suspension (per product spec).  The body is a pure-read, render-only
-  // sampling of transient state published by SidecarKHost.
+  // game suspension (per product spec).
   //
-  // MVP status: this entry point reads the active-toast snapshot and emits a
-  // single diagnostic log line on each new toast_seq.  Per-backend GPU
-  // rasterization of the icon + text plugs in here in a follow-up without any
-  // further control-plane changes.
+  // Path overview:
+  //   1. Seq-lock snapshot of the toast sub-block (text+expiry+counts).
+  //   2. If a new toast_seq is observed, snapshot a bounded copy of the UTF-8
+  //      text into a local buffer (to safely outlive shared-memory churn).
+  //   3. If toast is active (now < expires_ms), CPU-rasterize a BGRA bitmap
+  //      via GDI on toast_seq change only, upload it to a cached D3D11
+  //      texture matching the backbuffer's format, and CopySubresourceRegion
+  //      it into the bottom-right of the backbuffer.
   //
   // No input capture.  No cursor/focus changes.  No game suspension.  No
-  // Producer/CEF/React/Shell involvement.
+  // Producer/CEF/React/Shell involvement.  No reuse of the SKF1 pipeline.
   // ---------------------------------------------------------------------------
   if (g_toastSeqPtr != nullptr)
   {
-    // Seq-lock style read: grab seq, read body, re-grab seq; retry on tear.
+    // ---- Step 1: Seq-lock style snapshot ----------------------------------
     LONG     seq_a = *g_toastSeqPtr;
-    uint64_t expires_ms;
-    LONG     text_len;
-    LONG     icon_len;
+    uint64_t expires_ms = 0;
+    LONG     text_len   = 0;
+    LONG     icon_len   = 0;
+    // Bounded local copy of the published UTF-8 text.  Mirrors the size of
+    // the SKC1 toast_text slot (see SidecarKHost.cpp:kToastTextMax).
+    char     text_buf [512] = { };
     for (int attempt = 0; attempt < 4; ++attempt)
     {
       _ReadBarrier ();
       expires_ms = *g_toastExpiresPtr;
       text_len   = *g_toastTextLenPtr;
       icon_len   = *g_toastIconLenPtr;
+      // Snapshot bounded text bytes.  Cap at sizeof(text_buf)-1 defensively.
+      LONG copy_len = text_len;
+      if (copy_len < 0) copy_len = 0;
+      if (copy_len > (LONG)(sizeof (text_buf) - 1u)) copy_len = (LONG)(sizeof (text_buf) - 1u);
+      if (copy_len > 0 && g_toastTextPtr != nullptr)
+        memcpy (text_buf, g_toastTextPtr, (size_t)copy_len);
+      text_buf [copy_len > 0 ? copy_len : 0] = '\0';
       _ReadBarrier ();
       const LONG seq_b = *g_toastSeqPtr;
       if (seq_b == seq_a)
@@ -1464,9 +1499,9 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       seq_a = seq_b;
     }
 
+    // Avoid per-frame log spam: only log once per new toast_seq.
     if (seq_a != 0 && seq_a != s_lastToastSeqSeen)
     {
-      // Bound payload reads to the documented maxima.
       LONG safe_text_len = text_len;
       if (safe_text_len < 0)                  safe_text_len = 0;
       if (safe_text_len > 511)                safe_text_len = 511;
@@ -1474,23 +1509,149 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
       if (safe_icon_len < 0)                  safe_icon_len = 0;
       if (safe_icon_len > 259)                safe_icon_len = 259;
 
-      const ULONGLONG now_ms = GetTickCount64 ();
-      const bool active = (now_ms < expires_ms);
+      const ULONGLONG now_ms_log = GetTickCount64 ();
+      const bool active_log = (now_ms_log < expires_ms);
 
       _SidecarLog (L"SKToast event: seq=%ld active=%d expires_ms=%llu "
                    L"text_bytes=%ld icon_bytes=%ld",
-                   (long)seq_a, active ? 1 : 0,
+                   (long)seq_a, active_log ? 1 : 0,
                    (unsigned long long)expires_ms,
                    (long)safe_text_len, (long)safe_icon_len);
       s_lastToastSeqSeen = seq_a;
     }
 
-    // TODO(SKToast Phase-2 D3D11/12): when toast is active
-    // (GetTickCount64() < *g_toastExpiresPtr), draw a small primitive into
-    // the backbuffer using a backend-specific path: load an icon texture from
-    // g_toastIconPtr (UTF-8 path; treat as opaque key, never hardcode) and
-    // rasterize the UTF-8 text at g_toastTextPtr with a built-in font.  This
-    // is a pure render-only path; no input capture, no focus changes.
+    // ---- Step 2: Decide whether to draw -----------------------------------
+    LONG safe_text_len = text_len;
+    if (safe_text_len < 0) safe_text_len = 0;
+    if (safe_text_len > (LONG)(sizeof (text_buf) - 1u))
+      safe_text_len = (LONG)(sizeof (text_buf) - 1u);
+    const ULONGLONG now_ms = GetTickCount64 ();
+    const bool toast_active =
+      (seq_a != 0) && (now_ms < expires_ms) && (safe_text_len > 0);
+
+    if (toast_active)
+    {
+      // ---- Step 3a: GDI rasterize bitmap (only on toast_seq change) ------
+      if (s_toast_bitmap_seq != seq_a || s_toast_bitmap.empty ())
+      {
+        SK_Toast::Rasterize (text_buf, (uint32_t)safe_text_len, s_toast_bitmap);
+        s_toast_bitmap_seq = seq_a;
+        // Invalidate any cached RGBA-swapped copy.
+        s_toast_bitmap_rgba_seq = 0;
+      }
+
+      // ---- Step 3b: Grab D3D11 device + backbuffer ------------------------
+      ID3D11Device*        tdev  = nullptr;
+      ID3D11DeviceContext* tctx  = nullptr;
+      HRESULT thr = pReal->GetDevice (__uuidof (ID3D11Device), (void **)&tdev);
+      if (SUCCEEDED (thr) && tdev != nullptr)
+      {
+        tdev->GetImmediateContext (&tctx);
+
+        ID3D11Texture2D* tbb = nullptr;
+        const HRESULT thrBuf =
+          pReal->GetBuffer (0, __uuidof (ID3D11Texture2D), (void **)&tbb);
+
+        if (SUCCEEDED (thrBuf) && tbb != nullptr && tctx != nullptr)
+        {
+          D3D11_TEXTURE2D_DESC tbbDesc = { };
+          tbb->GetDesc (&tbbDesc);
+
+          // Only blit on backbuffer formats whose 8-bit-per-channel layout
+          // matches a direct CopySubresourceRegion (same patterns used by the
+          // SKF1 path).  R10G10B10A2 is skipped here intentionally — the
+          // toast bitmap is 8 bpc and CopySubresourceRegion cannot convert.
+          const bool fmt_is_bgra =
+            (tbbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM);
+          const bool fmt_is_rgba =
+            (tbbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM);
+
+          uint32_t dst_x = 0, dst_y = 0;
+          const bool fits =
+            SK_Toast::ComputeDestRect (tbbDesc.Width, tbbDesc.Height,
+                                       dst_x, dst_y);
+
+          if ((fmt_is_bgra || fmt_is_rgba) && fits)
+          {
+            // Reuse or (re)create the cached toast texture matching the
+            // current backbuffer format.  Toast surface dimensions are
+            // constant, so we only recreate on format change / first use.
+            if (s_toast_tex == nullptr || s_toast_tex_fmt != tbbDesc.Format)
+            {
+              if (s_toast_tex != nullptr)
+              {
+                s_toast_tex->Release ();
+                s_toast_tex = nullptr;
+              }
+
+              D3D11_TEXTURE2D_DESC tdesc = { };
+              tdesc.Width              = SK_Toast::kSurfaceWidth;
+              tdesc.Height             = SK_Toast::kSurfaceHeight;
+              tdesc.MipLevels          = 1;
+              tdesc.ArraySize          = 1;
+              tdesc.Format             = tbbDesc.Format;
+              tdesc.SampleDesc.Count   = 1;
+              tdesc.SampleDesc.Quality = 0;
+              tdesc.Usage              = D3D11_USAGE_DEFAULT;
+              tdesc.BindFlags          = D3D11_BIND_SHADER_RESOURCE;
+              tdesc.CPUAccessFlags     = 0;
+              tdesc.MiscFlags          = 0;
+
+              const HRESULT thrTex =
+                tdev->CreateTexture2D (&tdesc, nullptr, &s_toast_tex);
+              if (SUCCEEDED (thrTex) && s_toast_tex != nullptr)
+              {
+                s_toast_tex_fmt = tbbDesc.Format;
+                // Force a re-upload below.
+                s_toast_bitmap_rgba_seq = 0;
+              }
+              else
+              {
+                s_toast_tex     = nullptr;
+                s_toast_tex_fmt = DXGI_FORMAT_UNKNOWN;
+              }
+            }
+
+            if (s_toast_tex != nullptr && !s_toast_bitmap.empty ())
+            {
+              // Upload bitmap pixels.  For RGBA backbuffers, lazily build and
+              // cache a channel-swapped copy keyed by toast_seq.
+              const uint8_t* upload_src = nullptr;
+              if (fmt_is_bgra)
+              {
+                upload_src = s_toast_bitmap.data ();
+              }
+              else  // R8G8B8A8_UNORM
+              {
+                if (s_toast_bitmap_rgba_seq != s_toast_bitmap_seq ||
+                    s_toast_bitmap_rgba.size () != s_toast_bitmap.size ())
+                {
+                  s_toast_bitmap_rgba = s_toast_bitmap;
+                  SK_Toast::SwapToRGBA (s_toast_bitmap_rgba.data ());
+                  s_toast_bitmap_rgba_seq = s_toast_bitmap_seq;
+                }
+                upload_src = s_toast_bitmap_rgba.data ();
+              }
+
+              tctx->UpdateSubresource (s_toast_tex, 0, nullptr,
+                                       upload_src,
+                                       SK_Toast::kSurfaceStride, 0);
+
+              D3D11_BOX srcBox =
+                { 0, 0, 0,
+                  SK_Toast::kSurfaceWidth, SK_Toast::kSurfaceHeight, 1 };
+              tctx->CopySubresourceRegion (
+                tbb, 0, dst_x, dst_y, 0,
+                s_toast_tex, 0, &srcBox);
+            }
+          }
+        }
+
+        if (tbb != nullptr) tbb->Release ();
+        if (tctx != nullptr) tctx->Release ();
+        tdev->Release ();
+      }
+    }
   }
 
   // Early-out: when overlay is disabled skip ALL Stage A-F work (no mapping,

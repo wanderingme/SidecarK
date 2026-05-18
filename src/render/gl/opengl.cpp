@@ -54,6 +54,7 @@ extern bool SidecarK_DiagnosticsEnabled ();
 #include <SpecialK/render/dxgi/dxgi_hdr.h>
 
 #include <SpecialK/render/gl/opengl_backend.h>
+#include <SpecialK/render/sk_toast_render.h>
 #include <imgui/backends/imgui_gl3.h>
 #include <../depends/include/GL/glew.h>
 #include <../depends/include/GL/wglew.h>
@@ -3627,29 +3628,55 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         //
         // Runs UNCONDITIONALLY once the control map is bound — the toast HUD
         // must not depend on overlay open-state, input capture, focus, or
-        // game suspension (per product spec).  MVP body is a pure-read,
-        // diagnostic-only sampling of transient state published by
-        // SidecarKHost.  Per-backend GL rasterization of the icon + text
-        // plugs in here in a follow-up without any control-plane changes.
+        // game suspension (per product spec).
+        //
+        // Pipeline:
+        //   1. Seq-lock snapshot of the toast sub-block + bounded text copy.
+        //   2. CPU-rasterize a BGRA bitmap via GDI on toast_seq change only.
+        //   3. Upload to a dedicated GL texture (separate from the SKF1 tex).
+        //   4. Draw a small bottom-right textured quad with a dedicated
+        //      shader/VAO to FBO 0 — does NOT piggy-back on the SKF1 quad.
+        //
+        // No Producer/SKF1/CEF/React.  No input capture.  No focus/cursor.
         // ---------------------------------------------------------------------
+        static GLuint               s_fs_toast_tex     = 0;
+        static GLuint               s_fs_toast_prog    = 0;
+        static GLuint               s_fs_toast_vao     = 0;
+        static GLuint               s_fs_toast_vbo     = 0;
+        static GLuint               s_fs_toast_ibo     = 0;
+        static GLint                s_fs_toast_uTex    = -1;
+        static GLint                s_fs_toast_uRect   = -1;
+        static LONG                 s_fs_toast_tex_seq = 0;
+        static std::vector<uint8_t> s_fs_toast_bitmap;
+
         if (s_fs_toastSeqPtr != nullptr)
         {
+          // ---- Step 1: Seq-lock snapshot ------------------------------------
           LONG     seq_a = *s_fs_toastSeqPtr;
           uint64_t expires_ms = 0;
           LONG     text_len   = 0;
           LONG     icon_len   = 0;
+          char     text_buf [512] = { };
           for (int attempt = 0; attempt < 4; ++attempt)
           {
             _ReadBarrier ();
             expires_ms = *s_fs_toastExpiresPtr;
             text_len   = *s_fs_toastTextLenPtr;
             icon_len   = *s_fs_toastIconLenPtr;
+            LONG copy_len = text_len;
+            if (copy_len < 0) copy_len = 0;
+            if (copy_len > (LONG)(sizeof (text_buf) - 1u))
+              copy_len = (LONG)(sizeof (text_buf) - 1u);
+            if (copy_len > 0 && s_fs_toastTextPtr != nullptr)
+              memcpy (text_buf, s_fs_toastTextPtr, (size_t)copy_len);
+            text_buf [copy_len > 0 ? copy_len : 0] = '\0';
             _ReadBarrier ();
             const LONG seq_b = *s_fs_toastSeqPtr;
             if (seq_b == seq_a) break;
             seq_a = seq_b;
           }
 
+          // ---- Step 2: One-shot diagnostic per new seq (no per-frame spam) -
           if (seq_a != 0 && seq_a != s_fs_lastToastSeq)
           {
             LONG safe_text_len = text_len;
@@ -3658,25 +3685,214 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             LONG safe_icon_len = icon_len;
             if (safe_icon_len < 0)   safe_icon_len = 0;
             if (safe_icon_len > 259) safe_icon_len = 259;
-            const ULONGLONG now_ms = GetTickCount64 ();
-            const bool active = (now_ms < expires_ms);
-            // OutputDebugStringW is safe even when stdout is unattached and
-            // matches the lightweight diagnostic-only intent of the MVP body.
+            const ULONGLONG now_ms_log = GetTickCount64 ();
+            const bool active_log = (now_ms_log < expires_ms);
             wchar_t dbg [256] = { };
             _snwprintf_s (dbg, _TRUNCATE,
                           L"SKToast event (GL): seq=%ld active=%d expires_ms=%llu "
                           L"text_bytes=%ld icon_bytes=%ld\n",
-                          (long)seq_a, active ? 1 : 0,
+                          (long)seq_a, active_log ? 1 : 0,
                           (unsigned long long)expires_ms,
                           (long)safe_text_len, (long)safe_icon_len);
             OutputDebugStringW (dbg);
             s_fs_lastToastSeq = seq_a;
           }
 
-          // TODO(SKToast Phase-2 GL): when toast is active (now < expires_ms),
-          // upload the icon at s_fs_toastIconPtr (UTF-8 path, treat as opaque
-          // key) and rasterize s_fs_toastTextPtr (UTF-8) with a built-in font.
-          // Render-only; no input capture, no focus changes.
+          // ---- Step 3: Decide if we should draw -----------------------------
+          LONG safe_text_len = text_len;
+          if (safe_text_len < 0) safe_text_len = 0;
+          if (safe_text_len > (LONG)(sizeof (text_buf) - 1u))
+            safe_text_len = (LONG)(sizeof (text_buf) - 1u);
+          const ULONGLONG now_ms = GetTickCount64 ();
+          const bool toast_active =
+            (seq_a != 0) && (now_ms < expires_ms) && (safe_text_len > 0);
+
+          if (toast_active)
+          {
+            // ---- Step 4: GDI rasterize on seq change ------------------------
+            if (s_fs_toast_tex_seq != seq_a || s_fs_toast_bitmap.empty ())
+            {
+              SK_Toast::Rasterize (text_buf, (uint32_t)safe_text_len,
+                                   s_fs_toast_bitmap);
+              s_fs_toast_tex_seq = seq_a;
+
+              if (s_fs_toast_tex == 0)
+                glGenTextures (1, &s_fs_toast_tex);
+
+              if (s_fs_toast_tex != 0)
+              {
+                GLint prev_t2d = 0;
+                glGetIntegerv (GL_TEXTURE_BINDING_2D, &prev_t2d);
+                GLint prev_unpack = 0;
+                glGetIntegerv (GL_UNPACK_ALIGNMENT, &prev_unpack);
+                glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
+
+                glBindTexture (GL_TEXTURE_2D, s_fs_toast_tex);
+                glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
+                glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
+                glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
+                              (GLsizei)SK_Toast::kSurfaceWidth,
+                              (GLsizei)SK_Toast::kSurfaceHeight, 0,
+                              GL_BGRA, GL_UNSIGNED_BYTE,
+                              s_fs_toast_bitmap.data ());
+
+                glPixelStorei (GL_UNPACK_ALIGNMENT, prev_unpack);
+                glBindTexture (GL_TEXTURE_2D, (GLuint)prev_t2d);
+              }
+            }
+
+            // ---- Step 5: Lazy-init shader + geometry ------------------------
+            if (s_fs_toast_prog == 0)
+            {
+              // uRect = (x0, y0, x1, y1) in NDC.  Quad vertices are unit-cube
+              // [0..1]^2 mapped into uRect via the vertex shader.  Texture V
+              // is flipped so the top-down BGRA bitmap appears right-side-up
+              // in OpenGL's Y-up default framebuffer.
+              const char* vs_src =
+                "#version 130\n"
+                "in vec2 aUV;\n"
+                "uniform vec4 uRect;\n"
+                "out vec2 vUV;\n"
+                "void main(){\n"
+                "  vec2 pos = mix(uRect.xy, uRect.zw, aUV);\n"
+                "  vUV = vec2(aUV.x, 1.0 - aUV.y);\n"
+                "  gl_Position = vec4(pos, 0.0, 1.0);\n"
+                "}\n";
+
+              const char* fs_src =
+                "#version 130\n"
+                "uniform sampler2D uTex;\n"
+                "in vec2 vUV;\n"
+                "out vec4 oColor;\n"
+                "void main(){ oColor = texture(uTex, vUV); }\n";
+
+              GLuint vsh = glCreateShader (GL_VERTEX_SHADER);
+              glShaderSource  (vsh, 1, &vs_src, nullptr);
+              glCompileShader (vsh);
+              GLuint fsh = glCreateShader (GL_FRAGMENT_SHADER);
+              glShaderSource  (fsh, 1, &fs_src, nullptr);
+              glCompileShader (fsh);
+
+              s_fs_toast_prog = glCreateProgram ();
+              glAttachShader       (s_fs_toast_prog, vsh);
+              glAttachShader       (s_fs_toast_prog, fsh);
+              glBindAttribLocation (s_fs_toast_prog, 0, "aUV");
+              glLinkProgram        (s_fs_toast_prog);
+              s_fs_toast_uTex  = glGetUniformLocation (s_fs_toast_prog, "uTex");
+              s_fs_toast_uRect = glGetUniformLocation (s_fs_toast_prog, "uRect");
+
+              glDeleteShader (vsh);
+              glDeleteShader (fsh);
+
+              const float quad_uvs [8] = {
+                0.0f, 0.0f,
+                1.0f, 0.0f,
+                1.0f, 1.0f,
+                0.0f, 1.0f
+              };
+              const uint16_t quad_idx [6] = { 0, 1, 2, 0, 2, 3 };
+
+              glGenVertexArrays (1, &s_fs_toast_vao);
+              glGenBuffers      (1, &s_fs_toast_vbo);
+              glGenBuffers      (1, &s_fs_toast_ibo);
+
+              glBindVertexArray (s_fs_toast_vao);
+              glBindBuffer      (GL_ARRAY_BUFFER,         s_fs_toast_vbo);
+              glBufferData      (GL_ARRAY_BUFFER,         sizeof (quad_uvs), quad_uvs, GL_STATIC_DRAW);
+              glBindBuffer      (GL_ELEMENT_ARRAY_BUFFER, s_fs_toast_ibo);
+              glBufferData      (GL_ELEMENT_ARRAY_BUFFER, sizeof (quad_idx), quad_idx, GL_STATIC_DRAW);
+              glEnableVertexAttribArray (0);
+              glVertexAttribPointer (0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof (float), (void *)0);
+              glBindVertexArray (0);
+              glBindBuffer      (GL_ARRAY_BUFFER,         0);
+              glBindBuffer      (GL_ELEMENT_ARRAY_BUFFER, 0);
+            }
+
+            // ---- Step 6: Draw the toast quad on FBO 0 ----------------------
+            if (s_fs_toast_prog != 0 && s_fs_toast_tex != 0)
+            {
+              // Save GL state.
+              GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
+              GLint     sv_active  = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &sv_active);
+              GLint     sv_tex2d   = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &sv_tex2d);
+              GLint     sv_vao     = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &sv_vao);
+              GLint     sv_arr     = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &sv_arr);
+              GLint     sv_elem    = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &sv_elem);
+              GLint     sv_fbo     = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &sv_fbo);
+              GLint     sv_vp [4]  = { }; glGetIntegerv (GL_VIEWPORT,    sv_vp);
+              GLint     sv_sci [4] = { }; glGetIntegerv (GL_SCISSOR_BOX, sv_sci);
+              GLboolean sv_cmask [4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+              glGetBooleanv (GL_COLOR_WRITEMASK, sv_cmask);
+              const GLboolean sv_scissor = glIsEnabled (GL_SCISSOR_TEST);
+              const GLboolean sv_blend   = glIsEnabled (GL_BLEND);
+              const GLboolean sv_depth   = glIsEnabled (GL_DEPTH_TEST);
+              const GLboolean sv_stencil = glIsEnabled (GL_STENCIL_TEST);
+              const GLboolean sv_cull    = glIsEnabled (GL_CULL_FACE);
+
+              glBindFramebuffer (GL_FRAMEBUFFER, 0);
+              if (sv_scissor) glDisable (GL_SCISSOR_TEST);
+              if (sv_depth)   glDisable (GL_DEPTH_TEST);
+              if (sv_stencil) glDisable (GL_STENCIL_TEST);
+              if (sv_cull)    glDisable (GL_CULL_FACE);
+              if (sv_blend)   glDisable (GL_BLEND);  // Bitmap is opaque.
+              glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+              const GLsizei vw = (GLsizei)(rcWnd.right  - rcWnd.left);
+              const GLsizei vh = (GLsizei)(rcWnd.bottom - rcWnd.top);
+              glViewport (0, 0, vw, vh);
+
+              uint32_t dst_x = 0, dst_y = 0;
+              const bool fits =
+                (vw > 0 && vh > 0) &&
+                SK_Toast::ComputeDestRect ((uint32_t)vw, (uint32_t)vh,
+                                           dst_x, dst_y);
+              if (fits)
+              {
+                // Convert pixel rect (top-down) → NDC (Y-up).
+                const float fx0 =  (float)dst_x;
+                const float fx1 =  (float)dst_x + (float)SK_Toast::kSurfaceWidth;
+                // Flip Y: pixel y=0 is top → NDC y=+1.
+                const float fy0 =  (float)dst_y;
+                const float fy1 =  (float)dst_y + (float)SK_Toast::kSurfaceHeight;
+                const float nx0 = (fx0 / (float)vw) * 2.0f - 1.0f;
+                const float nx1 = (fx1 / (float)vw) * 2.0f - 1.0f;
+                const float ny1 = 1.0f - (fy0 / (float)vh) * 2.0f;
+                const float ny0 = 1.0f - (fy1 / (float)vh) * 2.0f;
+
+                glUseProgram    (s_fs_toast_prog);
+                glActiveTexture (GL_TEXTURE0);
+                glBindTexture   (GL_TEXTURE_2D, s_fs_toast_tex);
+                if (s_fs_toast_uTex  >= 0) glUniform1i (s_fs_toast_uTex, 0);
+                if (s_fs_toast_uRect >= 0) glUniform4f (s_fs_toast_uRect, nx0, ny0, nx1, ny1);
+                glBindVertexArray (s_fs_toast_vao);
+                glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
+              }
+
+              // Restore GL state.
+              glBindVertexArray  ((GLuint)sv_vao);
+              glBindBuffer       (GL_ARRAY_BUFFER,         (GLuint)sv_arr);
+              glBindBuffer       (GL_ELEMENT_ARRAY_BUFFER, (GLuint)sv_elem);
+              glUseProgram       ((GLuint)sv_prog);
+              glActiveTexture    ((GLenum)sv_active);
+              glBindTexture      (GL_TEXTURE_2D, (GLuint)sv_tex2d);
+              glBindFramebuffer  (GL_FRAMEBUFFER, (GLuint)sv_fbo);
+              glViewport         (sv_vp [0], sv_vp [1], sv_vp [2], sv_vp [3]);
+              glColorMask        (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
+              if (sv_blend)   glEnable  (GL_BLEND);    else glDisable (GL_BLEND);
+              if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
+              if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
+              if (sv_cull)    glEnable  (GL_CULL_FACE);    else glDisable (GL_CULL_FACE);
+              if (sv_scissor)
+              {
+                glEnable  (GL_SCISSOR_TEST);
+                glScissor (sv_sci [0], sv_sci [1], sv_sci [2], sv_sci [3]);
+              }
+              else
+                glDisable (GL_SCISSOR_TEST);
+            }
+          }
         }
 
         // When the overlay is turned off, invalidate the cached frame so that
