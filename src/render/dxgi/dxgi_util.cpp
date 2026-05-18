@@ -1656,9 +1656,11 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
     dstTexDesc.ArraySize != 1;
 
   const UINT dstCopyWidth =
-    pSrcBox != nullptr ? std::max (0U, pSrcBox->right  - pSrcBox->left ) : srcTexDesc.Width;
+    pSrcBox != nullptr ? (pSrcBox->right  > pSrcBox->left ? pSrcBox->right  - pSrcBox->left : 0U)
+                       : srcTexDesc.Width;
   const UINT dstCopyHeight =
-    pSrcBox != nullptr ? std::max (0U, pSrcBox->bottom - pSrcBox->top  ) : srcTexDesc.Height;
+    pSrcBox != nullptr ? (pSrcBox->bottom > pSrcBox->top  ? pSrcBox->bottom - pSrcBox->top : 0U)
+                       : srcTexDesc.Height;
 
   // Handle subresource (mipmap) selection
   if (! bArraySRV)
@@ -1824,7 +1826,11 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
   }
   else if (surface.render.tex.p != nullptr)
   {
-    pDev->CreateRenderTargetView (surface.render.tex, &surface.desc.rtv, &surface.render.rtv.p);
+    const HRESULT hrStageRTV =
+      pDev->CreateRenderTargetView (surface.render.tex, &surface.desc.rtv, &surface.render.rtv.p);
+
+    if (FAILED (hrStageRTV))
+      surface.render.rtv = nullptr;
   }
 
   if (( ! direct_alpha_composite && surface.render.tex.p == nullptr ) ||
