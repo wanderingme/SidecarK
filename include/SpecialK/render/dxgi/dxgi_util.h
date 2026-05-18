@@ -77,8 +77,9 @@ bool SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
                                UINT             SrcSubresource = 0,
                                UINT             DstSubresource = 0,
                                UINT             DstX           = 0,
-                               UINT             DstY           = 0
-                             //UINT             DstZ           = 0 // (Unneeded)
+                               UINT             DstY           = 0,
+                               bool             AlphaBlend     = false
+                              //UINT             DstZ           = 0 // (Unneeded)
 );
 
 bool SK_D3D11_EnsureMatchingDevices ( ID3D11Device *pDevice0,

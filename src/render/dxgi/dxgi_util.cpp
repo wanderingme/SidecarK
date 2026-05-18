@@ -715,6 +715,7 @@ struct SK_DXGI_sRGBCoDec {
     ID3D11DepthStencilState*          pDSState = nullptr;
 
     ID3D11BlendState*              pBlendState = nullptr;
+    ID3D11BlendState*         pAlphaBlendState = nullptr;
 
     D3D11_FEATURE_DATA_D3D11_OPTIONS FeatureOpts
                                                = { };
@@ -734,6 +735,7 @@ struct SK_DXGI_sRGBCoDec {
 
       if (pRasterState   != nullptr) { pRasterState->Release   (); pRasterState   = nullptr; }
       if (pDSState       != nullptr) { pDSState->Release       ();     pDSState   = nullptr; }
+      if (pAlphaBlendState != nullptr) { pAlphaBlendState->Release (); pAlphaBlendState = nullptr; }
 
       if (pVSUtilLuma    != nullptr) { pVSUtilLuma->Release    (); pVSUtilLuma    = nullptr; }
       if (pSRGBParams    != nullptr) { pSRGBParams->Release    (); pSRGBParams    = nullptr; }
@@ -879,6 +881,19 @@ struct SK_DXGI_sRGBCoDec {
                                  &device.pBlendState );
 
       SK_D3D11_SetDebugName (device.pBlendState, L"sRGBLinearizer BlendState");
+
+      blend_desc.RenderTarget [0].BlendEnable    = true;
+      blend_desc.RenderTarget [0].SrcBlend       = D3D11_BLEND_SRC_ALPHA;
+      blend_desc.RenderTarget [0].DestBlend      = D3D11_BLEND_INV_SRC_ALPHA;
+      blend_desc.RenderTarget [0].BlendOp        = D3D11_BLEND_OP_ADD;
+      blend_desc.RenderTarget [0].SrcBlendAlpha  = D3D11_BLEND_ONE;
+      blend_desc.RenderTarget [0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+      blend_desc.RenderTarget [0].BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+
+      pDev->CreateBlendState ( &blend_desc,
+                                 &device.pAlphaBlendState );
+
+      SK_D3D11_SetDebugName (device.pAlphaBlendState, L"sRGBLinearizer Alpha BlendState");
 
       D3D11_DEPTH_STENCIL_DESC
         depth                          = {  };
@@ -1466,7 +1481,8 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
             _In_opt_       UINT             SrcSubresource,
             _In_opt_       UINT             DstSubresource,
             _In_opt_       UINT             DstX,
-            _In_opt_       UINT             DstY )
+            _In_opt_       UINT             DstY,
+            _In_opt_       bool             AlphaBlend )
 {
   SK_ComPtr <ID3D11DeviceContext> pDevCtx;
   SK_ComPtr <ID3D11Device>        pDev;
@@ -1553,7 +1569,8 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
       _Return (false);
   }
 
-  SK_RunOnce (SK_ReleaseAssert (DstX == 0 && DstY == 0));
+  if (! AlphaBlend)
+    SK_RunOnce (SK_ReleaseAssert (DstX == 0 && DstY == 0));
 
   if ( DirectX::IsCompressed (srcTexDesc.Format)           ||
        DirectX::IsCompressed (dstTexDesc.Format)           ||
@@ -1637,6 +1654,11 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
 
   bool bArrayRTV =
     dstTexDesc.ArraySize != 1;
+
+  const UINT dstCopyWidth =
+    pSrcBox != nullptr ? std::max (0L, pSrcBox->right  - pSrcBox->left ) : srcTexDesc.Width;
+  const UINT dstCopyHeight =
+    pSrcBox != nullptr ? std::max (0L, pSrcBox->bottom - pSrcBox->top  ) : srcTexDesc.Height;
 
   // Handle subresource (mipmap) selection
   if (! bArraySRV)
@@ -1764,8 +1786,11 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
     }
   }
 
+  const bool direct_alpha_composite =
+    AlphaBlend && pSrcBox == nullptr && SrcSubresource == 0 && DstSubresource == 0;
+
   // A temporary texture is needed (but we'll stash it for potential reuse)
-  if (surface.render.tex.p == nullptr)
+  if (! direct_alpha_composite && surface.render.tex.p == nullptr)
   {
     surface.desc.tex.Format =
       DirectX::MakeTypeless (surface.desc.tex.Format);
@@ -1789,11 +1814,22 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
     }
   }
 
-  if ( surface.render.tex.p == nullptr
-    || FAILED (pDev->CreateRenderTargetView (surface.render.tex, &surface.desc.rtv, &surface.render.rtv.p)) )
+  if (direct_alpha_composite)
   {
-    if (surface.render.tex.p == nullptr) SK_LOGi0 ( L"SK_D3D11_BltCopySurface Failed: surface.render.tex.p == nullptr" );
-    else                                 SK_LOGi0 ( L"SK_D3D11_BltCopySurface Failed: CreateRTV Failed" );
+    pDev->CreateRenderTargetView (pDstTex, &surface.desc.rtv, &surface.render.rtv.p);
+  }
+  else if (surface.render.tex.p != nullptr)
+  {
+    pDev->CreateRenderTargetView (surface.render.tex, &surface.desc.rtv, &surface.render.rtv.p);
+  }
+
+  if (( ! direct_alpha_composite && surface.render.tex.p == nullptr ) ||
+      surface.render.rtv.p == nullptr)
+  {
+    if (! direct_alpha_composite && surface.render.tex.p == nullptr)
+      SK_LOGi0 ( L"SK_D3D11_BltCopySurface Failed: surface.render.tex.p == nullptr" );
+    else
+      SK_LOGi0 ( L"SK_D3D11_BltCopySurface Failed: CreateRTV Failed" );
 
     return
       _Return (false);
@@ -1943,10 +1979,12 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
       _Return (false);
   }
 
-const D3D11_VIEWPORT vp = {         0.0f, 0.0f,
-  static_cast <float> (dstTexDesc.Width),
-  static_cast <float> (dstTexDesc.Height),
-                                    0.0f, 1.0f
+const D3D11_VIEWPORT vp = {
+  static_cast <float> (DstX),
+  static_cast <float> (DstY),
+  static_cast <float> (direct_alpha_composite ? dstCopyWidth  : dstTexDesc.Width),
+  static_cast <float> (direct_alpha_composite ? dstCopyHeight : dstTexDesc.Height),
+                                  0.0f, 1.0f
 };
 
 #if 0
@@ -2065,8 +2103,9 @@ const D3D11_VIEWPORT vp = {         0.0f, 0.0f,
   pDevCtx->IASetInputLayout       (        codec.pInputLayout     );
   pDevCtx->IASetIndexBuffer       (nullptr, DXGI_FORMAT_UNKNOWN, 0);
 
-  pDevCtx->OMSetBlendState        (        codec.pBlendState,
-                                           codec.fBlendFactor,   0xFFFFFFFFU);
+  pDevCtx->OMSetBlendState        (        direct_alpha_composite ? codec.pAlphaBlendState
+                                                                 : codec.pBlendState,
+                                          codec.fBlendFactor,   0xFFFFFFFFU);
   pDevCtx->OMSetDepthStencilState (        codec.pDSState,       0);
   pDevCtx->OMSetRenderTargets     (1,
                                      &surface.render.rtv.p,
@@ -2115,7 +2154,7 @@ const D3D11_VIEWPORT vp = {         0.0f, 0.0f,
     (pDevCtx1.p != nullptr && codec.FeatureOpts.DiscardAPIsSeenByDriver);
 
   // If there are any mipmaps, copy them first...
-  if (dstTexDesc.MipLevels > 1)
+  if (! direct_alpha_composite && dstTexDesc.MipLevels > 1)
   {
     for ( UINT i = 1 ; i < dstTexDesc.MipLevels ; ++i )
     {
@@ -2177,7 +2216,7 @@ const D3D11_VIEWPORT vp = {         0.0f, 0.0f,
     }
   }
 
-  if (pDstTex != nullptr && surface.render.tex != nullptr)
+  if (! direct_alpha_composite && pDstTex != nullptr && surface.render.tex != nullptr)
   {
     // Copy the top-level
     pDevCtx->CopySubresourceRegion (pDstTex, 0, 0, 0, 0, surface.render.tex, 0, nullptr);

@@ -2013,23 +2013,37 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
           if (overlay_enabled && s_skf1.has_frame && s_skf1.tex != nullptr)
           {
+            DXGI_SWAP_CHAIN_DESC scd = { };
+            const bool windowed_composite =
+              SUCCEEDED (pReal->GetDesc (&scd)) ? (scd.Windowed != FALSE) : true;
+
             if (s_skf1.texFmt == bbDesc.Format)
             {
-              // Formats match - safe to use CopySubresourceRegion.
-              // Use clamped copy rect (copyW×copyH), not full header dims.
-              D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
               static std::atomic<bool> s_logged_blit_details = false;
               if (!s_logged_blit_details.exchange(true))
               {
                 _SidecarLog(L"→ Blit destination: bb=%p (backbuffer from GetBuffer(0))", bb);
                 _SidecarLog(L"→ Backbuffer format: %u, Overlay format: %u", bbDesc.Format, s_skf1.texFmt);
                 _SidecarLog(L"→ No backbuffer clear performed (composite only)");
-                _SidecarLog(L"→ Using CopySubresourceRegion (formats match)");
+                _SidecarLog(L"→ Using %ls (formats match)",
+                            windowed_composite ? L"alpha-respecting blit" : L"CopySubresourceRegion");
               }
               if (kEnableSKF1_SkipCounters) InterlockedIncrement (&g_SKF1_CompositeHit);
-              const ULONGLONG tCopySub11 = GetTickCount64 ();
-              ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
-              _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
+              if (windowed_composite)
+              {
+                const ULONGLONG tBlend11 = GetTickCount64 ();
+                SK_D3D11_BltCopySurface (s_skf1.tex, bb, nullptr, 0, 0, 0, 0, true);
+                _LogSlowStage (L"D3D11.AlphaComposite", tBlend11);
+              }
+              else
+              {
+                // Formats match - safe to use CopySubresourceRegion.
+                // Use clamped copy rect (copyW×copyH), not full header dims.
+                D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
+                const ULONGLONG tCopySub11 = GetTickCount64 ();
+                ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_skf1.tex, 0, &srcBox);
+                _LogSlowStage (L"D3D11.CopySubresourceRegion", tCopySub11);
+              }
 
               // STAGE F OK
               if (!s_skf1.logged_stage_f_ok.exchange(true))
