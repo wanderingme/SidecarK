@@ -1788,6 +1788,9 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
     }
   }
 
+  // This direct path renders straight into the destination RTV, so it only
+  // applies to the simple top-level full-texture case used by the windowed
+  // SKF1 toast compositor.
   const bool direct_alpha_composite =
     AlphaBlend && pSrcBox == nullptr && SrcSubresource == 0 && DstSubresource == 0;
 
