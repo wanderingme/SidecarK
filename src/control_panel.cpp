@@ -38,8 +38,7 @@ SKC_NormalizeOverlayMode (uint32_t overlay_mode) noexcept
 
     case 1u:
     default:
-      return overlay_mode == 0u ? SKC_OverlayMode::Off
-                                : SKC_OverlayMode::Interactive;
+      return SKC_OverlayMode::Interactive;
   }
 }
 

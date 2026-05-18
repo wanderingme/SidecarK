@@ -1675,7 +1675,7 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
       {
         const bool attached   = g_attach_confirmed.load();
         const char* stateStr  = attached ? "attached" : "idle";
-        const uint32_t ovVal = (overlayMode != nullptr) ? *overlayMode : 0u;
+        const uint32_t overlayModeVal = (overlayMode != nullptr) ? *overlayMode : 0u;
         const SidecarKFrameHeaderV1* hostHdr = (g_frame_host_view != nullptr)
           ? reinterpret_cast<const SidecarKFrameHeaderV1*>(g_frame_host_view)
           : nullptr;
@@ -1685,7 +1685,7 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
         const DWORD pid  = attached ? (DWORD)targetPid : 0u;
         const int n = snprintf(statusBuf, sizeof(statusBuf),
           "state=%s pid=%u overlay=%u w=%u h=%u frame=%u last_err=none bb=0x0\n",
-          stateStr, (unsigned)pid, (unsigned)ovVal, (unsigned)w, (unsigned)h, (unsigned)fc);
+          stateStr, (unsigned)pid, (unsigned)overlayModeVal, (unsigned)w, (unsigned)h, (unsigned)fc);
         if (n > 0 && n < (int)sizeof(statusBuf))
           { resp = statusBuf; respLen = (DWORD)n; }
       }
