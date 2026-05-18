@@ -3525,7 +3525,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         static uint8_t*            s_fs_ctrlBase        = nullptr;
         static volatile LONG*      s_fs_overlayEnabled  = nullptr;
         // SKC1 v1 toast sub-block pointers (additive ABI extension; see README
-        // and SidecarKHost.cpp).  Bound together with overlayEnabled.
+        // and SidecarKHost.cpp).  Initialized at the same time as
+        // s_fs_overlayEnabled when the control map is first opened.
         static volatile LONG*      s_fs_toastSeqPtr     = nullptr;
         static volatile uint64_t*  s_fs_toastExpiresPtr = nullptr;
         static volatile LONG*      s_fs_toastTextLenPtr = nullptr;

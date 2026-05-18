@@ -1102,7 +1102,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
   static uint8_t* g_ctrlBase = nullptr;
   static volatile LONG* g_overlayEnabled = nullptr;
   // SKC1 v1 toast sub-block pointers (additive ABI extension; see README and
-  // SidecarKHost.cpp).  All three are bound together when the control map is
+  // SidecarKHost.cpp).  All six are bound together when the control map is
   // first opened.  Toast rendering is intentionally independent of
   // g_overlayEnabled: per product spec, the toast HUD is unconditional
   // render-only output and must not depend on overlay open-state.
