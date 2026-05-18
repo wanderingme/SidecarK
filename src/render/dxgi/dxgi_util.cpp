@@ -1569,6 +1569,8 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
       _Return (false);
   }
 
+  // Raw blit copies always target the origin; offset rendering is only
+  // supported by the direct alpha-composite path used for the splash toast.
   if (! AlphaBlend)
     SK_RunOnce (SK_ReleaseAssert (DstX == 0 && DstY == 0));
 

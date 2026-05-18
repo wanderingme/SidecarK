@@ -144,6 +144,9 @@ struct SK_SplashToastCopy
   std::string subheader;
 };
 
+static constexpr float kSplashTaggedBoldTextOffsetX = 0.75f;
+static constexpr float kSplashBackgroundOpacity     = 0.20f;
+
 static std::wstring
 SK_LoadSplashToastCopyValue (const wchar_t* key, const wchar_t* fallback)
 {
@@ -235,7 +238,7 @@ SK_ImGui_RenderTaggedText (const std::string& text, const ImVec4& bold_color)
         ImGui::GetWindowDrawList ()->AddText (
           ImGui::GetFont (),
           ImGui::GetFontSize (),
-          ImVec2 (text_pos.x + 0.75f, text_pos.y),
+          ImVec2 (text_pos.x + kSplashTaggedBoldTextOffsetX, text_pos.y),
           ImGui::GetColorU32 (bold_color),
           segment.c_str ()
         );
@@ -8733,7 +8736,7 @@ SK_ImGui_StageNextFrame (void)
       ((current_time < dwStartTime + 1000 * config.version_banner.duration) || eula.show))
   {
     ImGui::PushStyleColor    (ImGuiCol_Text,     ImVec4 (1.f,   1.f,   1.f,   1.f));
-    ImGui::PushStyleColor    (ImGuiCol_WindowBg, ImVec4 (.333f, .333f, .333f, 0.20f));
+    ImGui::PushStyleColor    (ImGuiCol_WindowBg, ImVec4 (.333f, .333f, .333f, kSplashBackgroundOpacity));
     ImGui::SetNextWindowPos  (ImVec2 (10, 10));
     ImGui::SetNextWindowSize (ImVec2 ( io.DisplayFramebufferScale.x        - 20.0f,
                                        ImGui::GetFrameHeightWithSpacing () * 4.5f  ), ImGuiCond_Always );
