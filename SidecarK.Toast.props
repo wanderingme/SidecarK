@@ -1,0 +1,7 @@
+; Editable splash toast copy.
+; Use {toggle} to insert the current overlay hotkey text.
+; Use <b>...</b> to emphasize text segments.
+
+[Toast]
+Header=Press <b>{toggle}</b> for help and more.
+Subheader=Please see the Discord Release Channel under Help | Releases for beta / stable updates to this project.

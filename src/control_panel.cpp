@@ -138,6 +138,135 @@ SKC_GetOverlayMode (void)
   return SKC_NormalizeOverlayMode (*s_overlayModePtr);
 }
 
+struct SK_SplashToastCopy
+{
+  std::string header;
+  std::string subheader;
+};
+
+static std::wstring
+SK_LoadSplashToastCopyValue (const wchar_t* key, const wchar_t* fallback)
+{
+  wchar_t value [2048] = { };
+  std::wstring path =
+    std::wstring (SK_GetInstallPath ()) + LR"(\SidecarK.Toast.props)";
+
+  GetPrivateProfileStringW (
+    L"Toast", key, fallback,
+      value, (DWORD)_countof (value),
+        path.c_str ()
+  );
+
+  return value;
+}
+
+static void
+SK_ReplaceAllInPlace (std::wstring& text, const std::wstring& needle, const std::wstring& replacement)
+{
+  if (needle.empty ())
+    return;
+
+  size_t pos = 0;
+
+  while ((pos = text.find (needle, pos)) != std::wstring::npos)
+  {
+    text.replace (pos, needle.length (), replacement);
+    pos += replacement.length ();
+  }
+}
+
+static SK_SplashToastCopy
+SK_GetSplashToastCopy (const std::wstring& toggle_combo)
+{
+  static const std::wstring header_template =
+    SK_LoadSplashToastCopyValue (
+      L"Header",
+      L"Press <b>{toggle}</b> for help and more."
+    );
+
+  static const std::wstring subheader_template =
+    SK_LoadSplashToastCopyValue (
+      L"Subheader",
+      L"Please see the Discord Release Channel under Help | Releases for beta / stable updates to this project."
+    );
+
+  std::wstring header    = header_template;
+  std::wstring subheader = subheader_template;
+
+  SK_ReplaceAllInPlace (header,    L"{toggle}", toggle_combo);
+  SK_ReplaceAllInPlace (subheader, L"{toggle}", toggle_combo);
+
+  return {
+    SK_WideCharToUTF8 (header),
+    SK_WideCharToUTF8 (subheader)
+  };
+}
+
+static void
+SK_ImGui_RenderTaggedText (const std::string& text, const ImVec4& bold_color)
+{
+  size_t pos = 0;
+  bool   bold = false;
+  bool   first_segment = true;
+
+  while (pos < text.length ())
+  {
+    const size_t open_tag  = text.find ("<b>",  pos);
+    const size_t close_tag = text.find ("</b>", pos);
+    const size_t tag_pos =
+      std::min (open_tag != std::string::npos ? open_tag : text.length (),
+                close_tag != std::string::npos ? close_tag : text.length ());
+
+    const std::string segment =
+      text.substr (pos, tag_pos - pos);
+
+    if (! segment.empty ())
+    {
+      if (! first_segment)
+        ImGui::SameLine (0.0f, 0.0f);
+
+      if (bold)
+      {
+        const ImVec2 text_pos =
+          ImGui::GetCursorScreenPos ();
+
+        ImGui::PushStyleColor (ImGuiCol_Text, bold_color);
+        ImGui::TextUnformatted (segment.c_str ());
+        ImGui::GetWindowDrawList ()->AddText (
+          ImGui::GetFont (),
+          ImGui::GetFontSize (),
+          ImVec2 (text_pos.x + 0.75f, text_pos.y),
+          ImGui::GetColorU32 (bold_color),
+          segment.c_str ()
+        );
+        ImGui::PopStyleColor   ();
+      }
+
+      else
+      {
+        ImGui::TextUnformatted (segment.c_str ());
+      }
+
+      first_segment = false;
+    }
+
+    if (tag_pos == text.length ())
+      break;
+
+    if (tag_pos == open_tag)
+    {
+      bold = true;
+      pos  = open_tag + 3;
+    }
+
+    else
+    {
+      bold = false;
+      pos  = close_tag + 4;
+    }
+  }
+}
+
 bool
 SKC_IsCompositingEnabled (void)
 {
@@ -8604,37 +8733,56 @@ SK_ImGui_StageNextFrame (void)
       ((current_time < dwStartTime + 1000 * config.version_banner.duration) || eula.show))
   {
     ImGui::PushStyleColor    (ImGuiCol_Text,     ImVec4 (1.f,   1.f,   1.f,   1.f));
-    ImGui::PushStyleColor    (ImGuiCol_WindowBg, ImVec4 (.333f, .333f, .333f, 0.828282f));
+    ImGui::PushStyleColor    (ImGuiCol_WindowBg, ImVec4 (.333f, .333f, .333f, 0.20f));
     ImGui::SetNextWindowPos  (ImVec2 (10, 10));
     ImGui::SetNextWindowSize (ImVec2 ( io.DisplayFramebufferScale.x        - 20.0f,
                                        ImGui::GetFrameHeightWithSpacing () * 4.5f  ), ImGuiCond_Always );
     ImGui::Begin             ( "Splash Screen##SpecialK",
-                                 nullptr,
-                                   ImGuiWindowFlags_NoTitleBar      |
-                                   ImGuiWindowFlags_NoScrollbar     |
-                                   ImGuiWindowFlags_NoMove          |
+                                  nullptr,
+                                    ImGuiWindowFlags_NoTitleBar      |
+                                    ImGuiWindowFlags_NoScrollbar     |
+                                    ImGuiWindowFlags_NoMove          |
                                    ImGuiWindowFlags_NoResize        |
                                    ImGuiWindowFlags_NoSavedSettings |
-                                   ImGuiWindowFlags_NoInputs        |
-                                   ImGuiWindowFlags_NoFocusOnAppearing );
-
-    static char              szName [512] = { };
-    SK_Platform_GetUserName (szName);
+                                    ImGuiWindowFlags_NoInputs        |
+                                    ImGuiWindowFlags_NoFocusOnAppearing );
 
     ImGui::TextColored     (ImColor::HSV (.11f, 1.f, 1.f),  "%hs   ",
-                               SK_WideCharToUTF8 (SK_GetPluginName ()).c_str ()); ImGui::SameLine ();
-    if (*szName != '\0')
+                               SK_WideCharToUTF8 (SK_GetPluginName ()).c_str ());
+
+    std::wstring toggle_combo;
+
+    if (config.control_panel.keys.toggle.ctrl)
+      toggle_combo += L"CTRL";
+
+    if (config.control_panel.keys.toggle.alt)
     {
-      ImGui::Text            ("  Hello");                                         ImGui::SameLine ();
-      ImGui::TextColored     (ImColor::HSV (0.075f, 1.0f, 1.0f), "%s", szName);   ImGui::SameLine ();
-      ImGui::TextUnformatted ("please see the Discord Release Channel, under");   ImGui::SameLine ();
+      if (! toggle_combo.empty ()) toggle_combo += L" + ";
+      toggle_combo +=
+        virtualToHuman [VK_MENU].empty () ? L"ALT"
+                                          : virtualToHuman [VK_MENU];
     }
-    else
+
+    if (config.control_panel.keys.toggle.shift)
     {
-      ImGui::TextUnformatted ("  Please see the Discord Release Channel, under"); ImGui::SameLine ();
+      if (! toggle_combo.empty ()) toggle_combo += L" + ";
+      toggle_combo +=
+        virtualToHuman [VK_SHIFT].empty () ? L"SHIFT"
+                                           : virtualToHuman [VK_SHIFT];
     }
-    ImGui::TextColored       (ImColor::HSV (.52f, 1.f, 1.f),  "Help | Releases"); ImGui::SameLine ();
-    ImGui::TextUnformatted   ("for beta / stable updates to this project.");
+
+    if (! toggle_combo.empty ())
+      toggle_combo += L" + ";
+
+    toggle_combo += virtualToHuman [(BYTE)config.control_panel.keys.toggle.vKey];
+
+    const auto toast_copy =
+      SK_GetSplashToastCopy (toggle_combo);
+
+    SK_ImGui_RenderTaggedText (
+      toast_copy.header,
+      ImColor::HSV (.16f, 1.f, 1.f)
+    );
 
     ImGui::Spacing ();
     ImGui::Spacing ();
@@ -8747,129 +8895,7 @@ SK_ImGui_StageNextFrame (void)
     }
 
     ImGui::Spacing         ();
-
-    ImGui::TextUnformatted ("Press ");                  ImGui::SameLine ();
-
-    int modifiers = 0;
-
-    if (config.control_panel.keys.toggle.ctrl)
-    {
-      ImGui::TextColored   ( ImColor::HSV (.16f, 1.f, 1.f),
-                               R"('%hs)", SK_WideCharToUTF8 (virtualToHuman [VK_CONTROL]).c_str () );
-
-      ++modifiers;
-    }
-
-    if (config.control_panel.keys.toggle.alt)
-    {
-      if (modifiers)
-      {
-        ImGui::SameLine        (   );
-        ImGui::TextUnformatted ("+");
-        ImGui::SameLine        (   );
-        modifiers--;
-      }
-
-      ImGui::TextColored   ( ImColor::HSV (.16f, 1.f, 1.f),
-                               R"(%hs)", SK_WideCharToUTF8 (virtualToHuman [VK_MENU]).c_str () );
-
-      modifiers++;
-    }
-
-    if (config.control_panel.keys.toggle.shift)
-    {
-      if (modifiers)
-      {
-        ImGui::SameLine        (   );
-        ImGui::TextUnformatted ("+");
-        ImGui::SameLine        (   );
-        modifiers--;
-      }
-
-      ImGui::TextColored   ( ImColor::HSV (.16f, 1.f, 1.f),
-                               R"(%hs)", SK_WideCharToUTF8 (virtualToHuman [VK_SHIFT]).c_str () );
-
-      modifiers++;
-    }
-
-    if (modifiers)
-    {
-      ImGui::SameLine        (   );
-      ImGui::TextUnformatted ("+");
-      ImGui::SameLine        (   );
-    }
-
-    ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
-                               R"(%hs')", SK_WideCharToUTF8 (virtualToHuman [(BYTE)config.control_panel.keys.toggle.vKey]).c_str () );
-
-    const bool bHasControllers = 
-      (SK_ImGui_HasPlayStationController () || SK_ImGui_HasXboxController ());
-
-    if (bHasControllers && config.input.gamepad.xinput.ui_slot < 4)
-    {
-                                         ImGui::SameLine ();
-      ImGui::TextUnformatted ("  or  "); ImGui::SameLine ();
-
-      if (SK_ImGui_HasPlayStationController ())
-      {
-        ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
-                                   R"('Select)" );
-        ImGui::SameLine        ();
-        ImGui::TextUnformatted ("+");
-        ImGui::SameLine        ();
-        ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
-                                   R"(Start')" );
-        ImGui::SameLine        ();
-        ImGui::SameLine        ();
-
-        if (config.input.gamepad.scepad.enhanced_ps_button)
-        {
-          ImGui::TextUnformatted ("/");
-          ImGui::SameLine        ();
-          ImGui::TextColored     ( ImColor (255, 255, 255, 255),//ImColor (0, 112, 209, 255),
-                                  " " ICON_FA_PLAYSTATION );
-        }
-
-        else
-        {
-          ImGui::TextColored     ( ImVec4 (.75f, .75f, .75f, 1.f), " (PlayStation)");
-        }
-
-        if (SK_ImGui_HasXboxController ())
-        {                                    ImGui::SameLine ();
-          ImGui::TextUnformatted ("  or  "); ImGui::SameLine ();
-        }
-      }
-
-      if (SK_ImGui_HasXboxController ())
-      {
-        ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
-                                   R"('Back)" );
-        ImGui::SameLine        ();
-        ImGui::TextUnformatted ("+");
-        ImGui::SameLine        ();
-        ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
-                                   R"(Start')" );
-        ImGui::SameLine        ();
-        ImGui::SameLine        ();
-        if (config.input.gamepad.scepad.enhanced_ps_button)
-        {
-          ImGui::TextUnformatted ("/");
-          ImGui::SameLine        ();
-          ImGui::TextColored     ( ImColor (255, 255, 255, 255),//ImColor (14, 122, 13, 255),
-                                  " " ICON_FA_XBOX );
-        }
-
-        else
-        {
-          ImGui::TextColored     ( ImVec4 (.75f, .75f, .75f, 1.f), " (Xbox)");
-        }
-      }
-    }
-
-    ImGui::SameLine ();
-
-    ImGui::TextUnformatted (  " to open Special K's configuration menu. " );
+    ImGui::TextWrapped      ("%s", toast_copy.subheader.c_str ());
 
     ImGui::SameLine (); ImGui::Spacing     ();
     ImGui::SameLine (); ImGui::SeparatorEx (ImGuiSeparatorFlags_Vertical);
@@ -8877,7 +8903,7 @@ SK_ImGui_StageNextFrame (void)
     ImGui::SameLine ();
     ImGui::TextColored  (ImVec4 (0.999f, 0.666f, 0.333f, 1.f), ICON_FA_INFO_CIRCLE);
     ImGui::SameLine ();
-    ImGui::TextUnformatted ("Configure this Startup Banner in OSD Settings.");
+    ImGui::TextUnformatted ("Configure this Startup Banner in SidecarK.Toast.props and OSD Settings.");
 
     ImGui::End             ( );
     ImGui::PopStyleColor   (2);
