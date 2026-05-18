@@ -34,7 +34,7 @@
 
 #include <SpecialK/nvapi.h>
 
-extern bool SKC_IsOverlayEnabled();
+extern bool SKC_IsCompositingEnabled ();
 
 
 SK_TextOverlayManager*
@@ -2269,7 +2269,7 @@ SK_TextOverlayManager::resetAllOverlays (void)
 float
 SK_TextOverlayManager::drawAllOverlays (float x, float y, bool full)
 {
-  if (!SKC_IsOverlayEnabled())
+  if (!SKC_IsCompositingEnabled ())
     return 0.0f;
 
   std::scoped_lock <SK_Thread_HybridSpinlock>

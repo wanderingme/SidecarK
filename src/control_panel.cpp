@@ -25,10 +25,29 @@
 
 #include <SpecialK/control_panel.h>
  
-bool SKC_IsOverlayEnabled()
+static SKC_OverlayMode
+SKC_NormalizeOverlayMode (uint32_t overlay_mode) noexcept
 {
-  // Offset of the overlay-enabled DWORD within the SKC1 control mapping.
-  static constexpr uintptr_t kEnabledFieldOffset   = 0x08u;
+  switch (overlay_mode)
+  {
+    case 0u:
+      return SKC_OverlayMode::Off;
+
+    case 2u:
+      return SKC_OverlayMode::ToastOnly;
+
+    case 1u:
+    default:
+      return overlay_mode == 0u ? SKC_OverlayMode::Off
+                                : SKC_OverlayMode::Interactive;
+  }
+}
+
+SKC_OverlayMode
+SKC_GetOverlayMode (void)
+{
+  // Offset of the overlay-mode DWORD within the SKC1 control mapping.
+  static constexpr uintptr_t kOverlayModeFieldOffset = 0x08u;
   // How long to back off after a failed open/map/validate attempt (ms).
   static constexpr ULONGLONG kRetryBackoffMs        = 1000ull;
 
@@ -37,7 +56,7 @@ bool SKC_IsOverlayEnabled()
   // On PID change the cached handles are released and re-opened on the next call.
   static DWORD                  s_pid              = 0;
   static HANDLE                 s_hMap             = nullptr;
-  static volatile uint32_t*     s_enabledPtr       = nullptr;
+  static volatile uint32_t*     s_overlayModePtr   = nullptr;
   // Tick count of the last failed slow-path attempt.  Zero means no failure
   // has occurred yet.  The backoff check uses unsigned elapsed time so it is
   // safe across any GetTickCount64 wraparound.
@@ -50,27 +69,27 @@ bool SKC_IsOverlayEnabled()
 
   // Detect PID change (e.g. fork/re-injection): release stale handles and
   // reset the backoff so a new producer is discovered on the very next call.
-  // s_hMap and s_enabledPtr are always set/cleared together, so when
-  // s_hMap != nullptr, s_enabledPtr is guaranteed non-null.
+  // s_hMap and s_overlayModePtr are always set/cleared together, so when
+  // s_hMap != nullptr, s_overlayModePtr is guaranteed non-null.
   if (pid != s_pid)
   {
     if (s_hMap != nullptr)
     {
-      // Recover the view base (s_enabledPtr points kEnabledFieldOffset bytes in).
+      // Recover the view base (s_overlayModePtr points kOverlayModeFieldOffset bytes in).
       void* base = reinterpret_cast<void*>(
-        reinterpret_cast<uintptr_t>(s_enabledPtr) - kEnabledFieldOffset);
+        reinterpret_cast<uintptr_t>(s_overlayModePtr) - kOverlayModeFieldOffset);
       UnmapViewOfFile(base);
       CloseHandle(s_hMap);
     }
     s_hMap         = nullptr;
-    s_enabledPtr   = nullptr;
+    s_overlayModePtr = nullptr;
     s_last_fail_ms = 0;
     s_pid          = pid;
   }
 
   // Fast path: mapping already open — single volatile read, zero system calls.
-  if (s_enabledPtr != nullptr)
-    return (*s_enabledPtr) != 0u;
+  if (s_overlayModePtr != nullptr)
+    return SKC_NormalizeOverlayMode (*s_overlayModePtr);
 
   // Backoff gate: if the last open attempt failed recently, do not retry yet.
   // Uses unsigned elapsed time (now - last_fail) so it is wraparound-safe.
@@ -78,7 +97,7 @@ bool SKC_IsOverlayEnabled()
   // every input event when the producer is absent.
   const ULONGLONG now_ms = GetTickCount64();
   if (s_last_fail_ms != 0 && (now_ms - s_last_fail_ms) < kRetryBackoffMs)
-    return false;
+    return SKC_OverlayMode::Off;
 
   // Slow path: one non-blocking attempt to open the mapping.
   // On any failure, record the timestamp and return false immediately.
@@ -89,7 +108,7 @@ bool SKC_IsOverlayEnabled()
   if (!hMap)
   {
     s_last_fail_ms = now_ms;
-    return false;
+    return SKC_OverlayMode::Off;
   }
 
   void* view = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 4096);
@@ -97,7 +116,7 @@ bool SKC_IsOverlayEnabled()
   {
     CloseHandle(hMap);
     s_last_fail_ms = now_ms;
-    return false;
+    return SKC_OverlayMode::Off;
   }
 
   BYTE* base = reinterpret_cast<BYTE*>(view);
@@ -108,16 +127,34 @@ bool SKC_IsOverlayEnabled()
     UnmapViewOfFile(view);
     CloseHandle(hMap);
     s_last_fail_ms = now_ms;
-    return false;
+    return SKC_OverlayMode::Off;
   }
 
-  // Success: cache the mapping and its enabled-field pointer.
+  // Success: cache the mapping and its overlay-mode field pointer.
   // Clear the failure timestamp so that future PID resets start fresh.
   s_last_fail_ms = 0;
   s_hMap         = hMap;
-  s_enabledPtr   = reinterpret_cast<volatile uint32_t*>(base + kEnabledFieldOffset);
+  s_overlayModePtr = reinterpret_cast<volatile uint32_t*>(base + kOverlayModeFieldOffset);
 
-  return (*s_enabledPtr) != 0u;
+  return SKC_NormalizeOverlayMode (*s_overlayModePtr);
+}
+
+bool
+SKC_IsCompositingEnabled (void)
+{
+  return SKC_GetOverlayMode () != SKC_OverlayMode::Off;
+}
+
+bool
+SKC_IsInputCaptureEnabled (void)
+{
+  return SKC_GetOverlayMode () == SKC_OverlayMode::Interactive;
+}
+
+bool
+SKC_IsOverlayEnabled (void)
+{
+  return SKC_IsInputCaptureEnabled ();
 }
 
 
@@ -9425,7 +9462,7 @@ SK_ImGui_DrawFrame ( _Unreferenced_parameter_ DWORD  dwFlags,
   UNREFERENCED_PARAMETER (dwFlags);
   UNREFERENCED_PARAMETER (lpUser);
 
-  if (! SKC_IsOverlayEnabled ())
+  if (! SKC_IsCompositingEnabled ())
   {
     lock.unlock ();
     return 0;

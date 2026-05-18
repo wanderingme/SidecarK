@@ -31,8 +31,8 @@
 #endif
 #define __SK_SUBSYSTEM__ L"Input Mgr."
 
-// Overlay-active query: when true, cursor re-centering must be suppressed.
-extern bool SKC_IsOverlayEnabled ();
+// Interactive overlay query: when true, cursor re-centering must be suppressed.
+extern bool SKC_IsInputCaptureEnabled ();
 
 bool
 SK_InputUtil_IsHWCursorVisible (void)
@@ -1186,7 +1186,7 @@ GetCursorPos_Detour (LPPOINT lpPoint)
   if (lpPoint == nullptr)
     return FALSE;
 
-  if (SKC_IsOverlayEnabled ())
+  if (SKC_IsInputCaptureEnabled ())
   {
     *lpPoint = s_GameSetCursorPos;
     return TRUE;
@@ -1367,7 +1367,7 @@ SetCursorPos_Detour (_In_ int x, _In_ int y)
 
   // While overlay is active, block cursor re-centering so the game cannot
   // pin/lock the cursor to a position.
-  if (SKC_IsOverlayEnabled ())
+  if (SKC_IsInputCaptureEnabled ())
     return TRUE;
 
   // Don't let the game continue moving the cursor while

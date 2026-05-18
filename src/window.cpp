@@ -1856,8 +1856,8 @@ SK_Input_RestoreClipRect (void)
   return __SK_BackupClipRectStorage;
 }
 
-// Forward declaration for SKC_IsOverlayEnabledCached defined later in this TU.
-static bool SKC_IsOverlayEnabledCached ();
+// Forward declaration for SKC_IsInputCaptureEnabledCached defined later in this TU.
+static bool SKC_IsInputCaptureEnabledCached ();
 
 // Forward declaration for SKI1 input forwarder used in PeekMessage detours.
 static void SKI1_ForwardMsgFromQueue (const MSG& msg);
@@ -1871,9 +1871,9 @@ ClipCursor_Detour (const RECT *lpRect)
   // While overlay is active, always unclip so the cursor can move freely.
   // Use SK_ClipCursor (not ClipCursor_Original directly) so that the dedup
   // cache in SK_ClipCursor tracks "null / unconfined" state.  This is required
-  // so that the ON→OFF transition restore in SKC_IsOverlayEnabledCached will
+  // so that the ON→OFF transition restore in SKC_IsInputCaptureEnabledCached will
   // find lastRect != game_window.cursor_clip and actually issue the OS call.
-  if (SKC_IsOverlayEnabledCached ())
+  if (SKC_IsInputCaptureEnabledCached ())
     return SK_ClipCursor (nullptr);
 
   SK_LOGi4 (L"ClipCursor (...) - Frame=%d", sk::narrow_cast <int> (SK_GetFramesDrawn ()));
@@ -4968,7 +4968,7 @@ PeekMessageA_Detour (
     // When overlay is active, null out keyboard/mouse/raw-input in the MSG
     // before the game can read msg.message/lParam directly (covers both
     // PM_REMOVE and PM_NOREMOVE call patterns).
-    if (SKC_IsOverlayEnabledCached ())
+    if (SKC_IsInputCaptureEnabledCached ())
     {
       if ( (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) ||
            (msg.message >= WM_KEYFIRST   && msg.message <= WM_KEYLAST)   ||
@@ -5090,7 +5090,7 @@ PeekMessageW_Detour (
     // When overlay is active, null out keyboard/mouse/raw-input in the MSG
     // before the game can read msg.message/lParam directly (covers both
     // PM_REMOVE and PM_NOREMOVE call patterns).
-    if (SKC_IsOverlayEnabledCached ())
+    if (SKC_IsInputCaptureEnabledCached ())
     {
       if ( (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) ||
            (msg.message >= WM_KEYFIRST   && msg.message <= WM_KEYLAST)   ||
@@ -5138,7 +5138,7 @@ PostMessageA_Detour (HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
   SK_LOG_FIRST_CALL
 
-  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsOverlayEnabledCached ()))
+  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsInputCaptureEnabledCached ()))
     return TRUE;
 
   return
@@ -5151,7 +5151,7 @@ PostMessageW_Detour (HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
   SK_LOG_FIRST_CALL
 
-  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsOverlayEnabledCached ()))
+  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsInputCaptureEnabledCached ()))
     return TRUE;
 
   return
@@ -5164,7 +5164,7 @@ SendMessageA_Detour (HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
   SK_LOG_FIRST_CALL
 
-  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsOverlayEnabledCached ()))
+  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsInputCaptureEnabledCached ()))
     return TRUE;
 
   return
@@ -5177,7 +5177,7 @@ SendMessageW_Detour (HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
   SK_LOG_FIRST_CALL
 
-  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsOverlayEnabledCached ()))
+  if (Msg == WM_MOUSEMOVE && (SK_ImGui_Active () || SK_ImGui_WantMouseCapture () || SKC_IsInputCaptureEnabledCached ()))
     return TRUE;
 
   return
@@ -5905,7 +5905,7 @@ SK_Win32_IgnoreSysCommand (HWND hWnd, WPARAM wParam, LPARAM lParam);
 // ---------------------------------------------------------------------------
 // Overlay input capture helpers (SKI1 versioned protocol)
 // ---------------------------------------------------------------------------
-extern bool SKC_IsOverlayEnabled ();
+extern bool SKC_IsInputCaptureEnabled ();
 
 #pragma pack(push, 1)
 // Frame header sent before every payload
@@ -6225,7 +6225,7 @@ static void SKI1_ForwardMsgFromQueue (const MSG& msg)
     SKI1_SendRawInput (msg.lParam);
 }
 
-static bool SKC_IsOverlayEnabledCached ()
+static bool SKC_IsInputCaptureEnabledCached ()
 {
   static bool      s_val = false;
   static ULONGLONG s_ts  = 0;
@@ -6233,7 +6233,7 @@ static bool SKC_IsOverlayEnabledCached ()
   if (now - s_ts >= 16u)
   {
     s_ts       = now;
-    bool s_new = SKC_IsOverlayEnabled ();
+    bool s_new = SKC_IsInputCaptureEnabled ();
     if (s_val && !s_new)
     {
       // Overlay just turned OFF: restore the cursor clip the game had set.
@@ -6280,7 +6280,7 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
   if ((uMsg >= WM_KEYFIRST   && uMsg <= WM_KEYLAST) ||
       (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST))
   {
-    const bool bOverlayActive         = SKC_IsOverlayEnabledCached ();
+    const bool bOverlayActive         = SKC_IsInputCaptureEnabledCached ();
     const bool bIgnoreKeyboard        = bIgnoreKeyboardAndMouse || SK_ImGui_WantKeyboardCapture () || bOverlayActive;
     const bool bIgnoreMouse           = bIgnoreKeyboardAndMouse || SK_ImGui_WantMouseCapture    () || bOverlayActive;
     const bool bIgnoreKeyboardOrMouse = bIgnoreKeyboard         || bIgnoreMouse;
@@ -7225,7 +7225,7 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
 
   // Overlay input capture: when overlay is active, swallow game input and
   //   forward intercepted events to the named event pipe.
-  if (hWnd == game_window.hWnd && SKC_IsOverlayEnabledCached ())
+  if (hWnd == game_window.hWnd && SKC_IsInputCaptureEnabledCached ())
   {
     switch (uMsg)
     {

@@ -29,7 +29,7 @@
 #endif
 #define __SK_SUBSYSTEM__ L"Input Mgr."
 
-extern bool SKC_IsOverlayEnabled ();
+extern bool SKC_IsInputCaptureEnabled ();
 
 //////////////////////////////////////////////////////////////////////////////////
 //
@@ -743,7 +743,7 @@ GetRawInputBuffer_Detour (_Out_opt_ PRAWINPUT pData,
 {
   SK_LOG_FIRST_CALL
 
-  if (SKC_IsOverlayEnabled ())
+  if (SKC_IsInputCaptureEnabled ())
   {
     if (pcbSize) *pcbSize = 0;
     return 0;
@@ -950,7 +950,7 @@ GetRawInputData_Detour (_In_      HRAWINPUT hRawInput,
 {
   SK_LOG_FIRST_CALL
 
-  if (SKC_IsOverlayEnabled ())
+  if (SKC_IsInputCaptureEnabled ())
   {
     if (pcbSize) *pcbSize = 0;
     return 0;

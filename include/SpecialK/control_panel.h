@@ -53,6 +53,17 @@ namespace SK
 
 DWORD SK_GetCurrentMS (void) noexcept;
 
+enum class SKC_OverlayMode : unsigned int
+{
+  Off         = 0u,
+  Interactive = 1u,
+  ToastOnly   = 2u
+};
+
+SKC_OverlayMode SKC_GetOverlayMode        (void);
+bool            SKC_IsCompositingEnabled  (void);
+bool            SKC_IsInputCaptureEnabled (void);
+
 void SK_ImGui_Warning          (const wchar_t* wszMessage);
 void SK_ImGui_WarningWithTitle (const wchar_t* wszMessage,
                                 const wchar_t* wszTitle);

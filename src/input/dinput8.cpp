@@ -53,7 +53,7 @@ using finish_pfn = void (WINAPI *)(void);
 }
 
 // Overlay-active check: when true, all keyboard/mouse input must be suppressed.
-extern bool SKC_IsOverlayEnabled ();
+extern bool SKC_IsInputCaptureEnabled ();
 
 ///////////////////////////////////////////////////////////////////////////////
 //
@@ -1126,7 +1126,7 @@ IDirectInputDevice8_GetDeviceState_Detour ( LPDIRECTINPUTDEVICE8 This,
 
   // While overlay is active, neutralize keyboard and mouse state so the
   // game cannot react to movement or key input via DirectInput polling.
-  if (lpvData != nullptr && SKC_IsOverlayEnabled ())
+  if (lpvData != nullptr && SKC_IsInputCaptureEnabled ())
   {
     if ( cbData == 256                   ||   // keyboard scan-code array
          cbData == sizeof (DIMOUSESTATE) ||
@@ -1543,7 +1543,7 @@ IDirectInputDevice8W_GetDeviceData_Detour ( LPDIRECTINPUTDEVICE8W  This,
   const bool isKbOrMouse = ( (LPDIRECTINPUTDEVICE8W)This == _dik8->pDev ||
                               (LPDIRECTINPUTDEVICE8W)This == _dim8->pDev );
 
-  if (isKbOrMouse && SKC_IsOverlayEnabled ())
+  if (isKbOrMouse && SKC_IsInputCaptureEnabled ())
   {
     if (pdwInOut != nullptr)
       *pdwInOut = 0;
@@ -1565,7 +1565,7 @@ IDirectInputDevice8A_GetDeviceData_Detour ( LPDIRECTINPUTDEVICE8A  This,
   const bool isKbOrMouse = ( (LPDIRECTINPUTDEVICE8W)This == _dik8->pDev ||
                               (LPDIRECTINPUTDEVICE8W)This == _dim8->pDev );
 
-  if (isKbOrMouse && SKC_IsOverlayEnabled ())
+  if (isKbOrMouse && SKC_IsInputCaptureEnabled ())
   {
     if (pdwInOut != nullptr)
       *pdwInOut = 0;

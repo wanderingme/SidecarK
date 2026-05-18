@@ -33,7 +33,7 @@
 #include <SpecialK/control_panel/platform.h>
 #include <ReShade/reshade.hpp>
 
-extern bool SKC_IsOverlayEnabled ();
+extern bool SKC_IsInputCaptureEnabled ();
 
 bool
 SK_ImGui_ExemptOverlaysFromKeyboardCapture (void)
@@ -430,7 +430,7 @@ SK_GetSharedKeyState_Impl (int vKey, GetAsyncKeyState_pfn pfnGetFunc)
   if (pfnGetFunc == nullptr)
     return 0;
 
-  if (SKC_IsOverlayEnabled ())
+  if (SKC_IsInputCaptureEnabled ())
     return 0;
 
   auto SK_ConsumeVKey = [&](int vKey) ->
@@ -571,7 +571,7 @@ GetKeyboardState_Detour (PBYTE lpKeyState)
 {
   SK_LOG_FIRST_CALL
 
-  if (SKC_IsOverlayEnabled ())
+  if (SKC_IsInputCaptureEnabled ())
   {
     if (lpKeyState) RtlZeroMemory (lpKeyState, 256);
     return TRUE;

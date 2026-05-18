@@ -455,11 +455,18 @@ static std::atomic_bool g_attach_confirmed{ false };
 static std::atomic_bool g_dll_ready_idle{ false };
 static bool g_frame_source_seen = false;
 
+enum class SidecarKOverlayMode : uint32_t
+{
+  Off         = 0u,
+  Interactive = 1u,
+  ToastOnly   = 2u
+};
+
 static DWORD g_host_pid = 0;
 
 static HANDLE g_control_map = nullptr;
 static void* g_control_view = nullptr;
-static volatile uint32_t* g_control_overlay_enabled = nullptr;
+static volatile uint32_t* g_control_overlay_mode = nullptr;
 static HANDLE g_control_pipe_thread = nullptr;
 static HANDLE g_input_pipe_thread   = nullptr;
 
@@ -1509,7 +1516,7 @@ static bool InitSidecarKControlPlaneForPid(DWORD pid)
   if (pid == 0)
     return false;
 
-  if (g_control_map != nullptr && g_control_view != nullptr && g_control_overlay_enabled != nullptr)
+  if (g_control_map != nullptr && g_control_view != nullptr && g_control_overlay_mode != nullptr)
     return true;
 
   wchar_t name[128]{};
@@ -1529,16 +1536,16 @@ static bool InitSidecarKControlPlaneForPid(DWORD pid)
 
   BYTE* base = reinterpret_cast<BYTE*>(g_control_view);
   uint32_t* ver = reinterpret_cast<uint32_t*>(base + 0x04);
-  uint32_t* overlay_enabled = reinterpret_cast<uint32_t*>(base + 0x08);
+  uint32_t* overlay_mode = reinterpret_cast<uint32_t*>(base + 0x08);
 
   if (memcmp(base + 0x00, "SKC1", 4) != 0 || *ver != 1u)
   {
     memcpy(base + 0x00, "SKC1", 4);
     *ver = 1u;
-    *overlay_enabled = 0u;
+    *overlay_mode = static_cast<uint32_t>(SidecarKOverlayMode::Off);
   }
 
-  g_control_overlay_enabled = reinterpret_cast<volatile uint32_t*>(overlay_enabled);
+  g_control_overlay_mode = reinterpret_cast<volatile uint32_t*>(overlay_mode);
   return true;
 }
 
@@ -1551,7 +1558,7 @@ static void ShutdownSidecarKControlPlane()
     g_control_pipe_thread = nullptr;
   }
 
-  g_control_overlay_enabled = nullptr;
+  g_control_overlay_mode = nullptr;
 
   if (g_control_view)
   {
@@ -1566,7 +1573,7 @@ static void ShutdownSidecarKControlPlane()
   }
 }
 
-static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t* overlayEnabled, DWORD targetPid)
+static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t* overlayMode, DWORD targetPid)
 {
   while (!g_shutdown.load())
   {
@@ -1647,12 +1654,17 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
     {
       if (_stricmp(cmd, "overlay on") == 0)
       {
-        if (overlayEnabled) *overlayEnabled = 1u;
+        if (overlayMode) *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::Interactive);
+        resp = "ok\n"; respLen = 3;
+      }
+      else if (_stricmp(cmd, "overlay toast") == 0)
+      {
+        if (overlayMode) *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::ToastOnly);
         resp = "ok\n"; respLen = 3;
       }
       else if (_stricmp(cmd, "overlay off") == 0)
       {
-        if (overlayEnabled) *overlayEnabled = 0u;
+        if (overlayMode) *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::Off);
         resp = "ok\n"; respLen = 3;
       }
       else if (_stricmp(cmd, "ping") == 0)
@@ -1663,7 +1675,7 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
       {
         const bool attached   = g_attach_confirmed.load();
         const char* stateStr  = attached ? "attached" : "idle";
-        const uint32_t ovVal = (overlayEnabled && *overlayEnabled) ? 1u : 0u;
+        const uint32_t ovVal = (overlayMode != nullptr) ? *overlayMode : 0u;
         const SidecarKFrameHeaderV1* hostHdr = (g_frame_host_view != nullptr)
           ? reinterpret_cast<const SidecarKFrameHeaderV1*>(g_frame_host_view)
           : nullptr;
@@ -2568,7 +2580,7 @@ int wmain(int argc, wchar_t** argv)
     return ATTACH_FAILED;
   }
 
-  if (g_control_overlay_enabled != nullptr)
+  if (g_control_overlay_mode != nullptr)
   {
     const std::wstring controlPipeName = ControlPipeNameForTarget(targetPid);
     g_control_pipe_thread = CreateThread(
@@ -2579,7 +2591,7 @@ int wmain(int argc, wchar_t** argv)
         delete ctx;
         return 0;
       },
-      new std::tuple<std::wstring, volatile uint32_t*, DWORD>(controlPipeName, g_control_overlay_enabled, targetPid),
+      new std::tuple<std::wstring, volatile uint32_t*, DWORD>(controlPipeName, g_control_overlay_mode, targetPid),
       0, nullptr
     );
   }
@@ -2719,7 +2731,7 @@ int wmain(int argc, wchar_t** argv)
   // Wait for DLL_READY_IDLE from injected DLL (up to 10 seconds).
   // The DLL sends this once it has loaded and essential hooks are installed.
   // Only applicable when the control pipe server is running.
-  if (g_control_overlay_enabled != nullptr)
+  if (g_control_overlay_mode != nullptr)
   {
     AppendLogf(logPath, L"dll_ready_idle_wait_start ts=%llu", (unsigned long long)GetTickCount64());
     HostLogAppendf(L"dll_ready_idle_wait_start ts=%llu", (unsigned long long)GetTickCount64());
