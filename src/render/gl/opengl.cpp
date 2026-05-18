@@ -2372,6 +2372,370 @@ SK_GL_CheckSRGB (DXGI_FORMAT* fmt = nullptr)
 
 
 BOOL
+SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc);
+
+// ---------------------------------------------------------------------------
+// SK_GL_DrawToastIfActive
+//
+// Standalone, render-only toast HUD draw for the OpenGL present path.
+// Runs UNCONDITIONALLY in every SwapBuffers/wglSwapBuffers call regardless
+// of:
+//   - SKF1 producer mapping readiness (Local\SidecarK_Frame_v1_<pid>)
+//   - overlay_enabled (control-plane bit)
+//   - SK_GL_OnD3D11 / pSwapChain / fullscreen-shape heuristics
+//   - any Producer / CEF / React / SKF1 frame data
+//
+// The only state it reads is the SidecarK control plane (Local\SidecarK_Control_<pid>,
+// SKC1 v1 toast sub-block: seq, expires_ms, text_len, UTF-8 text).  If that
+// map is not yet present, the function silently no-ops with a once-per-second
+// retry — it never blocks or logs per-frame.
+//
+// Uses GetClientRect(WindowFromDC(hDC)) for viewport sizing — does NOT rely
+// on SKF1 header w/h/stride fields.
+//
+// Independent of the in-SKF1-fallback toast block below; uses dedicated
+// static state so the two paths never interfere.
+// ---------------------------------------------------------------------------
+static void SK_GL_DrawToastIfActive (HDC hDC)
+{
+  if (hDC == nullptr)
+    return;
+
+  // Require an active GL context; this function may be called before any
+  // wglMakeCurrent on rare HDC-only paths (e.g. compatible DC swap).
+  if (wglGetCurrentContext () == nullptr)
+    return;
+
+  // Skip diagnostic short-circuit: SidecarK_DiagnosticsEnabled gates only the
+  // .log file writes.  The toast draw itself is unconditional.
+
+  // ---- Control-plane state (own, not shared with SKF1 fallback) -----------
+  static DWORD               s_pid          = 0;
+  static HANDLE              s_hCtrl        = nullptr;
+  static uint8_t*            s_ctrlBase     = nullptr;
+  static volatile LONG*      s_seqPtr       = nullptr;
+  static volatile uint64_t*  s_expiresPtr   = nullptr;
+  static volatile LONG*      s_textLenPtr   = nullptr;
+  static const uint8_t*      s_textPtr      = nullptr;
+  static ULONGLONG           s_lastAttempt  = 0;
+  static bool                s_loggedOpen   = false;
+
+  // ---- Cached GPU resources (rebuilt lazily; do not reset on PID change) --
+  static GLuint              s_tex          = 0;
+  static GLuint              s_prog         = 0;
+  static GLuint              s_vao          = 0;
+  static GLuint              s_vbo          = 0;
+  static GLuint              s_ibo          = 0;
+  static GLint               s_uTex         = -1;
+  static GLint               s_uRect        = -1;
+  static LONG                s_texSeq       = 0;
+  static std::vector<uint8_t> s_bitmap;
+  static bool                s_progFailed   = false;
+
+  const DWORD pidNow = GetCurrentProcessId ();
+  if (s_pid != pidNow)
+  {
+    if (s_ctrlBase != nullptr) { UnmapViewOfFile (s_ctrlBase); s_ctrlBase = nullptr; }
+    if (s_hCtrl    != nullptr) { CloseHandle     (s_hCtrl);    s_hCtrl    = nullptr; }
+    s_seqPtr      = nullptr;
+    s_expiresPtr  = nullptr;
+    s_textLenPtr  = nullptr;
+    s_textPtr     = nullptr;
+    s_pid         = pidNow;
+    s_lastAttempt = 0;
+    s_loggedOpen  = false;
+  }
+
+  if (s_seqPtr == nullptr)
+  {
+    const ULONGLONG nowMs = GetTickCount64 ();
+    if (nowMs - s_lastAttempt < 1000ull)
+      return;
+    s_lastAttempt = nowMs;
+
+    wchar_t name [64] = { };
+    wsprintfW (name, L"Local\\SidecarK_Control_%lu", (unsigned long)pidNow);
+
+    HANDLE h = OpenFileMappingW (FILE_MAP_READ, FALSE, name);
+    if (h == nullptr) return;
+
+    uint8_t* base = (uint8_t *)MapViewOfFile (h, FILE_MAP_READ, 0, 0, 0);
+    if (base == nullptr) { CloseHandle (h); return; }
+
+    char sig [4] = { };
+    memcpy (sig, base, sizeof (sig));
+    const uint32_t ver = *reinterpret_cast<const uint32_t *> (base + 0x04);
+    if (memcmp (sig, "SKC1", 4) != 0 || ver != 1u)
+    {
+      UnmapViewOfFile (base);
+      CloseHandle     (h);
+      return;
+    }
+
+    s_hCtrl       = h;
+    s_ctrlBase    = base;
+    s_seqPtr      = reinterpret_cast<volatile LONG *>     (base + 0x10);
+    s_expiresPtr  = reinterpret_cast<volatile uint64_t *> (base + 0x14);
+    s_textLenPtr  = reinterpret_cast<volatile LONG *>     (base + 0x1C);
+    s_textPtr     = base + 0x24;
+
+    if (! s_loggedOpen)
+    {
+      s_loggedOpen = true;
+      OutputDebugStringW (L"SidecarK: GL toast control-map bound\n");
+    }
+  }
+
+  if (s_seqPtr == nullptr)
+    return;
+
+  // ---- Seq-lock snapshot ---------------------------------------------------
+  LONG     seq_a   = *s_seqPtr;
+  uint64_t expires = 0;
+  LONG     text_len = 0;
+  char     text_buf [512] = { };
+  for (int attempt = 0; attempt < 4; ++attempt)
+  {
+    _ReadBarrier ();
+    expires  = *s_expiresPtr;
+    text_len = *s_textLenPtr;
+    LONG copy = text_len;
+    if (copy < 0) copy = 0;
+    if (copy > (LONG)(sizeof (text_buf) - 1u))
+      copy = (LONG)(sizeof (text_buf) - 1u);
+    if (copy > 0 && s_textPtr != nullptr)
+      memcpy (text_buf, s_textPtr, (size_t)copy);
+    text_buf [copy > 0 ? copy : 0] = '\0';
+    _ReadBarrier ();
+    const LONG seq_b = *s_seqPtr;
+    if (seq_b == seq_a) break;
+    seq_a = seq_b;
+  }
+
+  LONG safe_text = text_len;
+  if (safe_text < 0) safe_text = 0;
+  if (safe_text > (LONG)(sizeof (text_buf) - 1u))
+    safe_text = (LONG)(sizeof (text_buf) - 1u);
+
+  const ULONGLONG nowMs = GetTickCount64 ();
+  const bool active = (seq_a != 0) && (nowMs < expires) && (safe_text > 0);
+  if (! active)
+    return;
+
+  // ---- Viewport dimensions from the GL surface ---------------------------
+  HWND hWnd = WindowFromDC (hDC);
+  RECT rcCl = { };
+  GLsizei vw = 0, vh = 0;
+  if (hWnd != nullptr && GetClientRect (hWnd, &rcCl) &&
+      rcCl.right > rcCl.left && rcCl.bottom > rcCl.top)
+  {
+    vw = (GLsizei)(rcCl.right  - rcCl.left);
+    vh = (GLsizei)(rcCl.bottom - rcCl.top);
+  }
+  else
+  {
+    // Fall back to current GL viewport.
+    GLint vp [4] = { };
+    glGetIntegerv (GL_VIEWPORT, vp);
+    vw = vp [2];
+    vh = vp [3];
+  }
+  if (vw <= 0 || vh <= 0)
+    return;
+
+  uint32_t dst_x = 0, dst_y = 0;
+  if (! SK_Toast::ComputeDestRect ((uint32_t)vw, (uint32_t)vh, dst_x, dst_y))
+    return;
+
+  // ---- Rasterize once per toast_seq ---------------------------------------
+  if (s_texSeq != seq_a || s_bitmap.empty ())
+  {
+    SK_Toast::Rasterize (text_buf, (uint32_t)safe_text, s_bitmap);
+    s_texSeq = seq_a;
+
+    if (s_tex == 0) glGenTextures (1, &s_tex);
+    if (s_tex != 0)
+    {
+      GLint prev_t2d = 0, prev_unpack = 0;
+      glGetIntegerv (GL_TEXTURE_BINDING_2D, &prev_t2d);
+      glGetIntegerv (GL_UNPACK_ALIGNMENT,   &prev_unpack);
+      glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
+      glBindTexture (GL_TEXTURE_2D, s_tex);
+      glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
+      glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
+      glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
+                    (GLsizei)SK_Toast::kSurfaceWidth,
+                    (GLsizei)SK_Toast::kSurfaceHeight, 0,
+                    GL_BGRA, GL_UNSIGNED_BYTE,
+                    s_bitmap.data ());
+      glPixelStorei (GL_UNPACK_ALIGNMENT, prev_unpack);
+      glBindTexture (GL_TEXTURE_2D, (GLuint)prev_t2d);
+    }
+  }
+
+  // ---- Lazy shader/geometry init ------------------------------------------
+  if (s_prog == 0 && ! s_progFailed)
+  {
+    const char* vs_src =
+      "#version 130\n"
+      "in vec2 aUV;\n"
+      "uniform vec4 uRect;\n"
+      "out vec2 vUV;\n"
+      "void main(){\n"
+      "  vec2 pos = mix(uRect.xy, uRect.zw, aUV);\n"
+      "  vUV = vec2(aUV.x, 1.0 - aUV.y);\n"
+      "  gl_Position = vec4(pos, 0.0, 1.0);\n"
+      "}\n";
+    const char* fs_src =
+      "#version 130\n"
+      "uniform sampler2D uTex;\n"
+      "in vec2 vUV;\n"
+      "out vec4 oColor;\n"
+      "void main(){ oColor = texture(uTex, vUV); }\n";
+
+    GLuint vsh = glCreateShader (GL_VERTEX_SHADER);
+    glShaderSource  (vsh, 1, &vs_src, nullptr);
+    glCompileShader (vsh);
+    GLint vs_ok = GL_FALSE;
+    glGetShaderiv (vsh, GL_COMPILE_STATUS, &vs_ok);
+
+    GLuint fsh = glCreateShader (GL_FRAGMENT_SHADER);
+    glShaderSource  (fsh, 1, &fs_src, nullptr);
+    glCompileShader (fsh);
+    GLint fs_ok = GL_FALSE;
+    glGetShaderiv (fsh, GL_COMPILE_STATUS, &fs_ok);
+
+    if (vs_ok == GL_TRUE && fs_ok == GL_TRUE)
+    {
+      GLuint prog = glCreateProgram ();
+      glAttachShader       (prog, vsh);
+      glAttachShader       (prog, fsh);
+      glBindAttribLocation (prog, 0, "aUV");
+      glLinkProgram        (prog);
+      GLint link_ok = GL_FALSE;
+      glGetProgramiv (prog, GL_LINK_STATUS, &link_ok);
+      if (link_ok == GL_TRUE)
+      {
+        s_prog   = prog;
+        s_uTex   = glGetUniformLocation (prog, "uTex");
+        s_uRect  = glGetUniformLocation (prog, "uRect");
+      }
+      else
+      {
+        glDeleteProgram (prog);
+        s_progFailed = true;
+      }
+    }
+    else
+    {
+      s_progFailed = true;
+    }
+
+    glDeleteShader (vsh);
+    glDeleteShader (fsh);
+
+    if (s_prog != 0)
+    {
+      const float quad_uvs [8] = {
+        0.0f, 0.0f,  1.0f, 0.0f,  1.0f, 1.0f,  0.0f, 1.0f
+      };
+      const uint16_t quad_idx [6] = { 0, 1, 2, 0, 2, 3 };
+
+      glGenVertexArrays (1, &s_vao);
+      glGenBuffers      (1, &s_vbo);
+      glGenBuffers      (1, &s_ibo);
+      glBindVertexArray (s_vao);
+      glBindBuffer      (GL_ARRAY_BUFFER,         s_vbo);
+      glBufferData      (GL_ARRAY_BUFFER,         sizeof (quad_uvs), quad_uvs, GL_STATIC_DRAW);
+      glBindBuffer      (GL_ELEMENT_ARRAY_BUFFER, s_ibo);
+      glBufferData      (GL_ELEMENT_ARRAY_BUFFER, sizeof (quad_idx), quad_idx, GL_STATIC_DRAW);
+      glEnableVertexAttribArray (0);
+      glVertexAttribPointer     (0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof (float), (void *)0);
+      glBindVertexArray (0);
+      glBindBuffer      (GL_ARRAY_BUFFER,         0);
+      glBindBuffer      (GL_ELEMENT_ARRAY_BUFFER, 0);
+    }
+  }
+
+  if (s_progFailed || s_prog == 0 || s_tex == 0)
+    return;
+
+  // ---- Save GL state, draw toast quad to FBO 0, restore -------------------
+  GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
+  GLint     sv_active  = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &sv_active);
+  GLint     sv_tex2d   = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &sv_tex2d);
+  GLint     sv_vao     = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &sv_vao);
+  GLint     sv_arr     = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &sv_arr);
+  GLint     sv_elem    = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &sv_elem);
+  GLint     sv_fbo     = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &sv_fbo);
+  GLint     sv_vp [4]  = { }; glGetIntegerv (GL_VIEWPORT,    sv_vp);
+  GLint     sv_sci [4] = { }; glGetIntegerv (GL_SCISSOR_BOX, sv_sci);
+  GLboolean sv_cmask [4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+  glGetBooleanv (GL_COLOR_WRITEMASK, sv_cmask);
+  const GLboolean sv_scissor = glIsEnabled (GL_SCISSOR_TEST);
+  const GLboolean sv_blend   = glIsEnabled (GL_BLEND);
+  const GLboolean sv_depth   = glIsEnabled (GL_DEPTH_TEST);
+  const GLboolean sv_stencil = glIsEnabled (GL_STENCIL_TEST);
+  const GLboolean sv_cull    = glIsEnabled (GL_CULL_FACE);
+  const GLboolean sv_srgb    = glIsEnabled (GL_FRAMEBUFFER_SRGB);
+
+  glBindFramebuffer (GL_FRAMEBUFFER, 0);
+  if (sv_scissor) glDisable (GL_SCISSOR_TEST);
+  if (sv_depth)   glDisable (GL_DEPTH_TEST);
+  if (sv_stencil) glDisable (GL_STENCIL_TEST);
+  if (sv_cull)    glDisable (GL_CULL_FACE);
+  if (sv_blend)   glDisable (GL_BLEND);
+  // Disable sRGB conversion so our authored 8-bit BGRA doesn't get gamma-shifted.
+  if (sv_srgb)    glDisable (GL_FRAMEBUFFER_SRGB);
+  glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+  glViewport (0, 0, vw, vh);
+
+  const float fx0 = (float)dst_x;
+  const float fx1 = (float)dst_x + (float)SK_Toast::kSurfaceWidth;
+  const float fy0 = (float)dst_y;
+  const float fy1 = (float)dst_y + (float)SK_Toast::kSurfaceHeight;
+  const float nx0 = (fx0 / (float)vw) * 2.0f - 1.0f;
+  const float nx1 = (fx1 / (float)vw) * 2.0f - 1.0f;
+  // Pixel y=0 is top (Win32 client-rect convention); NDC y=+1 is top.
+  const float ny1 = 1.0f - (fy0 / (float)vh) * 2.0f;
+  const float ny0 = 1.0f - (fy1 / (float)vh) * 2.0f;
+
+  glUseProgram    (s_prog);
+  glActiveTexture (GL_TEXTURE0);
+  glBindTexture   (GL_TEXTURE_2D, s_tex);
+  if (s_uTex  >= 0) glUniform1i (s_uTex, 0);
+  if (s_uRect >= 0) glUniform4f (s_uRect, nx0, ny0, nx1, ny1);
+  glBindVertexArray (s_vao);
+  glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
+
+  // Restore.
+  glBindVertexArray  ((GLuint)sv_vao);
+  glBindBuffer       (GL_ARRAY_BUFFER,         (GLuint)sv_arr);
+  glBindBuffer       (GL_ELEMENT_ARRAY_BUFFER, (GLuint)sv_elem);
+  glUseProgram       ((GLuint)sv_prog);
+  glActiveTexture    ((GLenum)sv_active);
+  glBindTexture      (GL_TEXTURE_2D, (GLuint)sv_tex2d);
+  glBindFramebuffer  (GL_FRAMEBUFFER, (GLuint)sv_fbo);
+  glViewport         (sv_vp [0], sv_vp [1], sv_vp [2], sv_vp [3]);
+  glColorMask        (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
+  if (sv_blend)   glEnable  (GL_BLEND);    else glDisable (GL_BLEND);
+  if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
+  if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
+  if (sv_cull)    glEnable  (GL_CULL_FACE);    else glDisable (GL_CULL_FACE);
+  if (sv_srgb)    glEnable  (GL_FRAMEBUFFER_SRGB); else glDisable (GL_FRAMEBUFFER_SRGB);
+  if (sv_scissor)
+  {
+    glEnable  (GL_SCISSOR_TEST);
+    glScissor (sv_sci [0], sv_sci [1], sv_sci [2], sv_sci [3]);
+  }
+  else
+    glDisable (GL_SCISSOR_TEST);
+}
+
+BOOL
 SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 {
   static LONG s_calls = 0;
@@ -2690,6 +3054,17 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
            WindowFromDC  (hDC);
 
 //assert (hDC == pTLS->gl.current_hdc);
+
+  // ---------------------------------------------------------------------------
+  // SidecarK toast HUD — runs UNCONDITIONALLY here, BEFORE any overlay /
+  // SKF1 / present_man / fullscreen-shape decision below.  This guarantees a
+  // visible in-frame toast in every code path that reaches SK_GL_SwapBuffers
+  // (pure-GL, GL-on-D3D11, SKF1 fallback), independent of producer state,
+  // overlay_enabled, or SKF1 frame mapping readiness.  The helper is a
+  // no-op if no toast is currently active.  Render-only; no input/cursor/
+  // focus changes.
+  // ---------------------------------------------------------------------------
+  SK_GL_DrawToastIfActive (hDC);
 
 
   BOOL status = false;
