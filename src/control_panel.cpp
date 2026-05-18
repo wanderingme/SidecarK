@@ -144,7 +144,10 @@ struct SK_SplashToastCopy
   std::string subheader;
 };
 
+// Slight horizontal overdraw to fake a bolder weight for <b> text while
+// still using the existing startup-banner font atlas.
 static constexpr float kSplashTaggedBoldTextOffsetX = 0.75f;
+// Keep the splash visible without obscuring gameplay behind the overlay UI.
 static constexpr float kSplashBackgroundOpacity     = 0.20f;
 
 static std::wstring
@@ -164,7 +167,7 @@ SK_LoadSplashToastCopyValue (const wchar_t* key, const wchar_t* fallback)
 }
 
 static void
-SK_ReplaceAllInPlace (std::wstring& text, const std::wstring& needle, const std::wstring& replacement)
+SK_ReplaceAllOccurrences (std::wstring& text, const std::wstring& needle, const std::wstring& replacement)
 {
   if (needle.empty ())
     return;
@@ -196,8 +199,8 @@ SK_GetSplashToastCopy (const std::wstring& toggle_combo)
   std::wstring header    = header_template;
   std::wstring subheader = subheader_template;
 
-  SK_ReplaceAllInPlace (header,    L"{toggle}", toggle_combo);
-  SK_ReplaceAllInPlace (subheader, L"{toggle}", toggle_combo);
+  SK_ReplaceAllOccurrences (header,    L"{toggle}", toggle_combo);
+  SK_ReplaceAllOccurrences (subheader, L"{toggle}", toggle_combo);
 
   return {
     SK_WideCharToUTF8 (header),
@@ -235,6 +238,8 @@ SK_ImGui_RenderTaggedText (const std::string& text, const ImVec4& bold_color)
 
         ImGui::PushStyleColor (ImGuiCol_Text, bold_color);
         ImGui::TextUnformatted (segment.c_str ());
+        // Draw the emphasized segment twice with a small offset to simulate
+        // bold text without introducing a separate bold font asset.
         ImGui::GetWindowDrawList ()->AddText (
           ImGui::GetFont (),
           ImGui::GetFontSize (),

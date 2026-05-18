@@ -1569,8 +1569,8 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
       _Return (false);
   }
 
-  // Raw blit copies always target the origin; offset rendering is only
-  // supported by the direct alpha-composite path used for the splash toast.
+  // Raw blit copies always target the origin; only the direct alpha-composite
+  // path supports offset placement into the destination render target.
   if (! AlphaBlend)
     SK_RunOnce (SK_ReleaseAssert (DstX == 0 && DstY == 0));
 
@@ -1790,9 +1790,9 @@ SK_D3D11_BltCopySurface ( ID3D11Texture2D *pSrcTex,
     }
   }
 
-  // This direct path renders straight into the destination RTV, so it only
-  // applies to the simple top-level full-texture case used by the windowed
-  // SKF1 toast compositor.
+  // This direct path renders straight into the destination RTV, so it is used
+  // for the top-level full-texture alpha-composite case and can place the
+  // source at an explicit destination offset.
   const bool direct_alpha_composite =
     AlphaBlend && pSrcBox == nullptr && SrcSubresource == 0 && DstSubresource == 0;
 
