@@ -2770,26 +2770,37 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       if (! SK_GL_Virule_SKF1_Native)
       {
         wchar_t ctrl_name [64] = { };
-        wsprintfW ( ctrl_name, L"Local\\SidecarK_Control_%lu",
-                    (unsigned long)GetCurrentProcessId () );
+        _snwprintf_s ( ctrl_name, _countof (ctrl_name), _TRUNCATE,
+                       L"Local\\SidecarK_Control_%lu",
+                       (unsigned long)GetCurrentProcessId () );
 
         HANDLE hCtrl = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
         if (hCtrl != nullptr)
         {
           uint8_t* ctrlBase =
-            (uint8_t *)MapViewOfFile (hCtrl, FILE_MAP_READ, 0, 0, 0);
+            static_cast <uint8_t *> (MapViewOfFile (hCtrl, FILE_MAP_READ, 0, 0, 0));
           if (ctrlBase != nullptr)
           {
-            char sig [4] = { };
-            memcpy (sig, ctrlBase, sizeof (sig));
-            const uint32_t ctrlVer =
-              *reinterpret_cast <const uint32_t *> (ctrlBase + 0x04);
-            if (memcmp (sig, "SKC1", sizeof (sig)) == 0 && ctrlVer == 1u)
+            // Validate mapped region is large enough for the "SKC1" header
+            // (4-byte signature + 4-byte version field = minimum 8 bytes).
+            MEMORY_BASIC_INFORMATION mbi = { };
+            const SIZE_T region_bytes =
+              VirtualQuery (ctrlBase, &mbi, sizeof (mbi)) != 0
+                ? mbi.RegionSize : 0;
+
+            if (region_bytes >= 8)
             {
-              SK_GL_Virule_SKF1_Native = true;
-              _SidecarLog_GL (
-                L"[SKF1-GL] Virule/SKF1 native-OpenGL mode detected: "
-                L"D3D11 bootstrap skipped, SK_GL_OnD3D11 stays false." );
+              char sig [4] = { };
+              memcpy (sig, ctrlBase, sizeof (sig));
+              const uint32_t ctrlVer =
+                *reinterpret_cast <const uint32_t *> (ctrlBase + 0x04);
+              if (memcmp (sig, "SKC1", sizeof (sig)) == 0 && ctrlVer == 1u)
+              {
+                SK_GL_Virule_SKF1_Native = true;
+                _SidecarLog_GL (
+                  L"[SKF1-GL] Virule/SKF1 native-OpenGL mode detected: "
+                  L"D3D11 bootstrap skipped, SK_GL_OnD3D11 stays false." );
+              }
             }
             UnmapViewOfFile (ctrlBase);
           }
