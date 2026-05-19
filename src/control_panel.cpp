@@ -24,6 +24,14 @@
 #include <SpecialK/stdafx.h>
 
 #include <SpecialK/control_panel.h>
+
+#include <atomic>
+
+// True once the SKC1 control mapping has been opened successfully for the
+// current PID.  Set inside SKC_GetOverlayMode() on a successful open, and
+// cleared on PID change so that re-injection re-discovers the host.
+// Exposed by SKC_IsHostPresent() — see control_panel.h for rationale.
+static std::atomic<bool> g_skc_host_present { false };
  
 static SKC_OverlayMode
 SKC_NormalizeOverlayMode (uint32_t overlay_mode) noexcept
@@ -84,6 +92,7 @@ SKC_GetOverlayMode (void)
     s_overlayModePtr = nullptr;
     s_last_fail_ms = 0;
     s_pid          = pid;
+    g_skc_host_present.store (false, std::memory_order_release);
   }
 
   // Fast path: mapping already open — single volatile read, zero system calls.
@@ -134,6 +143,7 @@ SKC_GetOverlayMode (void)
   s_last_fail_ms = 0;
   s_hMap         = hMap;
   s_overlayModePtr = reinterpret_cast<volatile uint32_t*>(base + kOverlayModeFieldOffset);
+  g_skc_host_present.store (true, std::memory_order_release);
 
   return SKC_NormalizeOverlayMode (*s_overlayModePtr);
 }
@@ -285,6 +295,18 @@ bool
 SKC_IsInputCaptureEnabled (void)
 {
   return SKC_GetOverlayMode () == SKC_OverlayMode::Interactive;
+}
+
+bool
+SKC_IsHostPresent (void)
+{
+  // Trigger cached discovery (one-time successful open is latched, failures
+  // are rate-limited by the existing backoff in SKC_GetOverlayMode).  The
+  // return value of SKC_GetOverlayMode is intentionally discarded — we only
+  // care whether the SKC1 mapping is reachable, not the user's overlay mode.
+  (void)SKC_GetOverlayMode ();
+
+  return g_skc_host_present.load (std::memory_order_acquire);
 }
 
 bool

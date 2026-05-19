@@ -64,6 +64,14 @@ SKC_OverlayMode SKC_GetOverlayMode        (void);
 bool            SKC_IsCompositingEnabled  (void);
 bool            SKC_IsInputCaptureEnabled (void);
 
+// True iff the SidecarK host (e.g. the SidecarK-managed launcher) has
+// published a valid SKC1 control mapping for this PID.  Cached and
+// backoff-protected via SKC_GetOverlayMode().  Used by render backends to
+// detect "this is a SidecarK-wrapped game" *before* expensive interop
+// bootstrap (D3D11/DXGI/wglDX), independently of the user-selected overlay
+// mode.
+bool            SKC_IsHostPresent         (void);
+
 void SK_ImGui_Warning          (const wchar_t* wszMessage);
 void SK_ImGui_WarningWithTitle (const wchar_t* wszMessage,
                                 const wchar_t* wszTitle);

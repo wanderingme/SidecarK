@@ -2727,6 +2727,45 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
 
 
+  // [SK-SIDECARK][GL-NATIVE-GATE]
+  //
+  // When this process was launched by the SidecarK host (e.g. the SidecarK
+  // launcher), it publishes `Local\SidecarK_Control_<pid>` (SKC1) before
+  // injection.  In that case SidecarK provides its own pure-OpenGL toast /
+  // overlay compositor and the entire GL->D3D11/DXGI/wglDX interop bootstrap
+  // performed below is both unnecessary and the proven source of:
+  //   * the ~639 ms first-frame hitch between [GL-IN] and [GL-OUT]
+  //     (SK_HookDXGI + CreateDXGIFactory2 + D3D11CreateDevice_Import +
+  //      wglDXOpenDeviceNV all running synchronously on the render thread),
+  //   * the visible dark-frame / title-card flicker
+  //     (caused by present_man.Present taking over presents through an
+  //      as-yet-empty D3D11 flip-discard swapchain), and
+  //   * occasional GL-IN-without-GL-OUT hangs
+  //     (when SK_HookDXGI / D3D11CreateDevice_Import / wglDXOpenDeviceNV
+  //      block indefinitely under DWM/windowed transitions).
+  //
+  // Detection uses SKC_IsHostPresent(), which is cached and backoff-protected
+  // (no per-frame OpenFileMappingW), and reflects "host present" rather than
+  // "overlay enabled" — that is the signal needed to keep `SK_GL_OnD3D11`
+  // from ever being set for SidecarK-managed GL games.
+  const bool sk_sidecark_native_gl =
+    SKC_IsHostPresent ();
+
+  // One-shot transition diagnostic — gated on existing diagnostics flag so
+  // this is silent in normal operation.  Latched once-per-process.
+  {
+    static volatile LONG s_sk_sidecark_native_logged = 0;
+    if ( sk_sidecark_native_gl && SidecarK_DiagnosticsEnabled () &&
+         InterlockedCompareExchange (&s_sk_sidecark_native_logged, 1, 0) == 0 )
+    {
+      _SidecarLog_GL (
+        L"[SK-SIDECARK][GL-NATIVE] SidecarK host present; native-GL mode "
+        L"selected — D3D11/DXGI/wglDX bootstrap will be skipped, "
+        L"SK_GL_OnD3D11 will remain false." );
+    }
+  }
+
+
   if ( ( compatible_dc && init_.get ()[thread_hglrc] ) || config.apis.dxgi.d3d11.hook )
   {
     HWND hWnd =
@@ -2754,7 +2793,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           (const char *)glGetString (GL_RENDERER), "D3D12"
         );
 
-      if (config.apis.dxgi.d3d11.hook && (! glon12))
+      if (config.apis.dxgi.d3d11.hook && (! glon12) && (! sk_sidecark_native_gl))
       {
         extern void
         WINAPI SK_HookDXGI (void);
@@ -3262,12 +3301,18 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     {
       if (! SK_GL_OnD3D11)
       {
-        SK_RunOnce (
-          SK_ImGui_WarningWithTitle (
-            L"Please turn Direct3D 11 on under Compatibility Settings | Render Backends "
-            L"and restart the game", L"Pure OpenGL Is No Longer Supported!"
-          )
-        );
+        // For SidecarK-managed GL games pure-OpenGL is the *intended* path
+        // selected by the [SK-SIDECARK][GL-NATIVE-GATE] above, so the legacy
+        // "no longer supported" popup must be suppressed in that case.
+        if (! sk_sidecark_native_gl)
+        {
+          SK_RunOnce (
+            SK_ImGui_WarningWithTitle (
+              L"Please turn Direct3D 11 on under Compatibility Settings | Render Backends "
+              L"and restart the game", L"Pure OpenGL Is No Longer Supported!"
+            )
+          );
+        }
       }
 
       SK_GetCurrentRenderBackend ().api =
