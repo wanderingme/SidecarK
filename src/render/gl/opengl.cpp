@@ -1982,8 +1982,8 @@ struct SK_IndirectX_PresentManager {
   int             interval        = 0;
 
   void Start   (SK_IndirectX_InteropCtx *pCtx);
-  void Present (SK_IndirectX_InteropCtx *pCtx, int interval);
-  void Reset   (SK_IndirectX_InteropCtx *pCtx);
+  bool Present (SK_IndirectX_InteropCtx *pCtx, int interval);
+  bool Reset   (SK_IndirectX_InteropCtx *pCtx);
 };
 
 struct SK_IndirectX_InteropCtx
@@ -2048,8 +2048,326 @@ struct SK_IndirectX_InteropCtx
 
   SK_IndirectX_PresentManager              present_man;
 
+  struct bootstrap_s {
+    HANDLE                                 hThread     = INVALID_HANDLE_VALUE;
+    volatile LONG                          state       = 0;
+    ULONGLONG                              retry_at    = 0;
+
+    SK_ComPtr <IDXGIFactory2>              pFactory;
+    SK_ComPtr <ID3D11Device>               pDevice;
+    SK_ComPtr <ID3D11DeviceContext>        pDevCtx;
+    D3D_FEATURE_LEVEL                      featureLevel = {};
+    BOOL                                   tearing      = FALSE;
+    BOOL                                   flip_discard = FALSE;
+    UINT                                   swapchain_flags = 0x0;
+    DXGI_SWAP_EFFECT                       swap_effect =
+      DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    SK_ComPtr <ID3D11BlendState>           pBlendState;
+    SK_ComPtr <ID3D11SamplerState>         colorSampler;
+    SK_ComPtr <ID3D11InputLayout>          pVertexLayout;
+    SK_ComPtr <ID3D11VertexShader>         pVertexShader;
+    SK_ComPtr <ID3D11PixelShader>          pPixelShader;
+  } bootstrap;
+
+  ULONGLONG                                present_retry_at = 0;
   bool     stale = false;
 };
+
+static constexpr DWORD     SK_GL_PRESENT_MANAGER_WAIT_MS        = 8UL;
+static constexpr DWORD     SK_GL_PRESENT_MANAGER_RETRY_MS       = 250UL;
+static constexpr DWORD     SK_GL_INTEROP_BOOTSTRAP_RETRY_MS     = 250UL;
+static constexpr ULONGLONG SK_GL_PRESENT_CATCHUP_BUDGET_MS      = 8ULL;
+
+static bool
+SK_GL_WaitForPresentManagerAck (HANDLE hAck, DWORD dwTimeout)
+{
+  HANDLE hWaitEvents [] = { hAck, __SK_DLL_TeardownEvent };
+
+  const DWORD dwWait =
+    WaitForMultipleObjectsEx (2, hWaitEvents, FALSE, dwTimeout, FALSE);
+
+  return
+    (dwWait == WAIT_OBJECT_0) ||
+    (dwWait == (WAIT_OBJECT_0 + 1));
+}
+
+static void
+SK_GL_ResetInteropBootstrapState (SK_IndirectX_InteropCtx& ctx)
+{
+  auto& bootstrap = ctx.bootstrap;
+
+  bootstrap.pFactory      = nullptr;
+  bootstrap.pDevice       = nullptr;
+  bootstrap.pDevCtx       = nullptr;
+  bootstrap.featureLevel  = {};
+  bootstrap.tearing       = FALSE;
+  bootstrap.flip_discard  = FALSE;
+  bootstrap.swapchain_flags = 0x0;
+  bootstrap.swap_effect   = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+  bootstrap.pBlendState   = nullptr;
+  bootstrap.colorSampler  = nullptr;
+  bootstrap.pVertexLayout = nullptr;
+  bootstrap.pVertexShader = nullptr;
+  bootstrap.pPixelShader  = nullptr;
+}
+
+static void
+SK_GL_CloseInteropBootstrapThread (SK_IndirectX_InteropCtx& ctx)
+{
+  if (ctx.bootstrap.hThread != INVALID_HANDLE_VALUE &&
+      ReadAcquire (&ctx.bootstrap.state) != 1)
+  {
+    SK_CloseHandle (
+      std::exchange (ctx.bootstrap.hThread, INVALID_HANDLE_VALUE)
+    );
+  }
+}
+
+static DWORD
+WINAPI
+SK_GL_InteropBootstrapThread (LPVOID pUser)
+{
+  auto* pCtx =
+    static_cast <SK_IndirectX_InteropCtx *> (pUser);
+  auto& bootstrap = pCtx->bootstrap;
+
+  auto fail_bootstrap = [&]() -> DWORD
+  {
+    SK_GL_ResetInteropBootstrapState (*pCtx);
+    bootstrap.retry_at =
+      GetTickCount64 () + SK_GL_INTEROP_BOOTSTRAP_RETRY_MS;
+    InterlockedExchange (&bootstrap.state, 0);
+    return 0;
+  };
+
+  extern void
+  WINAPI SK_HookDXGI (void);
+
+  SK_HookDXGI ();
+
+  if (D3D11CreateDevice_Import == nullptr)
+    return fail_bootstrap ();
+
+  SK_ComPtr <IDXGIAdapter>  pAdapter  = nullptr;
+  SK_ComPtr <IDXGIFactory7> pFactory7 = nullptr;
+
+  if ( SUCCEEDED (
+         CreateDXGIFactory2 ( 0x2,
+                              __uuidof (IDXGIFactory7),
+                                  (void **)&pFactory7.p ) ) )
+  {
+    pFactory7->QueryInterface <IDXGIFactory2> (&bootstrap.pFactory.p);
+
+    pFactory7->EnumAdapterByGpuPreference (
+      0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+      __uuidof (IDXGIAdapter), (void **)&pAdapter.p
+    );
+  }
+
+  D3D_FEATURE_LEVEL        levels [] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
+                                         D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
+  D3D_FEATURE_LEVEL featureLevel = {};
+
+  HRESULT hr =
+    D3D11CreateDevice_Import (
+      nullptr,
+        D3D_DRIVER_TYPE_HARDWARE,
+          nullptr,
+            D3D11_CREATE_DEVICE_SINGLETHREADED |
+            D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS,
+              levels,
+    _ARRAYSIZE (levels),
+                  D3D11_SDK_VERSION,
+                    &bootstrap.pDevice.p,
+                      &featureLevel,
+                        &bootstrap.pDevCtx.p );
+
+  if (FAILED (hr) || bootstrap.pDevice == nullptr || bootstrap.pDevCtx == nullptr)
+    return fail_bootstrap ();
+
+  if (bootstrap.pFactory == nullptr || pAdapter == nullptr)
+  {
+    SK_ComPtr <IDXGIDevice> pDevDXGI = nullptr;
+
+    if ( FAILED (bootstrap.pDevice->QueryInterface <IDXGIDevice> (&pDevDXGI)) ||
+         FAILED (pDevDXGI->GetAdapter (&pAdapter.p))                           ||
+         FAILED (pAdapter->GetParent (IID_PPV_ARGS (&bootstrap.pFactory.p))) )
+    {
+      return fail_bootstrap ();
+    }
+  }
+
+  bootstrap.featureLevel = featureLevel;
+
+  SK_ComQIPtr <IDXGIFactory5>
+    pFactory5 (bootstrap.pFactory);
+
+  if (pFactory5 != nullptr)
+  {
+    if (SUCCEEDED (
+          pFactory5->CheckFeatureSupport (
+            DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                       &bootstrap.tearing,
+                sizeof (bootstrap.tearing) ) ) )
+    {
+      bootstrap.flip_discard = true;
+    }
+  }
+
+  if (bootstrap.flip_discard)
+    bootstrap.swap_effect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+
+  if (bootstrap.tearing)
+  {
+    bootstrap.swapchain_flags =
+      ( DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
+        DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT );
+  }
+
+  D3D11_BLEND_DESC
+    blend_desc                                        = { };
+    blend_desc.AlphaToCoverageEnable                  = FALSE;
+    blend_desc.RenderTarget [0].BlendEnable           = FALSE;
+    blend_desc.RenderTarget [0].SrcBlend              = D3D11_BLEND_ONE;
+    blend_desc.RenderTarget [0].DestBlend             = D3D11_BLEND_ZERO;
+    blend_desc.RenderTarget [0].BlendOp               = D3D11_BLEND_OP_ADD;
+    blend_desc.RenderTarget [0].SrcBlendAlpha         = D3D11_BLEND_ONE;
+    blend_desc.RenderTarget [0].DestBlendAlpha        = D3D11_BLEND_ZERO;
+    blend_desc.RenderTarget [0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
+    blend_desc.RenderTarget [0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+
+  if (FAILED (bootstrap.pDevice->CreateBlendState (&blend_desc, &bootstrap.pBlendState.p)))
+    return fail_bootstrap ();
+
+  if (FAILED (
+        bootstrap.pDevice->CreatePixelShader ( gl_dx_interop_ps_bytecode,
+                                           sizeof (gl_dx_interop_ps_bytecode),
+                             nullptr, &bootstrap.pPixelShader.p ) ) )
+    return fail_bootstrap ();
+
+  if (FAILED (
+        bootstrap.pDevice->CreateVertexShader ( gl_dx_interop_vs_bytecode,
+                                            sizeof (gl_dx_interop_vs_bytecode),
+                              nullptr, &bootstrap.pVertexShader.p ) ) )
+    return fail_bootstrap ();
+
+  D3D11_SAMPLER_DESC
+    sampler_desc                    = { };
+
+    sampler_desc.Filter             = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    sampler_desc.AddressU           = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampler_desc.AddressV           = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampler_desc.AddressW           = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampler_desc.MipLODBias         = 0.f;
+    sampler_desc.MaxAnisotropy      =   1;
+    sampler_desc.ComparisonFunc     =  D3D11_COMPARISON_NEVER;
+    sampler_desc.MinLOD             = -D3D11_FLOAT32_MAX;
+    sampler_desc.MaxLOD             =  D3D11_FLOAT32_MAX;
+
+  if (FAILED (bootstrap.pDevice->CreateSamplerState (&sampler_desc, &bootstrap.colorSampler.p)))
+    return fail_bootstrap ();
+
+  D3D11_INPUT_ELEMENT_DESC local_layout [] = {
+    { "", 0, DXGI_FORMAT_R32_UINT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+  };
+
+  if (FAILED (
+        bootstrap.pDevice->CreateInputLayout (
+          local_layout, 1,
+          (void *)(gl_dx_interop_vs_bytecode),
+          sizeof (gl_dx_interop_vs_bytecode) /
+          sizeof (gl_dx_interop_vs_bytecode [0]),
+          &bootstrap.pVertexLayout.p ) ) )
+  {
+    return fail_bootstrap ();
+  }
+
+  InterlockedExchange (&bootstrap.state, 2);
+  return 0;
+}
+
+static void
+SK_GL_StartInteropBootstrap (SK_IndirectX_InteropCtx& ctx)
+{
+  auto& bootstrap = ctx.bootstrap;
+
+  if (ReadAcquire (&bootstrap.state) != 0 ||
+      GetTickCount64 () < bootstrap.retry_at)
+  {
+    return;
+  }
+
+  SK_GL_CloseInteropBootstrapThread (ctx);
+  SK_GL_ResetInteropBootstrapState  (ctx);
+
+  InterlockedExchange (&bootstrap.state, 1);
+
+  bootstrap.hThread =
+    SK_Thread_CreateEx ( SK_GL_InteropBootstrapThread,
+                           L"[SK] OpenGL Interop Bootstrap",
+                             &ctx );
+
+  if (bootstrap.hThread == INVALID_HANDLE_VALUE)
+  {
+    bootstrap.retry_at =
+      GetTickCount64 () + SK_GL_INTEROP_BOOTSTRAP_RETRY_MS;
+    InterlockedExchange (&bootstrap.state, 0);
+  }
+}
+
+static bool
+SK_GL_FinalizeInteropBootstrap ( SK_IndirectX_InteropCtx& ctx,
+                                 HDC hDC, HGLRC hglrc,
+                                 HWND hWnd, HMONITOR hMonitor )
+{
+  auto& bootstrap = ctx.bootstrap;
+
+  if (ReadAcquire (&bootstrap.state) != 2)
+  {
+    SK_GL_CloseInteropBootstrapThread (ctx);
+    return false;
+  }
+
+  HANDLE hInteropDevice =
+    wglDXOpenDeviceNV (bootstrap.pDevice);
+
+  if (hInteropDevice == nullptr)
+  {
+    SK_GL_ResetInteropBootstrapState (ctx);
+    bootstrap.retry_at =
+      GetTickCount64 () + SK_GL_INTEROP_BOOTSTRAP_RETRY_MS;
+    InterlockedExchange (&bootstrap.state, 0);
+    SK_GL_CloseInteropBootstrapThread (ctx);
+    return false;
+  }
+
+  ctx.d3d11.pFactory                     = std::move (bootstrap.pFactory);
+  ctx.d3d11.pDevice                      = std::move (bootstrap.pDevice);
+  ctx.d3d11.pDevCtx                      = std::move (bootstrap.pDevCtx);
+  ctx.d3d11.hInteropDevice               = hInteropDevice;
+  ctx.d3d11.featureLevel                 = bootstrap.featureLevel;
+  ctx.d3d11.pBlendState                  = std::move (bootstrap.pBlendState);
+  ctx.d3d11.staging.colorSampler         = std::move (bootstrap.colorSampler);
+  ctx.d3d11.flipper.pVertexLayout        = std::move (bootstrap.pVertexLayout);
+  ctx.d3d11.flipper.pVertexShader        = std::move (bootstrap.pVertexShader);
+  ctx.d3d11.flipper.pPixelShader         = std::move (bootstrap.pPixelShader);
+  ctx.output.caps.tearing                = bootstrap.tearing;
+  ctx.output.caps.flip_discard           = bootstrap.flip_discard;
+  ctx.output.swapchain_flags             = bootstrap.swapchain_flags;
+  ctx.output.swap_effect                 = bootstrap.swap_effect;
+  ctx.gl.hdc                             = hDC;
+  ctx.gl.hglrc                           = hglrc;
+  ctx.output.hWnd                        = hWnd;
+  ctx.output.hMonitor                    = hMonitor;
+  ctx.stale                              = true;
+
+  SK_GL_OnD3D11 = true;
+
+  SK_GL_ResetInteropBootstrapState (ctx);
+  InterlockedExchange (&bootstrap.state, 0);
+  SK_GL_CloseInteropBootstrapThread (ctx);
+  return true;
+}
 
 
 void
@@ -2205,7 +2523,7 @@ SK_IndirectX_PresentManager::Start (SK_IndirectX_InteropCtx *pCtx)
   }
 }
 
-void
+bool
 SK_IndirectX_PresentManager::Reset (SK_IndirectX_InteropCtx* pCtx)
 {
   if (hThread == INVALID_HANDLE_VALUE)
@@ -2213,11 +2531,11 @@ SK_IndirectX_PresentManager::Reset (SK_IndirectX_InteropCtx* pCtx)
 
   SetEvent (hNotifyReset);
 
-  HANDLE                       hWaitEvents [] = { hAckReset, __SK_DLL_TeardownEvent };
-  WaitForMultipleObjectsEx (2, hWaitEvents, FALSE, INFINITE, FALSE);
+  return
+    SK_GL_WaitForPresentManagerAck (hAckReset, SK_GL_PRESENT_MANAGER_WAIT_MS);
 }
 
-void
+bool
 SK_IndirectX_PresentManager::Present (SK_IndirectX_InteropCtx *pCtx, int Interval)
 {
   if (hThread == INVALID_HANDLE_VALUE)
@@ -2227,8 +2545,8 @@ SK_IndirectX_PresentManager::Present (SK_IndirectX_InteropCtx *pCtx, int Interva
 
   SetEvent (hNotifyPresent);
 
-  HANDLE                       hWaitEvents [] = { hAckPresent, __SK_DLL_TeardownEvent };
-  WaitForMultipleObjectsEx (2, hWaitEvents, FALSE, INFINITE, FALSE);
+  return
+    SK_GL_WaitForPresentManagerAck (hAckPresent, SK_GL_PRESENT_MANAGER_WAIT_MS);
 }
 
 static HWND hwndLast;
@@ -2746,6 +3064,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
     HMONITOR hMonitor =
       MonitorFromWindow (hWnd, MONITOR_DEFAULTTONEAREST);
+    bool bootstrap_finalized_this_frame = false;
 
     if (dx_gl_interop.d3d11.pDevice == nullptr)
     {
@@ -2756,194 +3075,23 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
       if (config.apis.dxgi.d3d11.hook && (! glon12))
       {
-        extern void
-        WINAPI SK_HookDXGI (void);
-               SK_HookDXGI (    ); // Setup the function to create a D3D11 Device
+        const LONG bootstrap_state =
+          ReadAcquire (&dx_gl_interop.bootstrap.state);
 
-        SK_ComPtr <IDXGIAdapter>  pAdapter [16] = { nullptr };
-        SK_ComPtr <IDXGIFactory7> pFactory7     =   nullptr;
-
-        if (D3D11CreateDeviceAndSwapChain_Import != nullptr)
-        {
-          if ( SUCCEEDED (
-                 CreateDXGIFactory2 ( 0x2,
-                                      __uuidof (IDXGIFactory7),
-                                          (void **)&pFactory7.p ) )
-             )
-          {
-            pFactory7->QueryInterface <IDXGIFactory2> (&pFactory.p);
-
-            UINT uiAdapterIdx = 0;
-
-            SK_LOG0 ((" DXGI Adapters from Highest to Lowest Perf. "), L"Open GL-IK");
-            SK_LOG0 ((" ------------------------------------------ "), L"Open GL-IK");
-
-            while ( SUCCEEDED (
-                      pFactory7->EnumAdapterByGpuPreference ( uiAdapterIdx,
-                       DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-                                    __uuidof (IDXGIAdapter),
-                                        (void **)&pAdapter [uiAdapterIdx].p
-                  )           )                             )
-            {
-              DXGI_ADAPTER_DESC         adapter_desc = { };
-              pAdapter [uiAdapterIdx]->
-                              GetDesc (&adapter_desc);
-
-              SK_LOG0 ( ( L" %d) '%ws'",
-                          uiAdapterIdx, adapter_desc.Description ),
-                          L"  GLDX11  " );
-
-              ++uiAdapterIdx;
-            }
-          }
-
-          D3D_FEATURE_LEVEL        levels [] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
-                                                 D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
-          D3D_FEATURE_LEVEL featureLevel;
-
-          HRESULT hr =
-            DXGI_ERROR_UNSUPPORTED;
-
-          hr =
-            D3D11CreateDevice_Import (
-              nullptr,//pAdapter [0].p,
-                D3D_DRIVER_TYPE_HARDWARE,
-                  nullptr,
-                    D3D11_CREATE_DEVICE_SINGLETHREADED |
-                    D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS,
-                      levels,
-          _ARRAYSIZE (levels),
-                          D3D11_SDK_VERSION,
-                            &pDevice.p,
-                              &featureLevel,
-                                &pDevCtx.p );
-
-          if (FAILED (hr))
-          {
-            pDevCtx = nullptr;
-            pDevice = nullptr;
-          }
-
-          if ( SK_ComPtr <IDXGIDevice>
-                       pDevDXGI = nullptr ;
-
-              SUCCEEDED (hr)                                                     &&
-                        pDevice != nullptr                                       &&
-                  ( (pFactory.p != nullptr && pAdapter [0].p != nullptr)         ||
-            (SUCCEEDED (pDevice->QueryInterface <IDXGIDevice> (&pDevDXGI))       &&
-             SUCCEEDED (pDevDXGI->GetAdapter                  (&pAdapter [0].p)) &&
-             SUCCEEDED (pAdapter [0]->GetParent (IID_PPV_ARGS (&pFactory))))
-                  )
-             )
-          {
-            if (pFactory.p     == nullptr &&
-                pAdapter [0].p != nullptr)
-            {   pAdapter [0]->GetParent (IID_PPV_ARGS (&pFactory)); }
-
-            SK_GL_OnD3D11 = true;
-
-            SK_ComQIPtr <IDXGIFactory5>
-                             pFactory5 (pFactory);
-
-            if (pFactory5 != nullptr)
-            {
-              SK_ReleaseAssert (
-                SUCCEEDED (
-                  pFactory5->CheckFeatureSupport (
-                    DXGI_FEATURE_PRESENT_ALLOW_TEARING,
-                               &dx_gl_interop.output.caps.tearing,
-                        sizeof (dx_gl_interop.output.caps.tearing)
-                                                 )
-                          )
-              );
-
-              dx_gl_interop.output.caps.flip_discard = true;
-            }
-
-            if (dx_gl_interop.output.caps.flip_discard)
-                dx_gl_interop.output.swap_effect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-
-            if (dx_gl_interop.output.caps.tearing)
-            {
-              dx_gl_interop.output.swapchain_flags =
-                ( DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
-                  DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT );
-            }
-
-            dx_gl_interop.d3d11.featureLevel = featureLevel;
-
-            dx_gl_interop.d3d11.hInteropDevice =
-              wglDXOpenDeviceNV (dx_gl_interop.d3d11.pDevice);
-          }
-
-          D3D11_BLEND_DESC
-            blend_desc                                        = { };
-            blend_desc.AlphaToCoverageEnable                  = FALSE;
-            blend_desc.RenderTarget [0].BlendEnable           = FALSE;
-            blend_desc.RenderTarget [0].SrcBlend              = D3D11_BLEND_ONE;
-            blend_desc.RenderTarget [0].DestBlend             = D3D11_BLEND_ZERO;
-            blend_desc.RenderTarget [0].BlendOp               = D3D11_BLEND_OP_ADD;
-            blend_desc.RenderTarget [0].SrcBlendAlpha         = D3D11_BLEND_ONE;
-            blend_desc.RenderTarget [0].DestBlendAlpha        = D3D11_BLEND_ZERO;
-            blend_desc.RenderTarget [0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
-            blend_desc.RenderTarget [0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-
-          pDevice->CreateBlendState ( &blend_desc,
-                                        &dx_gl_interop.d3d11.pBlendState.p );
-
-          SK_ReleaseAssert (
-            SUCCEEDED (
-              pDevice->CreatePixelShader ( gl_dx_interop_ps_bytecode,
-                                   sizeof (gl_dx_interop_ps_bytecode),
-                     nullptr, &dx_gl_interop.d3d11.flipper.pPixelShader.p )
-                      )
+        if (bootstrap_state == 2)
+          bootstrap_finalized_this_frame =
+            SK_GL_FinalizeInteropBootstrap (
+              dx_gl_interop, hDC, thread_hglrc, hWnd, hMonitor
             );
 
-          SK_ReleaseAssert (
-            SUCCEEDED (
-              pDevice->CreateVertexShader ( gl_dx_interop_vs_bytecode,
-                                    sizeof (gl_dx_interop_vs_bytecode),
-                    nullptr, &dx_gl_interop.d3d11.flipper.pVertexShader.p )
-                      )
-            );
-
-          D3D11_SAMPLER_DESC
-            sampler_desc                    = { };
-
-            sampler_desc.Filter             = D3D11_FILTER_MIN_MAG_MIP_POINT;
-            sampler_desc.AddressU           = D3D11_TEXTURE_ADDRESS_WRAP;
-            sampler_desc.AddressV           = D3D11_TEXTURE_ADDRESS_WRAP;
-            sampler_desc.AddressW           = D3D11_TEXTURE_ADDRESS_WRAP;
-            sampler_desc.MipLODBias         = 0.f;
-            sampler_desc.MaxAnisotropy      =   1;
-            sampler_desc.ComparisonFunc     =  D3D11_COMPARISON_NEVER;
-            sampler_desc.MinLOD             = -D3D11_FLOAT32_MAX;
-            sampler_desc.MaxLOD             =  D3D11_FLOAT32_MAX;
-
-          pDevice->CreateSamplerState ( &sampler_desc,
-                                          &dx_gl_interop.d3d11.staging.colorSampler.p );
-
-          D3D11_INPUT_ELEMENT_DESC local_layout [] = {
-            { "", 0, DXGI_FORMAT_R32_UINT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 }
-          };
-
-          pDevice->CreateInputLayout ( local_layout, 1,
-                                       (void *)(gl_dx_interop_vs_bytecode),
-                                        sizeof (gl_dx_interop_vs_bytecode) /
-                                        sizeof (gl_dx_interop_vs_bytecode [0]),
-                                          &dx_gl_interop.d3d11.flipper.pVertexLayout.p );
-
-          dx_gl_interop.gl.hdc          = hDC;
-          dx_gl_interop.gl.hglrc        = thread_hglrc;
-          dx_gl_interop.output.hWnd     = hWnd;
-          dx_gl_interop.output.hMonitor = MonitorFromWindow (hWnd, MONITOR_DEFAULTTONEAREST);
-
-          dx_gl_interop.stale = true;
-        }
+        else if (bootstrap_state == 0)
+          SK_GL_StartInteropBootstrap (dx_gl_interop);
       }
     }
 
-    else if (SK_GL_OnD3D11)
+    SK_GL_CloseInteropBootstrapThread (dx_gl_interop);
+
+    if (dx_gl_interop.d3d11.pDevice != nullptr && SK_GL_OnD3D11)
     {
       if (hWnd != 0)
       {
@@ -2969,19 +3117,33 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
   //if (std::exchange (last10BitHDRState, __SK_HDR_10BitSwap) != __SK_HDR_10BitSwap) dx_gl_interop.stale = true;
 
 
+    const bool interop_retry_pending =
+      (GetTickCount64 () < dx_gl_interop.present_retry_at);
+
     LONG64 llFrames =
       ReadAcquire64 (&dx_gl_interop.present_man.frames);
 
-    if (llFrames > 0)
+    if (llFrames > 0 && (! interop_retry_pending))
     {
+      const ULONGLONG catchup_start = GetTickCount64 ();
+
       while (ReadAcquire64 (    &dx_gl_interop.present_man.frames_complete) < llFrames)
-      {    WaitForSingleObject ( dx_gl_interop.present_man.hAckPresent, 1);
+      {
+        WaitForSingleObject (dx_gl_interop.present_man.hAckPresent, 1);
 
         if (ReadAcquire (&__SK_DLL_Ending))
         {
           reason = 2;
           Emit (reason, reached_draw, TRUE);
           return TRUE;
+        }
+
+        if (GetTickCount64 () - catchup_start >= SK_GL_PRESENT_CATCHUP_BUDGET_MS)
+        {
+          dx_gl_interop.present_retry_at =
+            GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
+          dx_gl_interop.stale = true;
+          break;
         }
       }
     }
@@ -2990,9 +3152,13 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     if (SK_GL_OnD3D11 && std::exchange (SK_GL_OnD3D11_Reset, false))
                                          dx_gl_interop.stale = true;
 
-    if (SK_GL_OnD3D11 && (std::exchange (dx_gl_interop.stale, false) || pSwapChain == nullptr))
+    if ( SK_GL_OnD3D11                              &&
+         dx_gl_interop.d3d11.hInteropDevice != nullptr &&
+         (! bootstrap_finalized_this_frame)         &&
+         (! interop_retry_pending)                  &&
+         (std::exchange (dx_gl_interop.stale, false) || pSwapChain == nullptr) )
     {
-      glFinish ();
+      glFlush ();
 
       if (pSwapChain != nullptr)
       {
@@ -3062,19 +3228,25 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       else if (__SK_HDR_10BitSwap)
         desc1.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
 
+      HRESULT hrInterop = S_OK;
+
       if (std::exchange (dx_gl_interop.output.hWnd, hWnd) != hWnd || pSwapChain == nullptr)
       {
         pSwapChain = nullptr;
 
         SK_GL_CheckSRGB (&desc1.Format);
 
-        SK_GL_CreateInteropSwapChain ( pFactory, dx_gl_interop.d3d11.pDevice,
-                                         dx_gl_interop.output.hWnd,
-                                           &desc1, &pSwapChain.p );
+        hrInterop =
+          SK_GL_CreateInteropSwapChain ( pFactory, dx_gl_interop.d3d11.pDevice,
+                                           dx_gl_interop.output.hWnd,
+                                             &desc1, &pSwapChain.p );
 
-        pFactory->MakeWindowAssociation ( dx_gl_interop.output.hWnd,
-                                            DXGI_MWA_NO_ALT_ENTER |
-                                            DXGI_MWA_NO_WINDOW_CHANGES );
+        if (SUCCEEDED (hrInterop))
+        {
+          pFactory->MakeWindowAssociation ( dx_gl_interop.output.hWnd,
+                                              DXGI_MWA_NO_ALT_ENTER |
+                                              DXGI_MWA_NO_WINDOW_CHANGES );
+        }
       }
 
       // Dimensions were wrong, SwapChain just needs a resize...
@@ -3083,131 +3255,155 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // Originally, DXGI_FORMAT_UNKNOWN was used here, but that causes
         //   problems with NVIDIA's driver believing that surface sharing
         //     is failing parameter validation.  * Be explicit about it!
-        pSwapChain->ResizeBuffers (
-                   _DXBackBuffers, w, h,
-                    desc1.Format, dx_gl_interop.output.swapchain_flags
-        );
+        hrInterop =
+          pSwapChain->ResizeBuffers (
+                     _DXBackBuffers, w, h,
+                      desc1.Format, dx_gl_interop.output.swapchain_flags
+          );
       }
 
-      pSwapChain->GetDesc1 (&desc1);
-
-      dx_gl_interop.output.viewport = { 0.0f, 0.0f,
-                     static_cast <float> (desc1.Width),
-                     static_cast <float> (desc1.Height),
-                                        0.0f, 1.0f
-      };
-
-      SK_ComQIPtr <IDXGISwapChain2>
-          pSwapChain2 (pSwapChain);
-      if (pSwapChain2 != nullptr) dx_gl_interop.output.hSemaphore =
-          pSwapChain2->GetFrameLatencyWaitableObject ();
-
-
-      bool bHDRZeroCopy =
-        (__SK_HDR_16BitSwap||__SK_HDR_10BitSwap) && !__SK_HDR_AdaptiveToneMap;
-
-      if (bHDRZeroCopy)
+      if (FAILED (hrInterop) || pSwapChain == nullptr)
       {
-        SK_ComPtr <ID3D11ShaderResourceView> pSrv;
-        SK_ComPtr <ID3D11Resource>           pRes;
+        dx_gl_interop.present_retry_at =
+          GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
+        dx_gl_interop.stale = true;
+      }
 
-        IDXGISwapChain*                                 pWrappedSwapChain = nullptr;
-        SK_DXGI_GetPrivateData ( pSwapChain,
-          SKID_DXGI_WrappedSwapChain, sizeof (void *), &pWrappedSwapChain );
+      else
+      {
+        pSwapChain->GetDesc1 (&desc1);
 
-        SK_DXGI_GetPrivateData ( pWrappedSwapChain,
-          SKID_DXGI_SwapChainProxyBackbuffer_D3D11, sizeof (void *), &pSrv.p
-        );
+        dx_gl_interop.output.viewport = { 0.0f, 0.0f,
+                       static_cast <float> (desc1.Width),
+                       static_cast <float> (desc1.Height),
+                                          0.0f, 1.0f
+        };
 
-        if (pSrv != nullptr)
-        {   pSrv->GetResource (&pRes.p);
+        SK_ComQIPtr <IDXGISwapChain2>
+            pSwapChain2 (pSwapChain);
+        if (pSwapChain2 != nullptr) dx_gl_interop.output.hSemaphore =
+            pSwapChain2->GetFrameLatencyWaitableObject ();
 
-          SK_ComQIPtr <ID3D11Texture2D> pTex2D (pRes);
 
-          if (pTex2D != nullptr)
+        bool bHDRZeroCopy =
+          (__SK_HDR_16BitSwap||__SK_HDR_10BitSwap) && !__SK_HDR_AdaptiveToneMap;
+
+        if (bHDRZeroCopy)
+        {
+          SK_ComPtr <ID3D11ShaderResourceView> pSrv;
+          SK_ComPtr <ID3D11Resource>           pRes;
+
+          IDXGISwapChain*                                 pWrappedSwapChain = nullptr;
+          SK_DXGI_GetPrivateData ( pSwapChain,
+            SKID_DXGI_WrappedSwapChain, sizeof (void *), &pWrappedSwapChain );
+
+          SK_DXGI_GetPrivateData ( pWrappedSwapChain,
+            SKID_DXGI_SwapChainProxyBackbuffer_D3D11, sizeof (void *), &pSrv.p
+          );
+
+          if (pSrv != nullptr)
+          {   pSrv->GetResource (&pRes.p);
+
+            SK_ComQIPtr <ID3D11Texture2D> pTex2D (pRes);
+
+            if (pTex2D != nullptr)
+            {
+              dx_gl_interop.output.backbuffer.image = pRes;
+              dx_gl_interop.output.backbuffer.rtv   = nullptr;
+
+              D3D11_TEXTURE2D_DESC texDesc = { };
+              pTex2D->GetDesc    (&texDesc);
+
+              D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = { };
+              rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+              rtvDesc.Format        = DirectX::MakeTypelessUNORM (
+                                      DirectX::MakeTypelessFLOAT (texDesc.Format));
+
+              pDevice->CreateRenderTargetView (   dx_gl_interop.output.backbuffer.image.p,
+                                       &rtvDesc, &dx_gl_interop.output.backbuffer.rtv.p   );
+            }
+          }
+
+          if (! dx_gl_interop.output.backbuffer.rtv.p)
           {
-            dx_gl_interop.output.backbuffer.image = pRes;
-            dx_gl_interop.output.backbuffer.rtv   = nullptr;
-
-            D3D11_TEXTURE2D_DESC texDesc = { };
-            pTex2D->GetDesc    (&texDesc);
-
-            D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = { };
-            rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-            rtvDesc.Format        = DirectX::MakeTypelessUNORM (
-                                    DirectX::MakeTypelessFLOAT (texDesc.Format));
-
-            pDevice->CreateRenderTargetView (   dx_gl_interop.output.backbuffer.image.p,
-                                     &rtvDesc, &dx_gl_interop.output.backbuffer.rtv.p   );
+            dx_gl_interop.output.backbuffer.image = nullptr;
+            bHDRZeroCopy                          = false;
           }
         }
 
-        if (! dx_gl_interop.output.backbuffer.rtv.p)
+        if (! bHDRZeroCopy)
         {
           dx_gl_interop.output.backbuffer.image = nullptr;
-          bHDRZeroCopy                          = false;
+          dx_gl_interop.output.backbuffer.rtv   = nullptr;
+
+          pSwapChain->GetBuffer (
+            0, IID_ID3D11Texture2D, (void **)&dx_gl_interop.output.backbuffer.image.p );
+          pDevice->CreateRenderTargetView (   dx_gl_interop.output.backbuffer.image.p,
+                                    nullptr, &dx_gl_interop.output.backbuffer.rtv.p   );
         }
-      }
 
-      if (! bHDRZeroCopy)
-      {
-        dx_gl_interop.output.backbuffer.image = nullptr;
-        dx_gl_interop.output.backbuffer.rtv   = nullptr;
+        // We can skip the vertical flip operation if SK's HDR mode is enabled
+        if (! bHDRZeroCopy)
+        {
+          D3D11_TEXTURE2D_DESC                             tex_desc = { };
+          dx_gl_interop.output.backbuffer.image->GetDesc (&tex_desc);
 
-        pSwapChain->GetBuffer (
-          0, IID_ID3D11Texture2D, (void **)&dx_gl_interop.output.backbuffer.image.p );
-        pDevice->CreateRenderTargetView (   dx_gl_interop.output.backbuffer.image.p,
-                                  nullptr, &dx_gl_interop.output.backbuffer.rtv.p   );
-      }
+          tex_desc.Format = DirectX::MakeTypelessUNORM (
+                            DirectX::MakeTypelessFLOAT (tex_desc.Format));
 
-      // We can skip the vertical flip operation if SK's HDR mode is enabled
-      if (! bHDRZeroCopy)
-      {
-        D3D11_TEXTURE2D_DESC                             tex_desc = { };
-        dx_gl_interop.output.backbuffer.image->GetDesc (&tex_desc);
+          tex_desc.ArraySize          = 1;
+          tex_desc.MipLevels          = 1;
+          tex_desc.SampleDesc.Count   = 1;
+          tex_desc.SampleDesc.Quality = 0;
+          tex_desc.Usage              = D3D11_USAGE_DEFAULT;
+          tex_desc.BindFlags          = D3D11_BIND_RENDER_TARGET |
+                                        D3D11_BIND_SHADER_RESOURCE |
+                                        D3D11_BIND_UNORDERED_ACCESS;
+          tex_desc.CPUAccessFlags     = 0;
+          tex_desc.MiscFlags          = D3D11_RESOURCE_MISC_SHARED;
 
-        tex_desc.Format = DirectX::MakeTypelessUNORM (
-                          DirectX::MakeTypelessFLOAT (tex_desc.Format));
+          dx_gl_interop.d3d11.staging.colorBuffer = nullptr;
+          dx_gl_interop.d3d11.staging.colorView   = nullptr;
 
-        tex_desc.ArraySize          = 1;
-        tex_desc.MipLevels          = 1;
-        tex_desc.SampleDesc.Count   = 1;
-        tex_desc.SampleDesc.Quality = 0;
-        tex_desc.Usage              = D3D11_USAGE_DEFAULT;
-        tex_desc.BindFlags          = D3D11_BIND_RENDER_TARGET |
-                                      D3D11_BIND_SHADER_RESOURCE |
-                                      D3D11_BIND_UNORDERED_ACCESS;
-        tex_desc.CPUAccessFlags     = 0;
-        tex_desc.MiscFlags          = D3D11_RESOURCE_MISC_SHARED;
+          pDevice->CreateTexture2D (         &tex_desc,                                  nullptr,
+                                             &dx_gl_interop.d3d11.staging.colorBuffer.p);
+          pDevice->CreateShaderResourceView ( dx_gl_interop.d3d11.staging.colorBuffer.p, nullptr,
+                                             &dx_gl_interop.d3d11.staging.colorView.p);
+        }
 
-        dx_gl_interop.d3d11.staging.colorBuffer = nullptr;
-        dx_gl_interop.d3d11.staging.colorView   = nullptr;
+        else // Skip the vertical flip!
+        {
+          dx_gl_interop.d3d11.staging.colorView   = nullptr;
+          dx_gl_interop.d3d11.staging.colorBuffer = dx_gl_interop.output.backbuffer.image;
+        }
 
-        pDevice->CreateTexture2D (         &tex_desc,                                  nullptr,
-                                           &dx_gl_interop.d3d11.staging.colorBuffer.p);
-        pDevice->CreateShaderResourceView ( dx_gl_interop.d3d11.staging.colorBuffer.p, nullptr,
-                                           &dx_gl_interop.d3d11.staging.colorView.p);
-      }
-
-      else // Skip the vertical flip!
-      {
-        dx_gl_interop.d3d11.staging.colorView   = nullptr;
-        dx_gl_interop.d3d11.staging.colorBuffer = dx_gl_interop.output.backbuffer.image;
-      }
-
-      dx_gl_interop.present_man.Reset (&dx_gl_interop);
+        if (! dx_gl_interop.present_man.Reset (&dx_gl_interop))
+        {
+          dx_gl_interop.present_retry_at =
+            GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
+          dx_gl_interop.stale = true;
+        }
 
 
-      if (dx_gl_interop.d3d11.staging.colorBuffer.p != nullptr)
-      {
-        glGenRenderbuffers (1, &dx_gl_interop.gl.color_rbo);
-        glGenFramebuffers  (1, &dx_gl_interop.gl.fbo);
+        if (dx_gl_interop.d3d11.staging.colorBuffer.p != nullptr &&
+            GetTickCount64 () >= dx_gl_interop.present_retry_at)
+        {
+          glGenRenderbuffers (1, &dx_gl_interop.gl.color_rbo);
+          glGenFramebuffers  (1, &dx_gl_interop.gl.fbo);
 
-        dx_gl_interop.d3d11.staging.hColorBuffer =
-          wglDXRegisterObjectNV ( dx_gl_interop.d3d11.hInteropDevice,
-                                  dx_gl_interop.d3d11.staging.colorBuffer,
-                                  dx_gl_interop.gl.color_rbo, GL_RENDERBUFFER,
-                                                              WGL_ACCESS_WRITE_DISCARD_NV );
+          dx_gl_interop.d3d11.staging.hColorBuffer =
+            wglDXRegisterObjectNV ( dx_gl_interop.d3d11.hInteropDevice,
+                                    dx_gl_interop.d3d11.staging.colorBuffer,
+                                    dx_gl_interop.gl.color_rbo, GL_RENDERBUFFER,
+                                                                WGL_ACCESS_WRITE_DISCARD_NV );
+
+          if (dx_gl_interop.d3d11.staging.hColorBuffer == nullptr)
+          {
+            dx_gl_interop.present_retry_at =
+              GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
+            dx_gl_interop.stale = true;
+          }
+        }
       }
     }
 
@@ -3228,8 +3424,16 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       s_gl_skf1_force  = (env_len > 0 && env_buf [0] == '1');
     }
 
+    const bool interop_present_ready =
+      ( SK_GL_OnD3D11                              &&
+        pSwapChain != nullptr                      &&
+        dx_gl_interop.d3d11.hInteropDevice != nullptr &&
+        dx_gl_interop.d3d11.staging.colorBuffer != nullptr &&
+        (! bootstrap_finalized_this_frame)         &&
+        GetTickCount64 () >= dx_gl_interop.present_retry_at );
+
     bool use_gl_skf1_fallback = false;
-    if (SK_GL_OnD3D11 && pSwapChain != nullptr && hWnd != nullptr)
+    if (interop_present_ready && hWnd != nullptr)
     {
       if (s_gl_skf1_force)
       {
@@ -3258,9 +3462,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       }
     }
 
-    if (dx_gl_interop.d3d11.staging.colorBuffer == nullptr || (! SK_GL_OnD3D11))
+    if (! interop_present_ready)
     {
-      if (! SK_GL_OnD3D11)
+      if ((! SK_GL_OnD3D11) && (! config.apis.dxgi.d3d11.hook))
       {
         SK_RunOnce (
           SK_ImGui_WarningWithTitle (
@@ -3873,6 +4077,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     }
 
     bool _SkipThisFrame = false;
+    bool used_present_manager = false;
 
 
     // Time how long the swap actually takes, because
@@ -3896,7 +4101,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
     if (! _SkipThisFrame)
     {
-      if (SK_GL_OnD3D11 && pSwapChain != nullptr && ! use_gl_skf1_fallback)
+      if (interop_present_ready && ! use_gl_skf1_fallback)
       {
         int present_interval =
           SK_GL_GetSwapInterval ();
@@ -3911,10 +4116,18 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           present_interval = std::min (present_interval, config.render.framerate.sync_interval_clamp);
 
 
-        dx_gl_interop.present_man.Present (&dx_gl_interop, present_interval);
+        used_present_manager =
+          dx_gl_interop.present_man.Present (&dx_gl_interop, present_interval);
+
+        if (! used_present_manager)
+        {
+          dx_gl_interop.present_retry_at =
+            GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
+          dx_gl_interop.stale = true;
+        }
       }
 
-      else
+      if (! used_present_manager)
       {
         if (__SK_BFI)
           SK_GL_SwapInterval (0);
@@ -3939,9 +4152,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           InterlockedCompareExchange (&s_sk_probe_gl_out_latch [sk_probe_gl_out_idx], 1, 0) == 0)
       {
         const char* sk_probe_branch =
-          (SK_GL_OnD3D11 && pSwapChain != nullptr) ? "present_man" : "real_wgl";
+          used_present_manager ? "present_man" : "real_wgl";
         const int sk_probe_real_wgl_called =
-          (! _SkipThisFrame && ! (SK_GL_OnD3D11 && pSwapChain != nullptr)) ? 1 : 0;
+          (! _SkipThisFrame && ! used_present_manager) ? 1 : 0;
         _SidecarLog_GL ( L"[SK-PROBE][GL-OUT] OnD3D11=%d Reset=%d fs=%d branch=%hs real_wgl_called=%d",
                          (int)SK_GL_OnD3D11,
                          (int)SK_GL_OnD3D11_Reset,
