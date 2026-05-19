@@ -156,8 +156,9 @@ static bool SK_GL_IsSidecarKManaged ()
   if (InterlockedCompareExchange (&s_confirmed, 0, 0) != 0)
     return true;
 
-  // Called exclusively from SK_GL_SwapBuffers on the GL render thread, so
-  // plain reads/writes to s_last_attempt_ms are safe (single-threaded path).
+  // s_last_attempt_ms is accessed only from SK_GL_SwapBuffers (the hooked
+  // wglSwapBuffers/SwapBuffers entry point), which runs exclusively on the GL
+  // render thread.  No synchronization is required.
   static ULONGLONG s_last_attempt_ms = 0;
   const ULONGLONG  now_ms            = GetTickCount64 ();
   if (now_ms - s_last_attempt_ms < 500ULL)
@@ -3560,6 +3561,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     // independently of the BFI path so the two never share stale handles.
     if (use_gl_skf1_fallback)
     {
+      // All statics in this block are accessed only from SK_GL_SwapBuffers on the
+      // GL render thread; no synchronization is needed for non-atomic statics here.
       static HANDLE              s_fs_hMap      = nullptr;
       static uint8_t*            s_fs_base      = nullptr;
       static SIZE_T              s_fs_map_bytes = 0;
@@ -3578,7 +3581,6 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       static std::vector<uint8_t> s_fs_snapshot;
 
       // Control-plane state: mirrors the DXGI path (SidecarK_Control_<pid>).
-      // All statics in this block are accessed only from the GL render thread.
       static HANDLE              s_fs_ctrlMap         = nullptr;
       static uint8_t*            s_fs_ctrlBase        = nullptr;
       static volatile LONG*      s_fs_overlayEnabled  = nullptr;
