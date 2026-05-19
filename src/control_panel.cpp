@@ -8766,17 +8766,19 @@ SK_ImGui_StageNextFrame (void)
     if (config.control_panel.keys.toggle.alt)
     {
       if (! toggle_combo.empty ()) toggle_combo += L" + ";
+      const auto& alt_name = virtualToHuman [VK_MENU];
       toggle_combo +=
-        virtualToHuman [VK_MENU].empty () ? L"ALT"
-                                          : virtualToHuman [VK_MENU];
+        alt_name [0] == L'\0' ? L"ALT"
+                              : alt_name;
     }
 
     if (config.control_panel.keys.toggle.shift)
     {
       if (! toggle_combo.empty ()) toggle_combo += L" + ";
+      const auto& shift_name = virtualToHuman [VK_SHIFT];
       toggle_combo +=
-        virtualToHuman [VK_SHIFT].empty () ? L"SHIFT"
-                                           : virtualToHuman [VK_SHIFT];
+        shift_name [0] == L'\0' ? L"SHIFT"
+                                : shift_name;
     }
 
     if (! toggle_combo.empty ())
