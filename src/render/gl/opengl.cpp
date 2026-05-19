@@ -3054,7 +3054,6 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                                   _interop_contexts [hDC];
 
     auto& pDevice    = dx_gl_interop.d3d11.pDevice;
-    auto& pDevCtx    = dx_gl_interop.d3d11.pDevCtx;
     auto& pFactory   = dx_gl_interop.d3d11.pFactory;
     auto& pSwapChain = dx_gl_interop.output.pSwapChain;
 
