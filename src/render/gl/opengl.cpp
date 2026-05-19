@@ -90,8 +90,13 @@ struct SK_GL_Context {
 //  * Identifies games that actually USE OpenGL, rather than
 //      strangely call SetPixelFormat and nothing else...
 int  SK_GL_ContextCount  = 0;
-bool SK_GL_OnD3D11       = false;
-bool SK_GL_OnD3D11_Reset = false;
+bool SK_GL_OnD3D11            = false;
+bool SK_GL_OnD3D11_Reset      = false;
+// Set once when the per-process SidecarK_Control_<pid> mapping is confirmed
+// present with a valid "SKC1" v1 signature.  When true, the GL→D3D11/DXGI/
+// present-manager bootstrap is skipped and SK_GL_OnD3D11 stays false so that
+// the native OpenGL SKF1/BFI compositing path is used instead.
+bool SK_GL_Virule_SKF1_Native = false;
 
 unsigned int SK_GL_SwapHook = 0;
 volatile LONG __gl_ready = FALSE;
@@ -2754,7 +2759,56 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           (const char *)glGetString (GL_RENDERER), "D3D12"
         );
 
-      if (config.apis.dxgi.d3d11.hook && (! glon12))
+      // -- Virule/SKF1 native-OpenGL gate -----------------------------------
+      // If this process is managed by SidecarKHost for Virule overlay
+      // compositing, skip the GL→D3D11/DXGI/present-manager bootstrap.
+      // Detection: open the per-process SidecarK_Control_<pid> shared-memory
+      // mapping and verify the "SKC1" v1 signature.  Cached after first
+      // confirmed presence so no mapping open is performed on subsequent
+      // frames.  SK_GL_OnD3D11 remains false; the native OpenGL SKF1/BFI
+      // compositing path handles the overlay without D3D11/DXGI involvement.
+      if (! SK_GL_Virule_SKF1_Native)
+      {
+        wchar_t ctrl_name [64] = { };
+        _snwprintf_s ( ctrl_name, _countof (ctrl_name), _TRUNCATE,
+                       L"Local\\SidecarK_Control_%lu",
+                       (unsigned long)GetCurrentProcessId () );
+
+        HANDLE hCtrl = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
+        if (hCtrl != nullptr)
+        {
+          uint8_t* ctrlBase =
+            static_cast <uint8_t *> (MapViewOfFile (hCtrl, FILE_MAP_READ, 0, 0, 0));
+          if (ctrlBase != nullptr)
+          {
+            // Validate mapped region is large enough for the "SKC1" header
+            // (4-byte signature + 4-byte version field = minimum 8 bytes).
+            MEMORY_BASIC_INFORMATION mbi = { };
+            const SIZE_T region_bytes =
+              VirtualQuery (ctrlBase, &mbi, sizeof (mbi)) != 0
+                ? mbi.RegionSize : 0;
+
+            if (region_bytes >= 8)
+            {
+              char sig [4] = { };
+              memcpy (sig, ctrlBase, sizeof (sig));
+              const uint32_t ctrlVer =
+                *reinterpret_cast <const uint32_t *> (ctrlBase + 0x04);
+              if (memcmp (sig, "SKC1", sizeof (sig)) == 0 && ctrlVer == 1u)
+              {
+                SK_GL_Virule_SKF1_Native = true;
+                _SidecarLog_GL (
+                  L"[SKF1-GL] Virule/SKF1 native-OpenGL mode detected: "
+                  L"D3D11 bootstrap skipped, SK_GL_OnD3D11 stays false." );
+              }
+            }
+            UnmapViewOfFile (ctrlBase);
+          }
+          CloseHandle (hCtrl);
+        }
+      }
+
+      if (config.apis.dxgi.d3d11.hook && (! glon12) && (! SK_GL_Virule_SKF1_Native))
       {
         extern void
         WINAPI SK_HookDXGI (void);
@@ -3260,7 +3314,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
     if (dx_gl_interop.d3d11.staging.colorBuffer == nullptr || (! SK_GL_OnD3D11))
     {
-      if (! SK_GL_OnD3D11)
+      if (! SK_GL_OnD3D11 && ! SK_GL_Virule_SKF1_Native)
       {
         SK_RunOnce (
           SK_ImGui_WarningWithTitle (
