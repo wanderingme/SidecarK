@@ -2069,14 +2069,43 @@ struct SK_IndirectX_InteropCtx
     SK_ComPtr <ID3D11PixelShader>          pPixelShader;
   } bootstrap;
 
-  ULONGLONG                                present_retry_at = 0;
-  bool     stale = false;
+  ULONGLONG                                present_retry_at  = 0;
+  ULONGLONG                                register_retry_at = 0;
+  bool                                     stale             = false;
 };
 
-static constexpr DWORD     SK_GL_PRESENT_MANAGER_WAIT_MS        = 8UL;
-static constexpr DWORD     SK_GL_PRESENT_MANAGER_RETRY_MS       = 250UL;
+static constexpr DWORD     SK_GL_PRESENT_MANAGER_WAIT_FULLSCREEN_MS  = 8UL;
+static constexpr DWORD     SK_GL_PRESENT_MANAGER_WAIT_DWM_MS         = 20UL;
+static constexpr DWORD     SK_GL_PRESENT_MANAGER_RETRY_FULLSCREEN_MS = 250UL;
+static constexpr DWORD     SK_GL_PRESENT_MANAGER_RETRY_DWM_MS        = 1000UL;
+static constexpr DWORD     SK_GL_INTEROP_REGISTER_RETRY_MS           = 500UL;
 static constexpr DWORD     SK_GL_INTEROP_BOOTSTRAP_RETRY_MS     = 250UL;
-static constexpr ULONGLONG SK_GL_PRESENT_CATCHUP_BUDGET_MS      = 8ULL;
+
+static DWORD
+SK_GL_GetPresentManagerWaitBudget (const SK_IndirectX_InteropCtx* pCtx)
+{
+  return
+    (pCtx != nullptr && pCtx->gl.fullscreen) ?
+      SK_GL_PRESENT_MANAGER_WAIT_FULLSCREEN_MS :
+      SK_GL_PRESENT_MANAGER_WAIT_DWM_MS;
+}
+
+static DWORD
+SK_GL_GetPresentRetryBackoffMs (const SK_IndirectX_InteropCtx* pCtx)
+{
+  return
+    (pCtx != nullptr && pCtx->gl.fullscreen) ?
+      SK_GL_PRESENT_MANAGER_RETRY_FULLSCREEN_MS :
+      SK_GL_PRESENT_MANAGER_RETRY_DWM_MS;
+}
+
+static ULONGLONG
+SK_GL_GetPresentCatchupBudgetMs (const SK_IndirectX_InteropCtx* pCtx)
+{
+  return static_cast <ULONGLONG> (
+    SK_GL_GetPresentManagerWaitBudget (pCtx)
+  );
+}
 
 static bool
 SK_GL_WaitForPresentManagerAck (HANDLE hAck, DWORD dwTimeout)
@@ -2358,6 +2387,8 @@ SK_GL_FinalizeInteropBootstrap ( SK_IndirectX_InteropCtx& ctx,
   ctx.gl.hglrc                           = hglrc;
   ctx.output.hWnd                        = hWnd;
   ctx.output.hMonitor                    = hMonitor;
+  ctx.present_retry_at                   = 0;
+  ctx.register_retry_at                  = 0;
   ctx.stale                              = true;
 
   SK_GL_OnD3D11 = true;
@@ -2531,7 +2562,9 @@ SK_IndirectX_PresentManager::Reset (SK_IndirectX_InteropCtx* pCtx)
   SetEvent (hNotifyReset);
 
   return
-    SK_GL_WaitForPresentManagerAck (hAckReset, SK_GL_PRESENT_MANAGER_WAIT_MS);
+    SK_GL_WaitForPresentManagerAck (
+      hAckReset, SK_GL_GetPresentManagerWaitBudget (pCtx)
+    );
 }
 
 bool
@@ -2545,7 +2578,9 @@ SK_IndirectX_PresentManager::Present (SK_IndirectX_InteropCtx *pCtx, int Interva
   SetEvent (hNotifyPresent);
 
   return
-    SK_GL_WaitForPresentManagerAck (hAckPresent, SK_GL_PRESENT_MANAGER_WAIT_MS);
+    SK_GL_WaitForPresentManagerAck (
+      hAckPresent, SK_GL_GetPresentManagerWaitBudget (pCtx)
+    );
 }
 
 static HWND hwndLast;
@@ -3056,6 +3091,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     auto& pDevice    = dx_gl_interop.d3d11.pDevice;
     auto& pFactory   = dx_gl_interop.d3d11.pFactory;
     auto& pSwapChain = dx_gl_interop.output.pSwapChain;
+    dx_gl_interop.gl.fullscreen = rb.fullscreen_exclusive;
 
     RECT                  rcWnd = { };
     GetClientRect (hWnd, &rcWnd);
@@ -3115,8 +3151,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
   //if (std::exchange (last10BitHDRState, __SK_HDR_10BitSwap) != __SK_HDR_10BitSwap) dx_gl_interop.stale = true;
 
 
+    const ULONGLONG now_ticks = GetTickCount64 ();
+
     const bool interop_retry_pending =
-      (GetTickCount64 () < dx_gl_interop.present_retry_at);
+      (now_ticks < dx_gl_interop.present_retry_at);
 
     LONG64 llFrames =
       ReadAcquire64 (&dx_gl_interop.present_man.frames);
@@ -3136,7 +3174,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           return TRUE;
         }
 
-        if (GetTickCount64 () - catchup_start >= SK_GL_PRESENT_CATCHUP_BUDGET_MS)
+        if (GetTickCount64 () - catchup_start >= SK_GL_GetPresentCatchupBudgetMs (&dx_gl_interop))
         {
           static LONG s_gl_present_catchup_timeouts = 0;
           if (InterlockedIncrement (&s_gl_present_catchup_timeouts) <= 8)
@@ -3147,8 +3185,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           }
 
           dx_gl_interop.present_retry_at =
-            GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
-          dx_gl_interop.stale = true;
+            GetTickCount64 () + SK_GL_GetPresentRetryBackoffMs (&dx_gl_interop);
           break;
         }
       }
@@ -3158,12 +3195,17 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     if (SK_GL_OnD3D11 && std::exchange (SK_GL_OnD3D11_Reset, false))
                                          dx_gl_interop.stale = true;
 
+    bool rebuilt_interop_this_frame = false;
+
     if ( SK_GL_OnD3D11                              &&
          dx_gl_interop.d3d11.hInteropDevice != nullptr &&
          (! bootstrap_finalized_this_frame)         &&
          (! interop_retry_pending)                  &&
          (std::exchange (dx_gl_interop.stale, false) || pSwapChain == nullptr) )
     {
+      rebuilt_interop_this_frame = true;
+      dx_gl_interop.register_retry_at = 0;
+
       // Avoid stalling the render thread here; any rebuild failure, timeout, or
       // retry_at cooldown below keeps interop_present_ready false and forces the
       // real SwapBuffers path for the current frame instead.
@@ -3274,7 +3316,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       if (FAILED (hrInterop) || pSwapChain == nullptr)
       {
         dx_gl_interop.present_retry_at =
-          GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
+          GetTickCount64 () + SK_GL_GetPresentRetryBackoffMs (&dx_gl_interop);
         dx_gl_interop.stale = true;
       }
 
@@ -3397,30 +3439,35 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           }
 
           dx_gl_interop.present_retry_at =
-            GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
-          dx_gl_interop.stale = true;
+            GetTickCount64 () + SK_GL_GetPresentRetryBackoffMs (&dx_gl_interop);
         }
 
+      }
+    }
 
-        if (dx_gl_interop.d3d11.staging.colorBuffer.p != nullptr &&
-            GetTickCount64 () >= dx_gl_interop.present_retry_at)
-        {
-          glGenRenderbuffers (1, &dx_gl_interop.gl.color_rbo);
-          glGenFramebuffers  (1, &dx_gl_interop.gl.fbo);
+    if ( SK_GL_OnD3D11                               &&
+         dx_gl_interop.d3d11.hInteropDevice != nullptr  &&
+         dx_gl_interop.d3d11.staging.colorBuffer.p != nullptr &&
+         dx_gl_interop.d3d11.staging.hColorBuffer  == nullptr &&
+         (! rebuilt_interop_this_frame)                  &&
+         (! interop_retry_pending)                       &&
+         GetTickCount64 () >= dx_gl_interop.register_retry_at )
+    {
+      if (dx_gl_interop.gl.color_rbo == 0)
+        glGenRenderbuffers (1, &dx_gl_interop.gl.color_rbo);
+      if (dx_gl_interop.gl.fbo == 0)
+        glGenFramebuffers  (1, &dx_gl_interop.gl.fbo);
 
-          dx_gl_interop.d3d11.staging.hColorBuffer =
-            wglDXRegisterObjectNV ( dx_gl_interop.d3d11.hInteropDevice,
-                                    dx_gl_interop.d3d11.staging.colorBuffer,
-                                    dx_gl_interop.gl.color_rbo, GL_RENDERBUFFER,
-                                                                WGL_ACCESS_WRITE_DISCARD_NV );
+      dx_gl_interop.d3d11.staging.hColorBuffer =
+        wglDXRegisterObjectNV ( dx_gl_interop.d3d11.hInteropDevice,
+                                dx_gl_interop.d3d11.staging.colorBuffer,
+                                dx_gl_interop.gl.color_rbo, GL_RENDERBUFFER,
+                                                            WGL_ACCESS_WRITE_DISCARD_NV );
 
-          if (dx_gl_interop.d3d11.staging.hColorBuffer == nullptr)
-          {
-            dx_gl_interop.present_retry_at =
-              GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
-            dx_gl_interop.stale = true;
-          }
-        }
+      if (dx_gl_interop.d3d11.staging.hColorBuffer == nullptr)
+      {
+        dx_gl_interop.register_retry_at =
+          GetTickCount64 () + SK_GL_INTEROP_REGISTER_RETRY_MS;
       }
     }
 
@@ -3446,6 +3493,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         pSwapChain != nullptr                      &&
         dx_gl_interop.d3d11.hInteropDevice != nullptr &&
         dx_gl_interop.d3d11.staging.colorBuffer != nullptr &&
+        dx_gl_interop.d3d11.staging.hColorBuffer != nullptr &&
+        dx_gl_interop.gl.color_rbo != 0          &&
+        dx_gl_interop.gl.fbo != 0                &&
         (! bootstrap_finalized_this_frame)         &&
         GetTickCount64 () >= dx_gl_interop.present_retry_at );
 
@@ -4149,8 +4199,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           }
 
           dx_gl_interop.present_retry_at =
-            GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
-          dx_gl_interop.stale = true;
+            GetTickCount64 () + SK_GL_GetPresentRetryBackoffMs (&dx_gl_interop);
         }
       }
 
