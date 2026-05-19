@@ -3450,7 +3450,6 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
          dx_gl_interop.d3d11.staging.colorBuffer.p != nullptr &&
          dx_gl_interop.d3d11.staging.hColorBuffer  == nullptr &&
          (! rebuilt_interop_this_frame)                  &&
-         (! interop_retry_pending)                       &&
          GetTickCount64 () >= dx_gl_interop.register_retry_at )
     {
       if (dx_gl_interop.gl.color_rbo == 0)
