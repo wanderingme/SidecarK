@@ -3165,8 +3165,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
          (! interop_retry_pending)                  &&
          (std::exchange (dx_gl_interop.stale, false) || pSwapChain == nullptr) )
     {
-      // Avoid stalling the render thread here; the bounded fail-open path below
-      // will fall back to the real swap if rebuild work is not immediately safe.
+      // Avoid stalling the render thread here; any rebuild failure, timeout, or
+      // retry_at cooldown below keeps interop_present_ready false and forces the
+      // real SwapBuffers path for the current frame instead.
       glFlush ();
 
       if (pSwapChain != nullptr)
@@ -3481,6 +3482,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
     if (! interop_present_ready)
     {
+      // Only warn for the explicit pure-GL configuration; bootstrap-in-progress
+      // and timed-out interop states should stay quiet and fail open instead.
       if ((! SK_GL_OnD3D11) && (! config.apis.dxgi.d3d11.hook))
       {
         SK_RunOnce (
