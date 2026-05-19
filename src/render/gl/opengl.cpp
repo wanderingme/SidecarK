@@ -156,6 +156,8 @@ static bool SK_GL_IsSidecarKManaged ()
   if (InterlockedCompareExchange (&s_confirmed, 0, 0) != 0)
     return true;
 
+  // Called exclusively from SK_GL_SwapBuffers on the GL render thread, so
+  // plain reads/writes to s_last_attempt_ms are safe (single-threaded path).
   static ULONGLONG s_last_attempt_ms = 0;
   const ULONGLONG  now_ms            = GetTickCount64 ();
   if (now_ms - s_last_attempt_ms < 500ULL)
@@ -173,10 +175,17 @@ static bool SK_GL_IsSidecarKManaged ()
   uint8_t* base = (uint8_t *)MapViewOfFile (h, FILE_MAP_READ, 0, 0, 0);
   if (base != nullptr)
   {
-    char sig [4] = { };
-    memcpy (sig, base, sizeof (sig));
-    const uint32_t ver = *reinterpret_cast<const uint32_t *>(base + 4);
-    ok = (memcmp (sig, "SKC1", sizeof (sig)) == 0 && ver == 1u);
+    // Verify the mapped region is large enough for signature (4 bytes) + version (4 bytes).
+    MEMORY_BASIC_INFORMATION mbi = { };
+    const SIZE_T region_size =
+      (VirtualQuery (base, &mbi, sizeof (mbi)) != 0) ? mbi.RegionSize : 0;
+    if (region_size >= 8)
+    {
+      char sig [4] = { };
+      memcpy (sig, base, sizeof (sig));
+      const uint32_t ver = *reinterpret_cast<const uint32_t *>(base + 4);
+      ok = (memcmp (sig, "SKC1", sizeof (sig)) == 0 && ver == 1u);
+    }
     UnmapViewOfFile (base);
   }
   CloseHandle (h);
@@ -3569,6 +3578,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       static std::vector<uint8_t> s_fs_snapshot;
 
       // Control-plane state: mirrors the DXGI path (SidecarK_Control_<pid>).
+      // All statics in this block are accessed only from the GL render thread.
       static HANDLE              s_fs_ctrlMap         = nullptr;
       static uint8_t*            s_fs_ctrlBase        = nullptr;
       static volatile LONG*      s_fs_overlayEnabled  = nullptr;
@@ -3614,10 +3624,18 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               uint8_t* ctrlBase = (uint8_t *)MapViewOfFile (hCtrl, FILE_MAP_READ, 0, 0, 0);
               if (ctrlBase != nullptr)
               {
+                // Verify the mapped region is large enough for sig(4) + ver(4) + flag(4).
+                MEMORY_BASIC_INFORMATION ctrlMbi = { };
+                const SIZE_T ctrlRegionSize =
+                  (VirtualQuery (ctrlBase, &ctrlMbi, sizeof (ctrlMbi)) != 0)
+                    ? ctrlMbi.RegionSize : 0;
                 char sig [4] = { };
-                memcpy (sig, ctrlBase, sizeof (sig));
-                const uint32_t ctrlVer = *reinterpret_cast<const uint32_t *> (ctrlBase + 0x04);
-                if (memcmp (sig, "SKC1", sizeof (sig)) == 0 && ctrlVer == 1u)
+                if (ctrlRegionSize >= 4)
+                  memcpy (sig, ctrlBase, sizeof (sig));
+                const uint32_t ctrlVer = (ctrlRegionSize >= 8)
+                  ? *reinterpret_cast<const uint32_t *> (ctrlBase + 0x04) : 0u;
+                if (ctrlRegionSize >= 12 &&
+                    memcmp (sig, "SKC1", sizeof (sig)) == 0 && ctrlVer == 1u)
                 {
                   s_fs_ctrlMap        = hCtrl;
                   s_fs_ctrlBase       = ctrlBase;
