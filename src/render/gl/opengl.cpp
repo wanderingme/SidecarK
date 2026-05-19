@@ -2087,8 +2087,7 @@ SK_GL_WaitForPresentManagerAck (HANDLE hAck, DWORD dwTimeout)
     WaitForMultipleObjectsEx (2, hWaitEvents, FALSE, dwTimeout, FALSE);
 
   return
-    (dwWait == WAIT_OBJECT_0) ||
-    (dwWait == (WAIT_OBJECT_0 + 1));
+    (dwWait == WAIT_OBJECT_0);
 }
 
 static void
@@ -3140,6 +3139,14 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
         if (GetTickCount64 () - catchup_start >= SK_GL_PRESENT_CATCHUP_BUDGET_MS)
         {
+          static LONG s_gl_present_catchup_timeouts = 0;
+          if (InterlockedIncrement (&s_gl_present_catchup_timeouts) <= 8)
+          {
+            SK_LOG1 ( ( L" # Timed out waiting for OpenGL present catch-up; "
+                        L"falling back to real SwapBuffers" ),
+                        L"  GLDX11  " );
+          }
+
           dx_gl_interop.present_retry_at =
             GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
           dx_gl_interop.stale = true;
@@ -3158,6 +3165,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
          (! interop_retry_pending)                  &&
          (std::exchange (dx_gl_interop.stale, false) || pSwapChain == nullptr) )
     {
+      // Avoid stalling the render thread here; the bounded fail-open path below
+      // will fall back to the real swap if rebuild work is not immediately safe.
       glFlush ();
 
       if (pSwapChain != nullptr)
@@ -3379,6 +3388,14 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
         if (! dx_gl_interop.present_man.Reset (&dx_gl_interop))
         {
+          static LONG s_gl_present_reset_timeouts = 0;
+          if (InterlockedIncrement (&s_gl_present_reset_timeouts) <= 8)
+          {
+            SK_LOG1 ( ( L" # Timed out waiting for OpenGL interop reset; "
+                        L"falling back to real SwapBuffers" ),
+                        L"  GLDX11  " );
+          }
+
           dx_gl_interop.present_retry_at =
             GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
           dx_gl_interop.stale = true;
@@ -4121,6 +4138,14 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
         if (! used_present_manager)
         {
+          static LONG s_gl_present_wait_timeouts = 0;
+          if (InterlockedIncrement (&s_gl_present_wait_timeouts) <= 8)
+          {
+            SK_LOG1 ( ( L" # Timed out waiting for OpenGL present manager; "
+                        L"falling back to real SwapBuffers" ),
+                        L"  GLDX11  " );
+          }
+
           dx_gl_interop.present_retry_at =
             GetTickCount64 () + SK_GL_PRESENT_MANAGER_RETRY_MS;
           dx_gl_interop.stale = true;
