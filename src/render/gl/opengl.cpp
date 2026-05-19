@@ -4476,10 +4476,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                   const bool stable_after_copy = (c1 == c2);
                   if (s_has_frame && stable_after_copy && valid && c1 == s_last_counter)
                   {
-                    const ULONGLONG now_ticks = GetTickCount64 ();
+                    const ULONGLONG stale_ticks = GetTickCount64 ();
                     if (s_stale_counter_since == 0)
-                      s_stale_counter_since = now_ticks;
-                    else if (now_ticks - s_stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
+                      s_stale_counter_since = stale_ticks;
+                    else if (stale_ticks - s_stale_counter_since >= kSKF1_StaleCounterTimeoutMs)
                     {
                       s_saw_zero_counter = true;
                       reason = R_STALLED;
