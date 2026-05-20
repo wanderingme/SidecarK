@@ -3577,6 +3577,12 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                             &dx_gl_interop.d3d11.staging.hColorBuffer );
     }
 
+    // Maximum allowed width or height for an SKF1 surface.  Covers 8 K+
+    // displays (7680 × 4320) while rejecting implausible / malicious values.
+    // Declared at function scope so both the use_gl_skf1_fallback block and
+    // the D3D11-path inline parse below can reference it.
+    static constexpr uint32_t c_skf1_max_dim = 16384u;
+
     // [SKF1-GL-FALLBACK] Composite the SKF1 producer frame over FBO 0 before
     // the real wglSwapBuffers call.  Runs after both the D3D11 interop path
     // (fullscreen-shaped EFPSE/SFML windows where present_man is bypassed) and
@@ -3585,9 +3591,6 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     // independently of the BFI path so the two never share stale handles.
     if (use_gl_skf1_fallback)
     {
-      // Maximum allowed width or height for an SKF1 surface.  Covers 8 K+
-      // displays (7680 × 4320) while rejecting implausible / malicious values.
-      static constexpr uint32_t c_skf1_max_dim = 16384u;
       // All statics in this block are accessed only from SK_GL_SwapBuffers on the
       // GL render thread; no synchronization is needed for non-atomic statics here.
       static HANDLE               s_fs_hMap      = nullptr;
