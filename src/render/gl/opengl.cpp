@@ -3619,6 +3619,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       //   cleared on HGLRC change so a new context can retry.
       static int   s_fs_warm        = 0;
       static bool  s_fs_prog_failed = false;
+      // Whether ImGui GL device objects (shaders, font texture, VBO/VAO) have
+      // been prewarmed for the current HGLRC.  Reset on context change.
+      static bool  s_fs_imgui_prewarmed = false;
 
       // HGLRC ownership: GL objects are context-owned.  If the game recreates or
       // switches its GL context, all cached handles become invalid in the new context.
@@ -3672,10 +3675,11 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           s_fs_h             = 0;
           s_fs_stride        = 0;
           s_fs_fmt           = 0;
-          s_fs_prog_failed   = false;  // allow shader compile retry in new context
-          s_fs_stable_frames = 0;
-          s_fs_stable_w      = 0;
-          s_fs_stable_h      = 0;
+          s_fs_prog_failed      = false;  // allow shader compile retry in new context
+          s_fs_stable_frames    = 0;
+          s_fs_stable_w         = 0;
+          s_fs_stable_h         = 0;
+          s_fs_imgui_prewarmed  = false;  // ImGui device objects belong to the old context
           InterlockedExchange (&s_skf1_compositor_fully_warm, 0);
           const HGLRC hglrc_old = s_fs_owner_hglrc;
           s_fs_owner_hglrc = hglrc_now;
@@ -4236,6 +4240,25 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                   glPixelStorei   (GL_UNPACK_ROW_LENGTH, pl_sv_rowlen);
 
                   _SidecarLog_GL (L"[SKF1-WARM] phase 1->6: first frame uploaded (ctr=%u)", c1);
+
+                  // Prewarm ImGui GL device objects (shader compile, font atlas
+                  // texture upload, VBO/VAO creation) so the first visible
+                  // SK_Overlay_DrawGL() call is not the first time these run.
+                  // ImGui_ImplGL3_CreateDeviceObjects saves/restores
+                  // GL_TEXTURE_BINDING_2D, GL_ARRAY_BUFFER_BINDING, and
+                  // GL_VERTEX_ARRAY_BINDING internally; it also fully handles
+                  // pixel unpack state (PBO, alignment, row length) inside
+                  // ImGui_ImplGL3_CreateFontsTexture.  The only state it does
+                  // not save is GL_ACTIVE_TEXTURE, so we guard that here.
+                  if (! s_fs_imgui_prewarmed)
+                  {
+                    s_fs_imgui_prewarmed = true;
+                    GLint pw_sv_active = 0;
+                    glGetIntegerv (GL_ACTIVE_TEXTURE, &pw_sv_active);
+                    glActiveTexture (GL_TEXTURE0);
+                    ImGui_ImplGL3_CreateDeviceObjects ();
+                    glActiveTexture ((GLenum)pw_sv_active);
+                  }
                 }
               }
             }
@@ -4349,39 +4372,28 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         if (s_fs_overlay_enabled && s_fs_warm == 6 &&
             s_fs_has_frame && s_fs_tex != 0 && s_fs_prog != 0 && s_fs_vao != 0)
         {
-          // Save GL state — comprehensive envelope to prevent any game-state clobber.
+          // Save exactly the GL state this block mutates and nothing more.
+          // Upload-only state (pixel unpack, PBO, depth func/mask, stencil
+          // params, blend equation) is NOT touched here and is NOT saved.
+          // GL_READ_FRAMEBUFFER_BINDING / GL_DRAW_FRAMEBUFFER_BINDING are
+          // GL 3.0 enums that may be invalid on compat/extension-only contexts;
+          // the single GL_FRAMEBUFFER_BINDING query (= draw FBO binding) is
+          // sufficient since glBindFramebuffer(GL_FRAMEBUFFER,0) sets both.
           GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
           GLint     sv_active  = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &sv_active);
           GLint     sv_tex2d   = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &sv_tex2d);
           GLint     sv_vao     = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &sv_vao);
-          GLint     sv_arr     = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &sv_arr);
           GLint     sv_elem    = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &sv_elem);
-          // Save read and draw FBOs separately; the game may have set them differently.
-          GLint     sv_rfbo    = 0; glGetIntegerv (GL_READ_FRAMEBUFFER_BINDING,     &sv_rfbo);
-          GLint     sv_dfbo    = 0; glGetIntegerv (GL_DRAW_FRAMEBUFFER_BINDING,     &sv_dfbo);
+          GLint     sv_fbo     = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &sv_fbo);
           GLint     sv_vp [4]  = { }; glGetIntegerv (GL_VIEWPORT,    sv_vp);
           GLint     sv_sci [4] = { }; glGetIntegerv (GL_SCISSOR_BOX, sv_sci);
-          GLint     sv_bsrc_rgb = 0; glGetIntegerv (GL_BLEND_SRC_RGB,    &sv_bsrc_rgb);
-          GLint     sv_bdst_rgb = 0; glGetIntegerv (GL_BLEND_DST_RGB,    &sv_bdst_rgb);
-          GLint     sv_bsrc_a   = 0; glGetIntegerv (GL_BLEND_SRC_ALPHA,  &sv_bsrc_a);
-          GLint     sv_bdst_a   = 0; glGetIntegerv (GL_BLEND_DST_ALPHA,  &sv_bdst_a);
-          GLint     sv_beq_rgb  = 0; glGetIntegerv (GL_BLEND_EQUATION_RGB,   &sv_beq_rgb);
-          GLint     sv_beq_a    = 0; glGetIntegerv (GL_BLEND_EQUATION_ALPHA, &sv_beq_a);
+          // Save blend func (changed by glBlendFuncSeparate below).
+          GLint     sv_bsrc_rgb = 0; glGetIntegerv (GL_BLEND_SRC_RGB,   &sv_bsrc_rgb);
+          GLint     sv_bdst_rgb = 0; glGetIntegerv (GL_BLEND_DST_RGB,   &sv_bdst_rgb);
+          GLint     sv_bsrc_a   = 0; glGetIntegerv (GL_BLEND_SRC_ALPHA, &sv_bsrc_a);
+          GLint     sv_bdst_a   = 0; glGetIntegerv (GL_BLEND_DST_ALPHA, &sv_bdst_a);
           GLboolean sv_cmask [4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
           glGetBooleanv (GL_COLOR_WRITEMASK, sv_cmask);
-          GLboolean sv_dmask   = GL_TRUE;
-          glGetBooleanv (GL_DEPTH_WRITEMASK, &sv_dmask);
-          GLint     sv_dfunc   = 0; glGetIntegerv (GL_DEPTH_FUNC,              &sv_dfunc);
-          GLint     sv_stfunc  = 0; glGetIntegerv (GL_STENCIL_FUNC,            &sv_stfunc);
-          GLint     sv_stref   = 0; glGetIntegerv (GL_STENCIL_REF,             &sv_stref);
-          GLint     sv_stmask  = 0; glGetIntegerv (GL_STENCIL_VALUE_MASK,      &sv_stmask);
-          GLint     sv_stfail  = 0; glGetIntegerv (GL_STENCIL_FAIL,            &sv_stfail);
-          GLint     sv_stdfail = 0; glGetIntegerv (GL_STENCIL_PASS_DEPTH_FAIL, &sv_stdfail);
-          GLint     sv_stdpass = 0; glGetIntegerv (GL_STENCIL_PASS_DEPTH_PASS, &sv_stdpass);
-          GLint     sv_stwmask = 0; glGetIntegerv (GL_STENCIL_WRITEMASK,       &sv_stwmask);
-          GLint     sv_pbo     = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &sv_pbo);
-          GLint     sv_rowlen  = 0; glGetIntegerv (GL_UNPACK_ROW_LENGTH,       &sv_rowlen);
-          GLint     sv_unpack  = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,        &sv_unpack);
           const GLboolean sv_scissor = glIsEnabled (GL_SCISSOR_TEST);
           const GLboolean sv_blend   = glIsEnabled (GL_BLEND);
           const GLboolean sv_depth   = glIsEnabled (GL_DEPTH_TEST);
@@ -4412,26 +4424,20 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           glBindVertexArray (s_fs_vao);
           glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
 
-          // Restore GL state — every path restores all saved state.
+          // Restore exactly what was saved above.
           glBindVertexArray  ((GLuint)sv_vao);
-          glBindBuffer       (GL_ARRAY_BUFFER,         (GLuint)sv_arr);
+          // GL_ELEMENT_ARRAY_BUFFER_BINDING is part of VAO state and is
+          // restored automatically when sv_vao != 0.  Explicit restore
+          // covers the sv_vao == 0 case (game not using VAOs).
           glBindBuffer       (GL_ELEMENT_ARRAY_BUFFER, (GLuint)sv_elem);
           glUseProgram       ((GLuint)sv_prog);
           glActiveTexture    ((GLenum)sv_active);
           glBindTexture      (GL_TEXTURE_2D, (GLuint)sv_tex2d);
-          // Restore read and draw FBOs to their individual saved bindings.
-          glBindFramebuffer  (GL_READ_FRAMEBUFFER, (GLuint)sv_rfbo);
-          glBindFramebuffer  (GL_DRAW_FRAMEBUFFER, (GLuint)sv_dfbo);
+          glBindFramebuffer  (GL_FRAMEBUFFER, (GLuint)sv_fbo);
           glViewport         (sv_vp [0], sv_vp [1], sv_vp [2], sv_vp [3]);
           glColorMask        (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
-          glDepthMask        (sv_dmask);
-          glDepthFunc        ((GLenum)sv_dfunc);
           glBlendFuncSeparate ((GLenum)sv_bsrc_rgb, (GLenum)sv_bdst_rgb,
                                (GLenum)sv_bsrc_a,   (GLenum)sv_bdst_a);
-          glBlendEquationSeparate ((GLenum)sv_beq_rgb, (GLenum)sv_beq_a);
-          glStencilFunc ((GLenum)sv_stfunc, sv_stref, (GLuint)sv_stmask);
-          glStencilOp   ((GLenum)sv_stfail, (GLenum)sv_stdfail, (GLenum)sv_stdpass);
-          glStencilMask ((GLuint)sv_stwmask);
           if (sv_blend)   glEnable  (GL_BLEND);        else glDisable (GL_BLEND);
           if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
           if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
@@ -4443,9 +4449,6 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           }
           else
             glDisable (GL_SCISSOR_TEST);
-          if (sv_pbo != 0) glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)sv_pbo);
-          glPixelStorei (GL_UNPACK_ROW_LENGTH, sv_rowlen);
-          glPixelStorei (GL_UNPACK_ALIGNMENT,  sv_unpack);
         }
       } // end if (hglrc_now != nullptr)
     } // end use_gl_skf1_fallback

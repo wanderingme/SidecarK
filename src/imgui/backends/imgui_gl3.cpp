@@ -464,6 +464,16 @@ ImGui_ImplGlfwGL3_CreateDeviceObjects (void)
   return true;
 }
 
+// Public alias for the prewarm / explicit creation path.
+// The header declares ImGui_ImplGL3_CreateDeviceObjects; the implementation
+// above uses the historical name ImGui_ImplGlfwGL3_CreateDeviceObjects.
+// This thin wrapper satisfies the header declaration without duplicating code.
+IMGUI_API bool
+ImGui_ImplGL3_CreateDeviceObjects (void)
+{
+  return ImGui_ImplGlfwGL3_CreateDeviceObjects ();
+}
+
 void
 ImGui_ImplGL3_InvalidateDeviceObjects (void)
 {
