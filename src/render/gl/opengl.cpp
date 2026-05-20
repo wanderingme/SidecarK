@@ -4090,8 +4090,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         glColorMask        (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
         glBlendFuncSeparate ((GLenum)sv_bsrc_rgb, (GLenum)sv_bdst_rgb,
                              (GLenum)sv_bsrc_a,   (GLenum)sv_bdst_a);
-        if (sv_blend)   glEnable  (GL_BLEND);      else glDisable (GL_BLEND);
-        if (sv_depth)   glEnable  (GL_DEPTH_TEST); else glDisable (GL_DEPTH_TEST);
+        if (sv_blend)   glEnable  (GL_BLEND);    else glDisable (GL_BLEND);
+        if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
         if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
         if (sv_cull)    glEnable  (GL_CULL_FACE);    else glDisable (GL_CULL_FACE);
         if (sv_scissor)
