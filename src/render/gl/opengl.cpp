@@ -3604,7 +3604,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       // same non-null HGLRC and valid SKF1 layout before starting heavy Phase 0a GPU
       // work.  This prevents warm-up from starting (and being immediately discarded)
       // during title-card/fullscreen transition context and dimension churn.
-      static const int c_skf1_stable = 4;
+      static const int c_skf1_stable_frames = 4;
       static int       s_fs_stable_frames = 0;
       static uint32_t  s_fs_stable_w      = 0;
       static uint32_t  s_fs_stable_h      = 0;
@@ -3812,13 +3812,13 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                                           obs_width, obs_height, obs_stride);
           if (obs_ok && obs_width == s_fs_stable_w && obs_height == s_fs_stable_h)
           {
-            if (s_fs_stable_frames < c_skf1_stable)
+            if (s_fs_stable_frames < c_skf1_stable_frames)
             {
               ++s_fs_stable_frames;
-              if (s_fs_stable_frames == c_skf1_stable)
+              if (s_fs_stable_frames == c_skf1_stable_frames)
                 _SidecarLog_GL (L"[SKF1-WARM] %d stable frames (%ux%u hglrc=%p)"
                                 L" — warm-up begins",
-                                c_skf1_stable, obs_width, obs_height, (void *)hglrc_now);
+                                c_skf1_stable_frames, obs_width, obs_height, (void *)hglrc_now);
             }
           }
           else
@@ -3839,11 +3839,11 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
 
         // -- Phase 0a (warm==0): snapshot buffer + texture storage -----------
         // Allocates the CPU snapshot heap and reserves GPU texture memory via
-        // glTexImage2D(nullptr).  Runs only after c_skf1_stable consecutive
+        // glTexImage2D(nullptr).  Runs only after c_skf1_stable_frames consecutive
         // matching frames (same HGLRC and same valid SKF1 layout), preventing
         // wasted resource allocation during title-card churn.
         if (s_fs_warm == 0 && s_fs_base != nullptr &&
-            s_fs_stable_frames >= c_skf1_stable)
+            s_fs_stable_frames >= c_skf1_stable_frames)
         {
           uint32_t pa_data_off = 0, pa_pix_fmt = 0;
           uint32_t pa_width    = 0, pa_height  = 0, pa_stride = 0;
@@ -3880,7 +3880,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                 glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
               // Clear any previous GL errors before the allocation attempt
               // (bounded to avoid infinite loop on pathological driver state).
-              for (int _err_i = 0; _err_i < 32 && glGetError () != GL_NO_ERROR; ++_err_i) { }
+              static const int c_max_err_drain = 32;
+              for (int _edi = 0; _edi < c_max_err_drain && glGetError () != GL_NO_ERROR; ++_edi) { }
               glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
                             (GLsizei)pa_width, (GLsizei)pa_height, 0,
                             GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
