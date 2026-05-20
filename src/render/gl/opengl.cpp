@@ -3580,6 +3580,14 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       static bool                s_fs_has_frame = false;
       static std::vector<uint8_t> s_fs_snapshot;
 
+      // Warm-up state:
+      //   0 = unwarmed (initial, or reset after dimension change)
+      //   1 = GPU resources ready (tex storage allocated, shader linked, VAO ready)
+      //   2 = first producer frame uploaded — draw-ready
+      // s_fs_prog_failed: set once if shader link fails; suppresses further attempts.
+      static int  s_fs_warm        = 0;
+      static bool s_fs_prog_failed = false;
+
       // Control-plane state: mirrors the DXGI path (SidecarK_Control_<pid>).
       static HANDLE              s_fs_ctrlMap         = nullptr;
       static uint8_t*            s_fs_ctrlBase        = nullptr;
@@ -3667,7 +3675,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       // When the overlay is turned off, invalidate the cached frame so that
       // the stale texture is never composited and fresh frames are uploaded
       // on the next ON transition.
-      if (!s_fs_overlay_enabled)
+      if (! s_fs_overlay_enabled)
         s_fs_has_frame = false;
 
       // -- Step 1: open / maintain the SKF1 shared-memory mapping ----------
@@ -3699,105 +3707,329 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         }
       }
 
-      // -- Step 2: parse header, snapshot pixels, upload texture on change -
-      if (s_fs_overlay_enabled && s_fs_base != nullptr)
+      // Helper lambda: parse the SKF1 header at s_fs_base and return whether
+      // the layout is valid.  Fills out the dimension/offset fields by reference.
+      // Does not require the overlay to be enabled.
+      auto skf1_parse = [&](uint32_t& out_data_off, uint32_t& out_pix_fmt,
+                             uint32_t& out_width,    uint32_t& out_height,
+                             uint32_t& out_stride) -> bool
       {
-        const uint8_t* base  = s_fs_base;
-        const uint32_t magic = *(const uint32_t *)(base + 0x00);
-        const uint32_t ver   = *(const uint32_t *)(base + 0x04);
+        if (s_fs_base == nullptr)
+          return false;
+        const uint8_t* b = s_fs_base;
+        if (*(const uint32_t *)(b + 0x00) != 0x31464B53u)  // 'SKF1'
+          return false;
+        if (*(const uint32_t *)(b + 0x04) != 1u)
+          return false;
+        const uint32_t hdr_bytes = *(const uint32_t *)(b + 0x08);
+        out_data_off = *(const uint32_t *)(b + 0x0C);
+        out_pix_fmt  = *(const uint32_t *)(b + 0x10);
+        out_width    = *(const uint32_t *)(b + 0x14);
+        out_height   = *(const uint32_t *)(b + 0x18);
+        out_stride   = *(const uint32_t *)(b + 0x1C);
+        const uint64_t px_bytes = (uint64_t)out_stride * (uint64_t)out_height;
+        return ( hdr_bytes == 0x20u && out_data_off == 0x24u &&
+                 out_pix_fmt == 1u  &&
+                 out_width  > 0u   && out_height > 0u &&
+                 out_stride == (uint32_t)((uint64_t)out_width * 4u) &&
+                 ((uint64_t)out_data_off + px_bytes) <= (uint64_t)s_fs_map_bytes );
+      };
 
-        if (magic == 0x31464B53u && ver == 1u) // 'SKF1' v1
+      // -- Phase 0 -> 1: pre-warm GPU resources ----------------------------
+      // Runs when the mapping is open, warm state is 0, and the shader has
+      // not permanently failed.  Runs regardless of overlay-enabled so that
+      // resources are ready before the first visible composite draw.
+      if (s_fs_base != nullptr && s_fs_warm == 0 && ! s_fs_prog_failed)
+      {
+        uint32_t pw_data_off = 0, pw_pix_fmt = 0;
+        uint32_t pw_width    = 0, pw_height  = 0, pw_stride = 0;
+        const bool pw_ok = skf1_parse (pw_data_off, pw_pix_fmt,
+                                       pw_width, pw_height, pw_stride);
+
+        if (pw_ok)
         {
-          const uint32_t skf1_hdr_bytes = *(const uint32_t *)(base + 0x08);
-          const uint32_t data_off       = *(const uint32_t *)(base + 0x0C);
-          const uint32_t pix_fmt        = *(const uint32_t *)(base + 0x10);
-          const uint32_t width          = *(const uint32_t *)(base + 0x14);
-          const uint32_t height         = *(const uint32_t *)(base + 0x18);
-          const uint32_t stride         = *(const uint32_t *)(base + 0x1C);
+          // Resize snapshot buffer to hold one full producer frame.
+          const size_t snap_bytes = (size_t)pw_stride * (size_t)pw_height;
+          if (s_fs_snapshot.size () != snap_bytes)
+            s_fs_snapshot.resize (snap_bytes);
 
-          const uint64_t ctr_off  = (uint64_t)data_off - 4ull;
-          const uint64_t px_bytes = (uint64_t)stride * (uint64_t)height;
-          const bool layout_ok    =
-            ( skf1_hdr_bytes == 0x20u && data_off == 0x24u  &&
-              pix_fmt    == 1u    && width > 0u && height > 0u &&
-              stride     == (uint32_t)((uint64_t)width * 4u)  &&
-              ((uint64_t)data_off + px_bytes) <= (uint64_t)s_fs_map_bytes );
+          // Save minimal GL state touched during resource creation.
+          GLint pw_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,     &pw_sv_active);
+          GLint pw_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D, &pw_sv_t2d);
+          GLint pw_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,   &pw_sv_unpack);
+          GLint pw_sv_vao    = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &pw_sv_vao);
+          GLint pw_sv_arr    = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &pw_sv_arr);
+          GLint pw_sv_elem   = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &pw_sv_elem);
 
-          if (layout_ok)
+          // Allocate or re-allocate texture storage with null pixels (no upload
+          // cost; this only reserves GPU memory for the given dimensions).
+          if (s_fs_tex == 0)
+            glGenTextures (1, &s_fs_tex);
+
+          if (s_fs_tex != 0)
           {
-            const uint32_t c1 = *(const uint32_t *)(base + (size_t)ctr_off);
+            glActiveTexture (GL_TEXTURE0);
+            glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
+            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
+            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
+            glPixelStorei   (GL_UNPACK_ALIGNMENT, 1);
+            // Allocate GPU storage (nullptr pixels — just reserves memory).
+            glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
+                          (GLsizei)pw_width, (GLsizei)pw_height, 0,
+                          GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+            s_fs_w      = pw_width;
+            s_fs_h      = pw_height;
+            s_fs_stride = pw_stride;
+            s_fs_fmt    = pw_pix_fmt;
+          }
+
+          // Compile / link the compositor shader once per GL context.
+          // s_fs_prog survives dimension re-warm (geometry is dimension-independent).
+          if (s_fs_prog == 0)
+          {
+            const char* vs_src =
+              "#version 130\n"
+              "in vec2 aPos;\n"
+              "in vec2 aUV;\n"
+              "out vec2 vUV;\n"
+              "void main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }\n";
+
+            const char* fs_src =
+              "#version 130\n"
+              "uniform sampler2D uTex;\n"
+              "in vec2 vUV;\n"
+              "out vec4 oColor;\n"
+              "void main(){ oColor=texture(uTex,vUV); }\n";
+
+            GLuint vsh = glCreateShader (GL_VERTEX_SHADER);
+            glShaderSource  (vsh, 1, &vs_src, nullptr);
+            glCompileShader (vsh);
+            GLuint fsh = glCreateShader (GL_FRAGMENT_SHADER);
+            glShaderSource  (fsh, 1, &fs_src, nullptr);
+            glCompileShader (fsh);
+
+            s_fs_prog = glCreateProgram ();
+            glAttachShader       (s_fs_prog, vsh);
+            glAttachShader       (s_fs_prog, fsh);
+            glBindAttribLocation (s_fs_prog, 0, "aPos");
+            glBindAttribLocation (s_fs_prog, 1, "aUV");
+            glLinkProgram        (s_fs_prog);
+
+            // Check link status; set prog_failed permanently on failure so
+            // we never attempt shader compilation again on subsequent frames.
+            GLint link_ok = GL_FALSE;
+            glGetProgramiv (s_fs_prog, GL_LINK_STATUS, &link_ok);
+            if (link_ok == GL_FALSE)
+            {
+              glDeleteProgram (s_fs_prog);
+              s_fs_prog       = 0;
+              s_fs_prog_failed = true;
+              _SidecarLog_GL (L"[SKF1-WARM] shader link failed — compositor disabled");
+            }
+            else
+            {
+              s_fs_uTex = glGetUniformLocation (s_fs_prog, "uTex");
+            }
+
+            glDeleteShader (vsh);
+            glDeleteShader (fsh);
+          }
+
+          // Create fullscreen-quad geometry once per GL context.
+          // Survives dimension re-warm.
+          if (s_fs_vao == 0 && ! s_fs_prog_failed)
+          {
+            // V is flipped (1.0 at bottom, 0.0 at top) so that the top-down
+            // SKF1 image appears right-side-up in OpenGL's Y-up coordinate system.
+            const float verts [16] = {
+              -1.0f, -1.0f,  0.0f, 1.0f,
+               1.0f, -1.0f,  1.0f, 1.0f,
+               1.0f,  1.0f,  1.0f, 0.0f,
+              -1.0f,  1.0f,  0.0f, 0.0f
+            };
+            const uint16_t idx [6] = { 0, 1, 2, 0, 2, 3 };
+
+            glGenVertexArrays (1, &s_fs_vao);
+            glGenBuffers      (1, &s_fs_vbo);
+            glGenBuffers      (1, &s_fs_ibo);
+
+            glBindVertexArray (s_fs_vao);
+            glBindBuffer (GL_ARRAY_BUFFER,         s_fs_vbo);
+            glBufferData (GL_ARRAY_BUFFER,         sizeof (verts), verts, GL_STATIC_DRAW);
+            glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, s_fs_ibo);
+            glBufferData (GL_ELEMENT_ARRAY_BUFFER, sizeof (idx),   idx,   GL_STATIC_DRAW);
+            glEnableVertexAttribArray (0);
+            glEnableVertexAttribArray (1);
+            glVertexAttribPointer (0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)0);
+            glVertexAttribPointer (1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)(2 * sizeof (float)));
+          }
+
+          // Restore GL state.
+          glBindVertexArray (pw_sv_vao   != 0 ? (GLuint)pw_sv_vao  : 0);
+          glBindBuffer (GL_ARRAY_BUFFER,         (GLuint)pw_sv_arr);
+          glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, (GLuint)pw_sv_elem);
+          glBindTexture   (GL_TEXTURE_2D, (GLuint)pw_sv_t2d);
+          glActiveTexture ((GLenum)pw_sv_active);
+          glPixelStorei   (GL_UNPACK_ALIGNMENT, pw_sv_unpack);
+
+          // Advance to warm state 1 if all required resources are ready.
+          if (s_fs_tex != 0 && ! s_fs_prog_failed && s_fs_vao != 0)
+          {
+            s_fs_warm = 1;
+            _SidecarLog_GL (L"[SKF1-WARM] phase 0->1: resources ready (%ux%u)", pw_width, pw_height);
+          }
+        }
+        else if (s_fs_base != nullptr)
+        {
+          // Bad header layout — drop mapping; will re-open next frame.
+          UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
+          CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
+          s_fs_map_bytes  = 0;
+        }
+      }
+
+      // -- Phase 1 -> 2: first-frame preload --------------------------------
+      // Upload the first stable producer frame so the texture is ready before
+      // the first visible composite draw.  Runs regardless of overlay-enabled.
+      if (s_fs_base != nullptr && s_fs_warm == 1)
+      {
+        uint32_t pl_data_off = 0, pl_pix_fmt = 0;
+        uint32_t pl_width    = 0, pl_height  = 0, pl_stride = 0;
+        const bool pl_ok = skf1_parse (pl_data_off, pl_pix_fmt,
+                                       pl_width, pl_height, pl_stride);
+
+        if (pl_ok)
+        {
+          // Detect dimension change: drop back to phase 0 to re-allocate storage.
+          if (pl_width != s_fs_w || pl_height != s_fs_h ||
+              pl_stride != s_fs_stride || pl_pix_fmt != s_fs_fmt)
+          {
+            s_fs_warm      = 0;
+            s_fs_has_frame = false;
+          }
+          else
+          {
+            // Try to capture the first stable producer frame.
+            const uint64_t ctr_off = (uint64_t)pl_data_off - 4ull;
+            const uint32_t c1 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
             if (c1 != 0u)
             {
-              const size_t snap_bytes = (size_t)stride * (size_t)height;
+              const size_t snap_bytes = (size_t)pl_stride * (size_t)pl_height;
+              memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)pl_data_off, snap_bytes);
+              const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
+
+              if (c1 == c2) // Stable read.
+              {
+                GLint pl_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,     &pl_sv_active);
+                GLint pl_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D, &pl_sv_t2d);
+                GLint pl_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,   &pl_sv_unpack);
+
+                glActiveTexture (GL_TEXTURE0);
+                glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
+                glPixelStorei   (GL_UNPACK_ALIGNMENT, 1);
+                glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
+                                 (GLsizei)pl_width, (GLsizei)pl_height,
+                                 GL_BGRA, GL_UNSIGNED_BYTE,
+                                 s_fs_snapshot.data ());
+                s_fs_last_ctr  = c1;
+                s_fs_has_frame = true;
+                s_fs_warm      = 2;
+
+                glBindTexture   (GL_TEXTURE_2D, (GLuint)pl_sv_t2d);
+                glActiveTexture ((GLenum)pl_sv_active);
+                glPixelStorei   (GL_UNPACK_ALIGNMENT, pl_sv_unpack);
+
+                _SidecarLog_GL (L"[SKF1-WARM] phase 1->2: first frame uploaded (ctr=%u)", c1);
+              }
+            }
+          }
+        }
+        else if (s_fs_base != nullptr)
+        {
+          // Bad layout — drop mapping, re-open next frame, re-warm.
+          UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
+          CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
+          s_fs_map_bytes  = 0;
+          s_fs_warm       = 0;
+          s_fs_has_frame  = false;
+        }
+      }
+
+      // -- Step 2 (warm == 2 only): update texture when producer frame advances
+      // Uses only glTexSubImage2D — never glTexImage2D in this phase.
+      // Gated on overlay-enabled to avoid unnecessary GPU work while hidden.
+      if (s_fs_warm == 2 && s_fs_overlay_enabled && s_fs_base != nullptr)
+      {
+        uint32_t fu_data_off = 0, fu_pix_fmt = 0;
+        uint32_t fu_width    = 0, fu_height  = 0, fu_stride = 0;
+        const bool fu_ok = skf1_parse (fu_data_off, fu_pix_fmt,
+                                       fu_width, fu_height, fu_stride);
+
+        if (fu_ok)
+        {
+          // Dimension change: reset to phase 0 so storage is re-allocated.
+          if (fu_width != s_fs_w || fu_height != s_fs_h ||
+              fu_stride != s_fs_stride || fu_pix_fmt != s_fs_fmt)
+          {
+            s_fs_warm      = 0;
+            s_fs_has_frame = false;
+          }
+          else
+          {
+            const uint64_t ctr_off = (uint64_t)fu_data_off - 4ull;
+            const uint32_t c1 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
+            if (c1 != 0u)
+            {
+              const size_t snap_bytes = (size_t)fu_stride * (size_t)fu_height;
               if (s_fs_snapshot.size () != snap_bytes)
                 s_fs_snapshot.resize (snap_bytes);
+              memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)fu_data_off, snap_bytes);
+              const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
 
-              memcpy (s_fs_snapshot.data (), base + (size_t)data_off, snap_bytes);
-              const uint32_t c2 = *(const uint32_t *)(base + (size_t)ctr_off);
-
-              // Stable read: update texture when frame counter advanced.
               if (c1 == c2 && (c1 != s_fs_last_ctr || ! s_fs_has_frame))
               {
-                if (s_fs_tex == 0)
-                  glGenTextures (1, &s_fs_tex);
-
                 if (s_fs_tex != 0)
                 {
-                  GLint prev_t2d = 0;
-                  glGetIntegerv (GL_TEXTURE_BINDING_2D, &prev_t2d);
-                  glBindTexture (GL_TEXTURE_2D, s_fs_tex);
+                  GLint fu_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,     &fu_sv_active);
+                  GLint fu_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D, &fu_sv_t2d);
+                  GLint fu_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,   &fu_sv_unpack);
 
-                  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
-                  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
-
-                  GLint prev_unpack = 0;
-                  glGetIntegerv (GL_UNPACK_ALIGNMENT, &prev_unpack);
-                  glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
-
-                  if (s_fs_w != width || s_fs_h != height ||
-                      s_fs_fmt != pix_fmt || s_fs_stride != stride)
-                  {
-                    glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
-                                  (GLsizei)width, (GLsizei)height, 0,
-                                  GL_BGRA, GL_UNSIGNED_BYTE,
-                                  s_fs_snapshot.data ());
-                    s_fs_w      = width;
-                    s_fs_h      = height;
-                    s_fs_stride = stride;
-                    s_fs_fmt    = pix_fmt;
-                  }
-                  else
-                  {
-                    glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
-                                     (GLsizei)width, (GLsizei)height,
-                                     GL_BGRA, GL_UNSIGNED_BYTE,
-                                     s_fs_snapshot.data ());
-                  }
-
-                  glPixelStorei (GL_UNPACK_ALIGNMENT, prev_unpack);
-                  glBindTexture (GL_TEXTURE_2D, (GLuint)prev_t2d);
-
+                  glActiveTexture (GL_TEXTURE0);
+                  glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
+                  glPixelStorei   (GL_UNPACK_ALIGNMENT, 1);
+                  glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
+                                   (GLsizei)fu_width, (GLsizei)fu_height,
+                                   GL_BGRA, GL_UNSIGNED_BYTE,
+                                   s_fs_snapshot.data ());
                   s_fs_last_ctr  = c1;
                   s_fs_has_frame = true;
+
+                  glBindTexture   (GL_TEXTURE_2D, (GLuint)fu_sv_t2d);
+                  glActiveTexture ((GLenum)fu_sv_active);
+                  glPixelStorei   (GL_UNPACK_ALIGNMENT, fu_sv_unpack);
                 }
               }
             }
           }
-          else
-          {
-            // Bad header layout — drop mapping, will re-open next frame.
-            UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
-            CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
-            s_fs_map_bytes  = 0;
-            s_fs_has_frame  = false;
-          }
+        }
+        else if (s_fs_base != nullptr)
+        {
+          // Bad layout — drop mapping, re-open next frame, re-warm.
+          UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
+          CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
+          s_fs_map_bytes  = 0;
+          s_fs_warm       = 0;
+          s_fs_has_frame  = false;
         }
       }
 
-      // -- Step 3: composite overlay over FBO 0 if a frame is available ----
-      if (s_fs_overlay_enabled && s_fs_has_frame && s_fs_tex != 0)
+      // -- Step 3: composite overlay over FBO 0 ----------------------------
+      // Only draws when fully warm (s_fs_warm == 2) with all resources valid.
+      // No shader compilation, no glTexImage2D, no VAO creation in this phase.
+      if (s_fs_overlay_enabled && s_fs_warm == 2 &&
+          s_fs_has_frame && s_fs_tex != 0 && s_fs_prog != 0 && s_fs_vao != 0)
       {
         // Save GL state.
         GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
@@ -3837,80 +4069,14 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                     (GLsizei)(rcWnd.right  - rcWnd.left),
                     (GLsizei)(rcWnd.bottom - rcWnd.top));
 
-        // Lazy-init shader + geometry (created once per GL context).
-        if (s_fs_prog == 0)
-        {
-          const char* vs_src =
-            "#version 130\n"
-            "in vec2 aPos;\n"
-            "in vec2 aUV;\n"
-            "out vec2 vUV;\n"
-            "void main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }\n";
-
-          const char* fs_src =
-            "#version 130\n"
-            "uniform sampler2D uTex;\n"
-            "in vec2 vUV;\n"
-            "out vec4 oColor;\n"
-            "void main(){ oColor=texture(uTex,vUV); }\n";
-
-          GLuint vsh = glCreateShader (GL_VERTEX_SHADER);
-          glShaderSource  (vsh, 1, &vs_src, nullptr);
-          glCompileShader (vsh);
-          GLuint fsh = glCreateShader (GL_FRAGMENT_SHADER);
-          glShaderSource  (fsh, 1, &fs_src, nullptr);
-          glCompileShader (fsh);
-
-          s_fs_prog = glCreateProgram ();
-          glAttachShader       (s_fs_prog, vsh);
-          glAttachShader       (s_fs_prog, fsh);
-          glBindAttribLocation (s_fs_prog, 0, "aPos");
-          glBindAttribLocation (s_fs_prog, 1, "aUV");
-          glLinkProgram        (s_fs_prog);
-          s_fs_uTex = glGetUniformLocation (s_fs_prog, "uTex");
-
-          glDeleteShader (vsh);
-          glDeleteShader (fsh);
-
-          // Fullscreen quad.  V is flipped (1.0 at bottom, 0.0 at top) so
-          // that the top-down SKF1 image appears right-side-up in OpenGL's
-          // Y-up default framebuffer coordinate system.
-          const float verts [16] = {
-            -1.0f, -1.0f,  0.0f, 1.0f,
-             1.0f, -1.0f,  1.0f, 1.0f,
-             1.0f,  1.0f,  1.0f, 0.0f,
-            -1.0f,  1.0f,  0.0f, 0.0f
-          };
-          const uint16_t idx [6] = { 0, 1, 2, 0, 2, 3 };
-
-          glGenVertexArrays (1, &s_fs_vao);
-          glGenBuffers      (1, &s_fs_vbo);
-          glGenBuffers      (1, &s_fs_ibo);
-
-          glBindVertexArray (s_fs_vao);
-          glBindBuffer (GL_ARRAY_BUFFER,         s_fs_vbo);
-          glBufferData (GL_ARRAY_BUFFER,         sizeof (verts), verts, GL_STATIC_DRAW);
-          glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, s_fs_ibo);
-          glBufferData (GL_ELEMENT_ARRAY_BUFFER, sizeof (idx),   idx,   GL_STATIC_DRAW);
-          glEnableVertexAttribArray (0);
-          glEnableVertexAttribArray (1);
-          glVertexAttribPointer (0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)0);
-          glVertexAttribPointer (1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)(2 * sizeof (float)));
-          glBindVertexArray (0);
-          glBindBuffer (GL_ARRAY_BUFFER,         0);
-          glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, 0);
-        }
-
-        if (s_fs_prog != 0)
-        {
-          glUseProgram    (s_fs_prog);
-          glActiveTexture (GL_TEXTURE0);
-          glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
-          if (s_fs_uTex >= 0)
-            glUniform1i (s_fs_uTex, 0);
-          glBindVertexArray (s_fs_vao);
-          glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
-        }
+        // Draw: all resources are pre-warmed; no lazy init here.
+        glUseProgram    (s_fs_prog);
+        glActiveTexture (GL_TEXTURE0);
+        glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
+        if (s_fs_uTex >= 0)
+          glUniform1i (s_fs_uTex, 0);
+        glBindVertexArray (s_fs_vao);
+        glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
 
         // Restore GL state.
         glBindVertexArray  ((GLuint)sv_vao);
@@ -3924,8 +4090,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         glColorMask        (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
         glBlendFuncSeparate ((GLenum)sv_bsrc_rgb, (GLenum)sv_bdst_rgb,
                              (GLenum)sv_bsrc_a,   (GLenum)sv_bdst_a);
-        if (sv_blend)   glEnable  (GL_BLEND);    else glDisable (GL_BLEND);
-        if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
+        if (sv_blend)   glEnable  (GL_BLEND);      else glDisable (GL_BLEND);
+        if (sv_depth)   glEnable  (GL_DEPTH_TEST); else glDisable (GL_DEPTH_TEST);
         if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
         if (sv_cull)    glEnable  (GL_CULL_FACE);    else glDisable (GL_CULL_FACE);
         if (sv_scissor)
