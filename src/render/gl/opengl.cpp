@@ -73,6 +73,12 @@ static volatile LONG g_overlay_disabled                 = 0;
 static volatile LONG g_gl_precond_failures              = 0;
 static volatile LONG g_overlay_recursion_in_submit_hits = 0;
 
+// Set to 1 when the native GL/SKF1 compositor first reaches warm state 6
+// (all GPU resources ready and first frame uploaded).  Cleared on HGLRC or
+// layout reset so that SK_Overlay_DrawGL() is not called before the
+// compositor is ready in the new context.
+static volatile LONG s_skf1_compositor_fully_warm = 0;
+
 SK_LazyGlobal <std::unordered_map <HGLRC, HGLRC>> __gl_shared_contexts;
 SK_LazyGlobal <std::unordered_map <HGLRC, BOOL>>  init_;
 
@@ -150,7 +156,9 @@ static volatile LONG s_gl_suppressed_by_dxgi_owner_hits = 0;
 // detected via the process-specific Local\SidecarK_Control_<pid> mapping.
 // Confirmed once and permanently cached; pre-confirmation attempts are
 // rate-limited to avoid per-frame overhead during early startup.
-static bool SK_GL_IsSidecarKManaged ()
+// Pass force_probe=true to bypass the rate-limit for a one-shot bootstrap
+// decision (e.g., before the D3D11 bootstrap gate on the first frame).
+static bool SK_GL_IsSidecarKManaged (bool force_probe = false)
 {
   static volatile LONG s_confirmed = 0;
   if (InterlockedCompareExchange (&s_confirmed, 0, 0) != 0)
@@ -161,7 +169,7 @@ static bool SK_GL_IsSidecarKManaged ()
   // render thread.  No synchronization is required.
   static ULONGLONG s_last_attempt_ms = 0;
   const ULONGLONG  now_ms            = GetTickCount64 ();
-  if (now_ms - s_last_attempt_ms < 500ULL)
+  if (! force_probe && now_ms - s_last_attempt_ms < 500ULL)
     return false;
   s_last_attempt_ms = now_ms;
 
@@ -2804,7 +2812,14 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           (const char *)glGetString (GL_RENDERER), "D3D12"
         );
 
-      if (config.apis.dxgi.d3d11.hook && (! glon12) && (! SK_GL_IsSidecarKManaged ()))
+      // Eager probe: bypass the 500ms rate-limit once, immediately before the
+      // bootstrap gate, to prevent a first-frame false-negative that would
+      // cause D3D11 bootstrap to run even in a SidecarK-managed GL process.
+      // Use the return value directly so the immediately-following check is not
+      // tripped by the reset rate-limit clock.
+      const bool _skf1_managed_now = SK_GL_IsSidecarKManaged (/*force_probe=*/true);
+
+      if (config.apis.dxgi.d3d11.hook && (! glon12) && (! _skf1_managed_now))
       {
         extern void
         WINAPI SK_HookDXGI (void);
@@ -3341,7 +3356,16 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             if (InterlockedCompareExchange (&g_overlay_disabled, 0, 0) == 0)
             {
               tls_gl_in_overlay_submit = true;
-              SK_Overlay_DrawGL       ();
+              // For the native GL/SKF1 path, defer the first overlay call until
+              // the native compositor is fully warm (warm==6, first frame
+              // uploaded).  This prevents the ImGui/font-atlas first-use cost
+              // from landing on a visible game frame.  While not ready the game
+              // continues through the real wglSwapBuffers below.
+              if (! use_gl_skf1_fallback ||
+                  InterlockedCompareExchange (&s_skf1_compositor_fully_warm, 0, 0) != 0)
+              {
+                SK_Overlay_DrawGL ();
+              }
               tls_gl_in_overlay_submit = false;
             }
             else
@@ -3652,6 +3676,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           s_fs_stable_frames = 0;
           s_fs_stable_w      = 0;
           s_fs_stable_h      = 0;
+          InterlockedExchange (&s_skf1_compositor_fully_warm, 0);
           const HGLRC hglrc_old = s_fs_owner_hglrc;
           s_fs_owner_hglrc = hglrc_now;
           _SidecarLog_GL (L"[SKF1-WARM] HGLRC changed (%p->%p) — native GL resources reset",
@@ -3794,6 +3819,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           return ( hdr_bytes == 0x20u && out_data_off == 0x24u &&
                    out_pix_fmt == 1u  &&
                    out_width  > 0u   && out_height > 0u &&
+                   out_width  <= 16384u && out_height <= 16384u &&  // sane max (covers 8K+)
                    out_stride == (uint32_t)((uint64_t)out_width * 4u) &&
                    ((uint64_t)out_data_off + px_bytes) <= (uint64_t)s_fs_map_bytes );
         };
@@ -3857,10 +3883,11 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               s_fs_snapshot.resize (snap_bytes);
 
             // Save GL state touched during texture allocation.
-            GLint pa_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,              &pa_sv_active);
-            GLint pa_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,          &pa_sv_t2d);
-            GLint pa_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &pa_sv_unpack);
-            GLint pa_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &pa_sv_pbo);
+            GLint pa_sv_active  = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,              &pa_sv_active);
+            GLint pa_sv_t2d     = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,          &pa_sv_t2d);
+            GLint pa_sv_unpack  = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &pa_sv_unpack);
+            GLint pa_sv_rowlen  = 0; glGetIntegerv (GL_UNPACK_ROW_LENGTH,           &pa_sv_rowlen);
+            GLint pa_sv_pbo     = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &pa_sv_pbo);
 
             if (s_fs_tex == 0)
               glGenTextures (1, &s_fs_tex);
@@ -3874,7 +3901,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
               glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
               glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
-              glPixelStorei   (GL_UNPACK_ALIGNMENT, 1);
+              glPixelStorei   (GL_UNPACK_ALIGNMENT,  1);
+              glPixelStorei   (GL_UNPACK_ROW_LENGTH, 0);
               // Zero PBO so nullptr is treated as a CPU pointer, not a PBO offset.
               if (pa_sv_pbo != 0)
                 glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
@@ -3907,7 +3935,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             // Restore GL state.
             glBindTexture   (GL_TEXTURE_2D, (GLuint)pa_sv_t2d);
             glActiveTexture ((GLenum)pa_sv_active);
-            glPixelStorei   (GL_UNPACK_ALIGNMENT, pa_sv_unpack);
+            glPixelStorei   (GL_UNPACK_ALIGNMENT,  pa_sv_unpack);
+            glPixelStorei   (GL_UNPACK_ROW_LENGTH, pa_sv_rowlen);
 
             if (pa_tex_ok)
             {
@@ -4098,24 +4127,40 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             glGenBuffers      (1, &s_fs_vbo);
             glGenBuffers      (1, &s_fs_ibo);
 
-            glBindVertexArray (s_fs_vao);
-            glBindBuffer (GL_ARRAY_BUFFER,         s_fs_vbo);
-            glBufferData (GL_ARRAY_BUFFER,         sizeof (verts), verts, GL_STATIC_DRAW);
-            glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, s_fs_ibo);
-            glBufferData (GL_ELEMENT_ARRAY_BUFFER, sizeof (idx),   idx,   GL_STATIC_DRAW);
-            glEnableVertexAttribArray (0);
-            glEnableVertexAttribArray (1);
-            glVertexAttribPointer (0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)0);
-            glVertexAttribPointer (1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float),
-                                   (void *)(2 * sizeof (float)));
+            // Validate all three handles before using them.  If any failed
+            // (context error, handle exhaustion), clean up and retry next frame.
+            if (s_fs_vao == 0 || s_fs_vbo == 0 || s_fs_ibo == 0)
+            {
+              if (s_fs_vao != 0) { glDeleteVertexArrays (1, &s_fs_vao); s_fs_vao = 0; }
+              if (s_fs_vbo != 0) { glDeleteBuffers      (1, &s_fs_vbo); s_fs_vbo = 0; }
+              if (s_fs_ibo != 0) { glDeleteBuffers      (1, &s_fs_ibo); s_fs_ibo = 0; }
+              // Restore state (nothing was bound yet).
+              glBindVertexArray ((GLuint)pc_sv_vao);
+              glBindBuffer (GL_ARRAY_BUFFER,         (GLuint)pc_sv_arr);
+              glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, (GLuint)pc_sv_elem);
+              _SidecarLog_GL (L"[SKF1-WARM] phase 0c: glGen failed — will retry");
+            }
+            else
+            {
+              glBindVertexArray (s_fs_vao);
+              glBindBuffer (GL_ARRAY_BUFFER,         s_fs_vbo);
+              glBufferData (GL_ARRAY_BUFFER,         sizeof (verts), verts, GL_STATIC_DRAW);
+              glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, s_fs_ibo);
+              glBufferData (GL_ELEMENT_ARRAY_BUFFER, sizeof (idx),   idx,   GL_STATIC_DRAW);
+              glEnableVertexAttribArray (0);
+              glEnableVertexAttribArray (1);
+              glVertexAttribPointer (0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)0);
+              glVertexAttribPointer (1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float),
+                                     (void *)(2 * sizeof (float)));
 
-            // Restore GL state.
-            glBindVertexArray ((GLuint)pc_sv_vao);
-            glBindBuffer (GL_ARRAY_BUFFER,         (GLuint)pc_sv_arr);
-            glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, (GLuint)pc_sv_elem);
+              // Restore GL state.
+              glBindVertexArray ((GLuint)pc_sv_vao);
+              glBindBuffer (GL_ARRAY_BUFFER,         (GLuint)pc_sv_arr);
+              glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, (GLuint)pc_sv_elem);
 
-            s_fs_warm = 5;
-            _SidecarLog_GL (L"[SKF1-WARM] phase 0c->5: geometry ready");
+              s_fs_warm = 5;
+              _SidecarLog_GL (L"[SKF1-WARM] phase 0c->5: geometry ready");
+            }
           }
         }
 
@@ -4145,6 +4190,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               s_fs_has_frame     = false;
               s_fs_last_ctr      = 0;
               s_fs_stable_frames = 0;
+              InterlockedExchange (&s_skf1_compositor_fully_warm, 0);
               _SidecarLog_GL (L"[SKF1-WARM] phase 1: dimension change — re-warm");
             }
             else
@@ -4163,11 +4209,13 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                   GLint pl_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,              &pl_sv_active);
                   GLint pl_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,          &pl_sv_t2d);
                   GLint pl_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &pl_sv_unpack);
+                  GLint pl_sv_rowlen = 0; glGetIntegerv (GL_UNPACK_ROW_LENGTH,           &pl_sv_rowlen);
                   GLint pl_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &pl_sv_pbo);
 
                   glActiveTexture (GL_TEXTURE0);
                   glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
-                  glPixelStorei   (GL_UNPACK_ALIGNMENT, 1);
+                  glPixelStorei   (GL_UNPACK_ALIGNMENT,  1);
+                  glPixelStorei   (GL_UNPACK_ROW_LENGTH, 0);
                   if (pl_sv_pbo != 0)
                     glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
 
@@ -4178,12 +4226,14 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                   s_fs_last_ctr  = c1;
                   s_fs_has_frame = true;
                   s_fs_warm      = 6;
+                  InterlockedExchange (&s_skf1_compositor_fully_warm, 1);
 
                   if (pl_sv_pbo != 0)
                     glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)pl_sv_pbo);
                   glBindTexture   (GL_TEXTURE_2D, (GLuint)pl_sv_t2d);
                   glActiveTexture ((GLenum)pl_sv_active);
-                  glPixelStorei   (GL_UNPACK_ALIGNMENT, pl_sv_unpack);
+                  glPixelStorei   (GL_UNPACK_ALIGNMENT,  pl_sv_unpack);
+                  glPixelStorei   (GL_UNPACK_ROW_LENGTH, pl_sv_rowlen);
 
                   _SidecarLog_GL (L"[SKF1-WARM] phase 1->6: first frame uploaded (ctr=%u)", c1);
                 }
@@ -4192,7 +4242,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           }
           else if (s_fs_base != nullptr)
           {
-            // Bad layout — drop mapping, re-open next frame, re-warm.
+            // Bad layout — drop mapping, re-open next frame, re-warm (phase 1).
             UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
             CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
             s_fs_map_bytes     = 0;
@@ -4200,6 +4250,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             s_fs_has_frame     = false;
             s_fs_last_ctr      = 0;
             s_fs_stable_frames = 0;
+            InterlockedExchange (&s_skf1_compositor_fully_warm, 0);
           }
         }
 
@@ -4228,6 +4279,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               s_fs_has_frame     = false;
               s_fs_last_ctr      = 0;
               s_fs_stable_frames = 0;
+              InterlockedExchange (&s_skf1_compositor_fully_warm, 0);
               _SidecarLog_GL (L"[SKF1-WARM] draw-ready: dimension change — re-warm");
             }
             else
@@ -4249,11 +4301,13 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                     GLint fu_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,              &fu_sv_active);
                     GLint fu_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,          &fu_sv_t2d);
                     GLint fu_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &fu_sv_unpack);
+                    GLint fu_sv_rowlen = 0; glGetIntegerv (GL_UNPACK_ROW_LENGTH,           &fu_sv_rowlen);
                     GLint fu_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &fu_sv_pbo);
 
                     glActiveTexture (GL_TEXTURE0);
                     glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
-                    glPixelStorei   (GL_UNPACK_ALIGNMENT, 1);
+                    glPixelStorei   (GL_UNPACK_ALIGNMENT,  1);
+                    glPixelStorei   (GL_UNPACK_ROW_LENGTH, 0);
                     if (fu_sv_pbo != 0)
                       glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
 
@@ -4268,7 +4322,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                       glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)fu_sv_pbo);
                     glBindTexture   (GL_TEXTURE_2D, (GLuint)fu_sv_t2d);
                     glActiveTexture ((GLenum)fu_sv_active);
-                    glPixelStorei   (GL_UNPACK_ALIGNMENT, fu_sv_unpack);
+                    glPixelStorei   (GL_UNPACK_ALIGNMENT,  fu_sv_unpack);
+                    glPixelStorei   (GL_UNPACK_ROW_LENGTH, fu_sv_rowlen);
                   }
                 }
               }
@@ -4276,7 +4331,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           }
           else if (s_fs_base != nullptr)
           {
-            // Bad layout — drop mapping, re-open next frame, re-warm.
+            // Bad layout — drop mapping, re-open next frame, re-warm (phase 2).
             UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
             CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
             s_fs_map_bytes     = 0;
@@ -4284,6 +4339,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             s_fs_has_frame     = false;
             s_fs_last_ctr      = 0;
             s_fs_stable_frames = 0;
+            InterlockedExchange (&s_skf1_compositor_fully_warm, 0);
           }
         }
 
@@ -4293,23 +4349,39 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         if (s_fs_overlay_enabled && s_fs_warm == 6 &&
             s_fs_has_frame && s_fs_tex != 0 && s_fs_prog != 0 && s_fs_vao != 0)
         {
-          // Save GL state.
+          // Save GL state — comprehensive envelope to prevent any game-state clobber.
           GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
           GLint     sv_active  = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &sv_active);
           GLint     sv_tex2d   = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &sv_tex2d);
           GLint     sv_vao     = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &sv_vao);
           GLint     sv_arr     = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &sv_arr);
           GLint     sv_elem    = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &sv_elem);
-          GLint     sv_fbo     = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &sv_fbo);
+          // Save read and draw FBOs separately; the game may have set them differently.
+          GLint     sv_rfbo    = 0; glGetIntegerv (GL_READ_FRAMEBUFFER_BINDING,     &sv_rfbo);
+          GLint     sv_dfbo    = 0; glGetIntegerv (GL_DRAW_FRAMEBUFFER_BINDING,     &sv_dfbo);
           GLint     sv_vp [4]  = { }; glGetIntegerv (GL_VIEWPORT,    sv_vp);
           GLint     sv_sci [4] = { }; glGetIntegerv (GL_SCISSOR_BOX, sv_sci);
-          GLint     sv_bsrc_rgb = 0; glGetIntegerv (GL_BLEND_SRC_RGB,   &sv_bsrc_rgb);
-          GLint     sv_bdst_rgb = 0; glGetIntegerv (GL_BLEND_DST_RGB,   &sv_bdst_rgb);
-          GLint     sv_bsrc_a   = 0; glGetIntegerv (GL_BLEND_SRC_ALPHA, &sv_bsrc_a);
-          GLint     sv_bdst_a   = 0; glGetIntegerv (GL_BLEND_DST_ALPHA, &sv_bdst_a);
+          GLint     sv_bsrc_rgb = 0; glGetIntegerv (GL_BLEND_SRC_RGB,    &sv_bsrc_rgb);
+          GLint     sv_bdst_rgb = 0; glGetIntegerv (GL_BLEND_DST_RGB,    &sv_bdst_rgb);
+          GLint     sv_bsrc_a   = 0; glGetIntegerv (GL_BLEND_SRC_ALPHA,  &sv_bsrc_a);
+          GLint     sv_bdst_a   = 0; glGetIntegerv (GL_BLEND_DST_ALPHA,  &sv_bdst_a);
+          GLint     sv_beq_rgb  = 0; glGetIntegerv (GL_BLEND_EQUATION_RGB,   &sv_beq_rgb);
+          GLint     sv_beq_a    = 0; glGetIntegerv (GL_BLEND_EQUATION_ALPHA, &sv_beq_a);
           GLboolean sv_cmask [4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
           glGetBooleanv (GL_COLOR_WRITEMASK, sv_cmask);
-          GLint     sv_unpack  = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT, &sv_unpack);
+          GLboolean sv_dmask   = GL_TRUE;
+          glGetBooleanv (GL_DEPTH_WRITEMASK, &sv_dmask);
+          GLint     sv_dfunc   = 0; glGetIntegerv (GL_DEPTH_FUNC,              &sv_dfunc);
+          GLint     sv_stfunc  = 0; glGetIntegerv (GL_STENCIL_FUNC,            &sv_stfunc);
+          GLint     sv_stref   = 0; glGetIntegerv (GL_STENCIL_REF,             &sv_stref);
+          GLint     sv_stmask  = 0; glGetIntegerv (GL_STENCIL_VALUE_MASK,      &sv_stmask);
+          GLint     sv_stfail  = 0; glGetIntegerv (GL_STENCIL_FAIL,            &sv_stfail);
+          GLint     sv_stdfail = 0; glGetIntegerv (GL_STENCIL_PASS_DEPTH_FAIL, &sv_stdfail);
+          GLint     sv_stdpass = 0; glGetIntegerv (GL_STENCIL_PASS_DEPTH_PASS, &sv_stdpass);
+          GLint     sv_stwmask = 0; glGetIntegerv (GL_STENCIL_WRITEMASK,       &sv_stwmask);
+          GLint     sv_pbo     = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &sv_pbo);
+          GLint     sv_rowlen  = 0; glGetIntegerv (GL_UNPACK_ROW_LENGTH,       &sv_rowlen);
+          GLint     sv_unpack  = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,        &sv_unpack);
           const GLboolean sv_scissor = glIsEnabled (GL_SCISSOR_TEST);
           const GLboolean sv_blend   = glIsEnabled (GL_BLEND);
           const GLboolean sv_depth   = glIsEnabled (GL_DEPTH_TEST);
@@ -4340,19 +4412,27 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           glBindVertexArray (s_fs_vao);
           glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
 
-          // Restore GL state.
+          // Restore GL state — every path restores all saved state.
           glBindVertexArray  ((GLuint)sv_vao);
           glBindBuffer       (GL_ARRAY_BUFFER,         (GLuint)sv_arr);
           glBindBuffer       (GL_ELEMENT_ARRAY_BUFFER, (GLuint)sv_elem);
           glUseProgram       ((GLuint)sv_prog);
           glActiveTexture    ((GLenum)sv_active);
           glBindTexture      (GL_TEXTURE_2D, (GLuint)sv_tex2d);
-          glBindFramebuffer  (GL_FRAMEBUFFER, (GLuint)sv_fbo);
+          // Restore read and draw FBOs to their individual saved bindings.
+          glBindFramebuffer  (GL_READ_FRAMEBUFFER, (GLuint)sv_rfbo);
+          glBindFramebuffer  (GL_DRAW_FRAMEBUFFER, (GLuint)sv_dfbo);
           glViewport         (sv_vp [0], sv_vp [1], sv_vp [2], sv_vp [3]);
           glColorMask        (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
+          glDepthMask        (sv_dmask);
+          glDepthFunc        ((GLenum)sv_dfunc);
           glBlendFuncSeparate ((GLenum)sv_bsrc_rgb, (GLenum)sv_bdst_rgb,
                                (GLenum)sv_bsrc_a,   (GLenum)sv_bdst_a);
-          if (sv_blend)   glEnable  (GL_BLEND);    else glDisable (GL_BLEND);
+          glBlendEquationSeparate ((GLenum)sv_beq_rgb, (GLenum)sv_beq_a);
+          glStencilFunc ((GLenum)sv_stfunc, sv_stref, (GLuint)sv_stmask);
+          glStencilOp   ((GLenum)sv_stfail, (GLenum)sv_stdfail, (GLenum)sv_stdpass);
+          glStencilMask ((GLuint)sv_stwmask);
+          if (sv_blend)   glEnable  (GL_BLEND);        else glDisable (GL_BLEND);
           if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
           if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
           if (sv_cull)    glEnable  (GL_CULL_FACE);    else glDisable (GL_CULL_FACE);
@@ -4363,7 +4443,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           }
           else
             glDisable (GL_SCISSOR_TEST);
-          glPixelStorei (GL_UNPACK_ALIGNMENT, sv_unpack);
+          if (sv_pbo != 0) glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)sv_pbo);
+          glPixelStorei (GL_UNPACK_ROW_LENGTH, sv_rowlen);
+          glPixelStorei (GL_UNPACK_ALIGNMENT,  sv_unpack);
         }
       } // end if (hglrc_now != nullptr)
     } // end use_gl_skf1_fallback
@@ -4659,7 +4741,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                  const bool mapped_size_ok   = (end_off <= (uint64_t)s_view_bytes);
 
                  if (header_bytes == 0x20u && data_offset == 0x24u && counter_pos_ok && pixel_format == 1u &&
-                   width > 0u && height > 0u && stride == (uint32_t)((uint64_t)width * 4u) && mapped_size_ok)
+                   width > 0u && height > 0u && width <= 16384u && height <= 16384u &&
+                   stride == (uint32_t)((uint64_t)width * 4u) && mapped_size_ok)
                  {
                   const uint32_t c1 = *(const uint32_t *)(base + (size_t)counter_off);
                   uint32_t       c2 = c1;
