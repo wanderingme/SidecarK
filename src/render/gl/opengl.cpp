@@ -3563,30 +3563,35 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     {
       // All statics in this block are accessed only from SK_GL_SwapBuffers on the
       // GL render thread; no synchronization is needed for non-atomic statics here.
-      static HANDLE              s_fs_hMap      = nullptr;
-      static uint8_t*            s_fs_base      = nullptr;
-      static SIZE_T              s_fs_map_bytes = 0;
-      static GLuint              s_fs_tex       = 0;
-      static GLuint              s_fs_prog      = 0;
-      static GLuint              s_fs_vao       = 0;
-      static GLuint              s_fs_vbo       = 0;
-      static GLuint              s_fs_ibo       = 0;
-      static GLint               s_fs_uTex      = -1;
-      static uint32_t            s_fs_w         = 0;
-      static uint32_t            s_fs_h         = 0;
-      static uint32_t            s_fs_stride    = 0;
-      static uint32_t            s_fs_fmt       = 0;
-      static uint32_t            s_fs_last_ctr  = 0;
-      static bool                s_fs_has_frame = false;
+      static HANDLE               s_fs_hMap      = nullptr;
+      static uint8_t*             s_fs_base      = nullptr;
+      static SIZE_T               s_fs_map_bytes = 0;
+      static GLuint               s_fs_tex       = 0;
+      static GLuint               s_fs_prog      = 0;
+      // Transient shader handles alive only between Phase 0b-vs and Phase 0b-link.
+      static GLuint               s_fs_vsh       = 0;
+      static GLuint               s_fs_fsh       = 0;
+      static GLuint               s_fs_vao       = 0;
+      static GLuint               s_fs_vbo       = 0;
+      static GLuint               s_fs_ibo       = 0;
+      static GLint                s_fs_uTex      = -1;
+      static uint32_t             s_fs_w         = 0;
+      static uint32_t             s_fs_h         = 0;
+      static uint32_t             s_fs_stride    = 0;
+      static uint32_t             s_fs_fmt       = 0;
+      static uint32_t             s_fs_last_ctr  = 0;
+      static bool                 s_fs_has_frame = false;
       static std::vector<uint8_t> s_fs_snapshot;
 
       // Warm-up state machine:
       //   0  = unwarmed (initial, or after HGLRC/dimension reset)
-      //   1  = tex storage allocated     (Phase 0a done)
-      //   2  = shader compiled+linked    (Phase 0b done)
-      //   3  = VAO/VBO/IBO created       (Phase 0c done — all GPU resources ready)
-      //   4  = first frame uploaded      (draw-ready)
-      // s_fs_prog_failed: set once if shader compile/link fails in this HGLRC;
+      //   1  = tex storage allocated         (Phase 0a done)
+      //   2  = vertex shader compiled        (Phase 0b-vs done)
+      //   3  = fragment shader compiled      (Phase 0b-fs done)
+      //   4  = program linked, uniforms set  (Phase 0b-link done — shader ready)
+      //   5  = VAO/VBO/IBO created           (Phase 0c done — all GPU resources ready)
+      //   6  = first frame uploaded          (draw-ready)
+      // s_fs_prog_failed: permanent within an HGLRC if shader compile/link fails;
       //   cleared on HGLRC change so a new context can retry.
       static int   s_fs_warm        = 0;
       static bool  s_fs_prog_failed = false;
@@ -3594,6 +3599,15 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       // HGLRC ownership: GL objects are context-owned.  If the game recreates or
       // switches its GL context, all cached handles become invalid in the new context.
       static HGLRC s_fs_owner_hglrc = nullptr;
+
+      // Stability observation: require SKF1_STABLE_FRAMES consecutive frames with the
+      // same non-null HGLRC and valid SKF1 layout before starting heavy Phase 0a GPU
+      // work.  This prevents warm-up from starting (and being immediately discarded)
+      // during title-card/fullscreen transition context and dimension churn.
+      static const int c_skf1_stable = 4;
+      static int       s_fs_stable_frames = 0;
+      static uint32_t  s_fs_stable_w      = 0;
+      static uint32_t  s_fs_stable_h      = 0;
 
       // Control-plane state: mirrors the DXGI path (SidecarK_Control_<pid>).
       static HANDLE              s_fs_ctrlMap         = nullptr;
@@ -3619,20 +3633,25 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           // which may already be destroyed.  Zero all handles without calling
           // glDelete* (calling delete for another context's objects is unsafe
           // unless the contexts are explicitly share-listed).
-          s_fs_tex         = 0;
-          s_fs_prog        = 0;
-          s_fs_vao         = 0;
-          s_fs_vbo         = 0;
-          s_fs_ibo         = 0;
-          s_fs_uTex        = -1;
-          s_fs_warm        = 0;
-          s_fs_has_frame   = false;
-          s_fs_last_ctr    = 0;
-          s_fs_w           = 0;
-          s_fs_h           = 0;
-          s_fs_stride      = 0;
-          s_fs_fmt         = 0;
-          s_fs_prog_failed = false;  // allow shader compile retry in new context
+          s_fs_tex           = 0;
+          s_fs_prog          = 0;
+          s_fs_vsh           = 0;
+          s_fs_fsh           = 0;
+          s_fs_vao           = 0;
+          s_fs_vbo           = 0;
+          s_fs_ibo           = 0;
+          s_fs_uTex          = -1;
+          s_fs_warm          = 0;
+          s_fs_has_frame     = false;
+          s_fs_last_ctr      = 0;
+          s_fs_w             = 0;
+          s_fs_h             = 0;
+          s_fs_stride        = 0;
+          s_fs_fmt           = 0;
+          s_fs_prog_failed   = false;  // allow shader compile retry in new context
+          s_fs_stable_frames = 0;
+          s_fs_stable_w      = 0;
+          s_fs_stable_h      = 0;
           const HGLRC hglrc_old = s_fs_owner_hglrc;
           s_fs_owner_hglrc = hglrc_now;
           _SidecarLog_GL (L"[SKF1-WARM] HGLRC changed (%p->%p) — native GL resources reset",
@@ -3751,7 +3770,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           }
         }
 
-        // Helper lambda: parse the SKF1 header at s_fs_base.
+        // Helper lambda: parse the SKF1 header at s_fs_base and return whether
+        // the layout is valid.  Fills out the dimension/offset fields by reference.
         // Does not require the overlay to be enabled.
         auto skf1_parse = [&](uint32_t& out_data_off, uint32_t& out_pix_fmt,
                                uint32_t& out_width,    uint32_t& out_height,
@@ -3778,13 +3798,52 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                    ((uint64_t)out_data_off + px_bytes) <= (uint64_t)s_fs_map_bytes );
         };
 
+        // -- Stability observation (warm==0 only) ----------------------------
+        // Track consecutive frames with the same non-null HGLRC (already verified
+        // above) and the same valid SKF1 layout before allowing Phase 0a to run.
+        // No GL calls here; only a lightweight header read via skf1_parse.
+        // Once warm > 0 the HGLRC-change and dimension-change handlers re-enter
+        // warm==0 if anything invalidating happens, resetting this counter too.
+        if (s_fs_warm == 0 && s_fs_base != nullptr)
+        {
+          uint32_t obs_data_off = 0, obs_pix_fmt = 0;
+          uint32_t obs_width    = 0, obs_height  = 0, obs_stride = 0;
+          const bool obs_ok = skf1_parse (obs_data_off, obs_pix_fmt,
+                                          obs_width, obs_height, obs_stride);
+          if (obs_ok && obs_width == s_fs_stable_w && obs_height == s_fs_stable_h)
+          {
+            if (s_fs_stable_frames < c_skf1_stable)
+            {
+              ++s_fs_stable_frames;
+              if (s_fs_stable_frames == c_skf1_stable)
+                _SidecarLog_GL (L"[SKF1-WARM] %d stable frames (%ux%u hglrc=%p)"
+                                L" — warm-up begins",
+                                c_skf1_stable, obs_width, obs_height, (void *)hglrc_now);
+            }
+          }
+          else
+          {
+            if (s_fs_stable_frames > 0)
+              _SidecarLog_GL (L"[SKF1-WARM] layout changed (%ux%u->%ux%u)"
+                              L" — stability counter reset",
+                              s_fs_stable_w, s_fs_stable_h,
+                              obs_ok ? obs_width : 0u, obs_ok ? obs_height : 0u);
+            s_fs_stable_w      = obs_ok ? obs_width  : 0u;
+            s_fs_stable_h      = obs_ok ? obs_height : 0u;
+            s_fs_stable_frames = obs_ok ? 1 : 0;
+          }
+        }
+
         // Warm phases use else-if so only one phase runs per SwapBuffers call,
         // spreading the GPU resource setup work across multiple frames.
 
         // -- Phase 0a (warm==0): snapshot buffer + texture storage -----------
         // Allocates the CPU snapshot heap and reserves GPU texture memory via
-        // glTexImage2D(nullptr).  No pixel data is uploaded in this phase.
-        if (s_fs_warm == 0 && s_fs_base != nullptr)
+        // glTexImage2D(nullptr).  Runs only after c_skf1_stable consecutive
+        // matching frames (same HGLRC and same valid SKF1 layout), preventing
+        // wasted resource allocation during title-card churn.
+        if (s_fs_warm == 0 && s_fs_base != nullptr &&
+            s_fs_stable_frames >= c_skf1_stable)
         {
           uint32_t pa_data_off = 0, pa_pix_fmt = 0;
           uint32_t pa_width    = 0, pa_height  = 0, pa_stride = 0;
@@ -3798,10 +3857,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               s_fs_snapshot.resize (snap_bytes);
 
             // Save GL state touched during texture allocation.
-            GLint pa_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &pa_sv_active);
-            GLint pa_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &pa_sv_t2d);
-            GLint pa_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,             &pa_sv_unpack);
-            GLint pa_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING,  &pa_sv_pbo);
+            GLint pa_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,              &pa_sv_active);
+            GLint pa_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,          &pa_sv_t2d);
+            GLint pa_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &pa_sv_unpack);
+            GLint pa_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &pa_sv_pbo);
 
             if (s_fs_tex == 0)
               glGenTextures (1, &s_fs_tex);
@@ -3865,16 +3924,16 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           }
         }
 
-        // -- Phase 0b (warm==1): shader compile + link -----------------------
-        // Compiles and links the fullscreen compositor shader.  Shader objects
-        // are dimension-independent so they survive dimension re-warm.
-        // If s_fs_prog is already nonzero (dimension re-warm), fast-forwards.
+        // -- Phase 0b-vs (warm==1): create and compile vertex shader ---------
+        // Dimension-independent.  If s_fs_prog is already valid (dimension re-warm,
+        // shader survived), fast-forward to warm==4 in a single frame.
         else if (s_fs_warm == 1 && ! s_fs_prog_failed)
         {
           if (s_fs_prog != 0)
           {
-            // Shader already compiled in a previous session (dimension re-warm).
-            s_fs_warm = 2;
+            // Shader already linked (e.g. dimension re-warm) — skip all 3 shader
+            // sub-phases and fast-forward to Phase 0c (VAO setup / check).
+            s_fs_warm = 4;
           }
           else
           {
@@ -3885,6 +3944,40 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               "out vec2 vUV;\n"
               "void main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }\n";
 
+            s_fs_vsh = glCreateShader (GL_VERTEX_SHADER);
+            if (s_fs_vsh != 0)
+            {
+              glShaderSource  (s_fs_vsh, 1, &vs_src, nullptr);
+              glCompileShader (s_fs_vsh);
+              s_fs_warm = 2;
+              // Compile status is checked next frame in Phase 0b-fs.
+            }
+            else
+            {
+              s_fs_prog_failed = true;
+              _SidecarLog_GL (L"[SKF1-WARM] phase 0b-vs: glCreateShader failed"
+                              L" — compositor disabled");
+            }
+          }
+        }
+
+        // -- Phase 0b-fs (warm==2): check VS status, create and compile FS ---
+        // Checking VS compile status one frame after glCompileShader gives the
+        // driver a full frame to complete any background compilation work.
+        else if (s_fs_warm == 2 && ! s_fs_prog_failed)
+        {
+          GLint vs_ok = GL_FALSE;
+          glGetShaderiv (s_fs_vsh, GL_COMPILE_STATUS, &vs_ok);
+          if (vs_ok == GL_FALSE)
+          {
+            glDeleteShader   (s_fs_vsh);
+            s_fs_vsh         = 0;
+            s_fs_prog_failed = true;
+            _SidecarLog_GL (L"[SKF1-WARM] phase 0b-fs: VS compile failed"
+                            L" — compositor disabled");
+          }
+          else
+          {
             const char* fs_src =
               "#version 130\n"
               "uniform sampler2D uTex;\n"
@@ -3892,68 +3985,96 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               "out vec4 oColor;\n"
               "void main(){ oColor=texture(uTex,vUV); }\n";
 
-            GLuint vsh = glCreateShader (GL_VERTEX_SHADER);
-            glShaderSource  (vsh, 1, &vs_src, nullptr);
-            glCompileShader (vsh);
-
-            GLuint fsh = glCreateShader (GL_FRAGMENT_SHADER);
-            glShaderSource  (fsh, 1, &fs_src, nullptr);
-            glCompileShader (fsh);
-
-            GLint vs_ok = GL_FALSE, fs_ok = GL_FALSE;
-            glGetShaderiv (vsh, GL_COMPILE_STATUS, &vs_ok);
-            glGetShaderiv (fsh, GL_COMPILE_STATUS, &fs_ok);
-
-            if (vs_ok == GL_FALSE || fs_ok == GL_FALSE)
+            s_fs_fsh = glCreateShader (GL_FRAGMENT_SHADER);
+            if (s_fs_fsh != 0)
             {
-              glDeleteShader (vsh);
-              glDeleteShader (fsh);
-              s_fs_prog_failed = true;
-              _SidecarLog_GL (L"[SKF1-WARM] phase 0b: shader compile failed (vs=%d fs=%d)"
-                              L" — compositor disabled", (int)vs_ok, (int)fs_ok);
+              glShaderSource  (s_fs_fsh, 1, &fs_src, nullptr);
+              glCompileShader (s_fs_fsh);
+              s_fs_warm = 3;
+              // Compile status checked next frame in Phase 0b-link.
             }
             else
             {
-              s_fs_prog = glCreateProgram ();
-              glAttachShader       (s_fs_prog, vsh);
-              glAttachShader       (s_fs_prog, fsh);
+              glDeleteShader   (s_fs_vsh);
+              s_fs_vsh         = 0;
+              s_fs_prog_failed = true;
+              _SidecarLog_GL (L"[SKF1-WARM] phase 0b-fs: glCreateShader(FS) failed"
+                              L" — compositor disabled");
+            }
+          }
+        }
+
+        // -- Phase 0b-link (warm==3): check FS status, link program ----------
+        else if (s_fs_warm == 3 && ! s_fs_prog_failed)
+        {
+          GLint fs_ok = GL_FALSE;
+          glGetShaderiv (s_fs_fsh, GL_COMPILE_STATUS, &fs_ok);
+          if (fs_ok == GL_FALSE)
+          {
+            glDeleteShader   (s_fs_vsh);
+            glDeleteShader   (s_fs_fsh);
+            s_fs_vsh         = 0;
+            s_fs_fsh         = 0;
+            s_fs_prog_failed = true;
+            _SidecarLog_GL (L"[SKF1-WARM] phase 0b-link: FS compile failed"
+                            L" — compositor disabled");
+          }
+          else
+          {
+            s_fs_prog = glCreateProgram ();
+            if (s_fs_prog != 0)
+            {
+              glAttachShader       (s_fs_prog, s_fs_vsh);
+              glAttachShader       (s_fs_prog, s_fs_fsh);
               glBindAttribLocation (s_fs_prog, 0, "aPos");
               glBindAttribLocation (s_fs_prog, 1, "aUV");
               glLinkProgram        (s_fs_prog);
 
               GLint link_ok = GL_FALSE;
               glGetProgramiv (s_fs_prog, GL_LINK_STATUS, &link_ok);
-              glDeleteShader (vsh);
-              glDeleteShader (fsh);
+              glDeleteShader (s_fs_vsh);
+              glDeleteShader (s_fs_fsh);
+              s_fs_vsh = 0;
+              s_fs_fsh = 0;
 
               if (link_ok == GL_FALSE)
               {
-                glDeleteProgram (s_fs_prog);
+                glDeleteProgram  (s_fs_prog);
                 s_fs_prog        = 0;
                 s_fs_prog_failed = true;
-                _SidecarLog_GL (L"[SKF1-WARM] phase 0b: shader link failed"
+                _SidecarLog_GL (L"[SKF1-WARM] phase 0b-link: link failed"
                                 L" — compositor disabled");
               }
               else
               {
                 s_fs_uTex = glGetUniformLocation (s_fs_prog, "uTex");
-                s_fs_warm = 2;
-                _SidecarLog_GL (L"[SKF1-WARM] phase 0b->2: shader ready");
+                s_fs_warm = 4;
+                _SidecarLog_GL (L"[SKF1-WARM] phase 0b-link->4: shader ready");
               }
+            }
+            else
+            {
+              glDeleteShader   (s_fs_vsh);
+              glDeleteShader   (s_fs_fsh);
+              s_fs_vsh         = 0;
+              s_fs_fsh         = 0;
+              s_fs_prog_failed = true;
+              _SidecarLog_GL (L"[SKF1-WARM] phase 0b-link: glCreateProgram failed"
+                              L" — compositor disabled");
             }
           }
         }
 
-        // -- Phase 0c (warm==2): VAO/VBO/IBO setup ---------------------------
+        // -- Phase 0c (warm==4): VAO/VBO/IBO setup ---------------------------
         // Creates fullscreen-quad geometry.  Dimension-independent; survives
         // dimension re-warm.  If s_fs_vao is already nonzero (dimension re-warm),
-        // fast-forwards to warm state 3.
-        else if (s_fs_warm == 2)
+        // fast-forwards to warm state 5.
+        else if (s_fs_warm == 4)
         {
           if (s_fs_vao != 0)
           {
             // Geometry already created (dimension re-warm) — skip.
-            s_fs_warm = 3;
+            s_fs_warm = 5;
           }
           else
           {
@@ -3992,16 +4113,16 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             glBindBuffer (GL_ARRAY_BUFFER,         (GLuint)pc_sv_arr);
             glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, (GLuint)pc_sv_elem);
 
-            s_fs_warm = 3;
-            _SidecarLog_GL (L"[SKF1-WARM] phase 0c->3: geometry ready");
+            s_fs_warm = 5;
+            _SidecarLog_GL (L"[SKF1-WARM] phase 0c->5: geometry ready");
           }
         }
 
-        // -- Phase 1 (warm==3): first stable producer frame upload -----------
+        // -- Phase 1 (warm==5): first stable producer frame upload -----------
         // Uploads the first valid producer frame via glTexSubImage2D so the
         // texture contains real content before the first composite draw.
         // Runs regardless of overlay-enabled.
-        else if (s_fs_warm == 3 && s_fs_base != nullptr)
+        else if (s_fs_warm == 5 && s_fs_base != nullptr)
         {
           uint32_t pl_data_off = 0, pl_pix_fmt = 0;
           uint32_t pl_width    = 0, pl_height  = 0, pl_stride = 0;
@@ -4019,9 +4140,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                 s_fs_tex = 0;
               }
               s_fs_w = 0; s_fs_h = 0; s_fs_stride = 0; s_fs_fmt = 0;
-              s_fs_warm      = 0;
-              s_fs_has_frame = false;
-              s_fs_last_ctr  = 0;
+              s_fs_warm          = 0;
+              s_fs_has_frame     = false;
+              s_fs_last_ctr      = 0;
+              s_fs_stable_frames = 0;
               _SidecarLog_GL (L"[SKF1-WARM] phase 1: dimension change — re-warm");
             }
             else
@@ -4054,7 +4176,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                                    s_fs_snapshot.data ());
                   s_fs_last_ctr  = c1;
                   s_fs_has_frame = true;
-                  s_fs_warm      = 4;
+                  s_fs_warm      = 6;
 
                   if (pl_sv_pbo != 0)
                     glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)pl_sv_pbo);
@@ -4062,7 +4184,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                   glActiveTexture ((GLenum)pl_sv_active);
                   glPixelStorei   (GL_UNPACK_ALIGNMENT, pl_sv_unpack);
 
-                  _SidecarLog_GL (L"[SKF1-WARM] phase 1->4: first frame uploaded (ctr=%u)", c1);
+                  _SidecarLog_GL (L"[SKF1-WARM] phase 1->6: first frame uploaded (ctr=%u)", c1);
                 }
               }
             }
@@ -4072,17 +4194,18 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             // Bad layout — drop mapping, re-open next frame, re-warm.
             UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
             CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
-            s_fs_map_bytes  = 0;
-            s_fs_warm       = 0;
-            s_fs_has_frame  = false;
-            s_fs_last_ctr   = 0;
+            s_fs_map_bytes     = 0;
+            s_fs_warm          = 0;
+            s_fs_has_frame     = false;
+            s_fs_last_ctr      = 0;
+            s_fs_stable_frames = 0;
           }
         }
 
-        // -- Phase 2 (warm==4, overlay enabled): update texture on frame advance
+        // -- Phase 2 (warm==6, overlay enabled): update texture on frame advance
         // Uses only glTexSubImage2D — never glTexImage2D in this phase.
-        // Only runs when overlay is enabled to avoid unnecessary GPU work.
-        if (s_fs_warm == 4 && s_fs_overlay_enabled && s_fs_base != nullptr)
+        // Gated on overlay-enabled to avoid unnecessary GPU work while hidden.
+        if (s_fs_warm == 6 && s_fs_overlay_enabled && s_fs_base != nullptr)
         {
           uint32_t fu_data_off = 0, fu_pix_fmt = 0;
           uint32_t fu_width    = 0, fu_height  = 0, fu_stride = 0;
@@ -4100,9 +4223,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                 s_fs_tex = 0;
               }
               s_fs_w = 0; s_fs_h = 0; s_fs_stride = 0; s_fs_fmt = 0;
-              s_fs_warm      = 0;
-              s_fs_has_frame = false;
-              s_fs_last_ctr  = 0;
+              s_fs_warm          = 0;
+              s_fs_has_frame     = false;
+              s_fs_last_ctr      = 0;
+              s_fs_stable_frames = 0;
               _SidecarLog_GL (L"[SKF1-WARM] draw-ready: dimension change — re-warm");
             }
             else
@@ -4154,17 +4278,18 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             // Bad layout — drop mapping, re-open next frame, re-warm.
             UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
             CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
-            s_fs_map_bytes  = 0;
-            s_fs_warm       = 0;
-            s_fs_has_frame  = false;
-            s_fs_last_ctr   = 0;
+            s_fs_map_bytes     = 0;
+            s_fs_warm          = 0;
+            s_fs_has_frame     = false;
+            s_fs_last_ctr      = 0;
+            s_fs_stable_frames = 0;
           }
         }
 
-        // -- Phase 2: composite overlay over FBO 0 ---------------------------
-        // Only draws when fully warm (s_fs_warm == 4) with all resources valid.
+        // -- Composite overlay over FBO 0 ------------------------------------
+        // Only draws when fully warm (s_fs_warm == 6) with all resources valid.
         // No shader compilation, no glTexImage2D, no VAO creation in this phase.
-        if (s_fs_overlay_enabled && s_fs_warm == 4 &&
+        if (s_fs_overlay_enabled && s_fs_warm == 6 &&
             s_fs_has_frame && s_fs_tex != 0 && s_fs_prog != 0 && s_fs_vao != 0)
         {
           // Save GL state.
