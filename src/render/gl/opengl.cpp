@@ -3867,7 +3867,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           }
 
           // Restore GL state.
-          glBindVertexArray (pw_sv_vao   != 0 ? (GLuint)pw_sv_vao  : 0);
+          glBindVertexArray ((GLuint)pw_sv_vao);
           glBindBuffer (GL_ARRAY_BUFFER,         (GLuint)pw_sv_arr);
           glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, (GLuint)pw_sv_elem);
           glBindTexture   (GL_TEXTURE_2D, (GLuint)pw_sv_t2d);
