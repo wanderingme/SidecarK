@@ -3585,6 +3585,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     // independently of the BFI path so the two never share stale handles.
     if (use_gl_skf1_fallback)
     {
+      // Maximum allowed width or height for an SKF1 surface.  Covers 8 K+
+      // displays (7680 × 4320) while rejecting implausible / malicious values.
+      static constexpr uint32_t c_skf1_max_dim = 16384u;
       // All statics in this block are accessed only from SK_GL_SwapBuffers on the
       // GL render thread; no synchronization is needed for non-atomic statics here.
       static HANDLE               s_fs_hMap      = nullptr;
@@ -3823,7 +3826,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           return ( hdr_bytes == 0x20u && out_data_off == 0x24u &&
                    out_pix_fmt == 1u  &&
                    out_width  > 0u   && out_height > 0u &&
-                   out_width  <= 16384u && out_height <= 16384u &&  // sane max (covers 8K+)
+                   out_width  <= c_skf1_max_dim && out_height <= c_skf1_max_dim &&  // sane max (covers 8K+)
                    out_stride == (uint32_t)((uint64_t)out_width * 4u) &&
                    ((uint64_t)out_data_off + px_bytes) <= (uint64_t)s_fs_map_bytes );
         };
@@ -4744,7 +4747,7 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                  const bool mapped_size_ok   = (end_off <= (uint64_t)s_view_bytes);
 
                  if (header_bytes == 0x20u && data_offset == 0x24u && counter_pos_ok && pixel_format == 1u &&
-                   width > 0u && height > 0u && width <= 16384u && height <= 16384u &&
+                   width > 0u && height > 0u && width <= c_skf1_max_dim && height <= c_skf1_max_dim &&
                    stride == (uint32_t)((uint64_t)width * 4u) && mapped_size_ok)
                  {
                   const uint32_t c1 = *(const uint32_t *)(base + (size_t)counter_off);
