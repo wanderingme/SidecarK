@@ -3715,11 +3715,15 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         {
           const HWND hwnd_chk = WindowFromDC (hDC);
           RECT       rect_chk = { };
+          bool       rect_ok  = false;
           if (hwnd_chk != nullptr)
-            GetClientRect (hwnd_chk, &rect_chk);
+            rect_ok = (GetClientRect (hwnd_chk, &rect_chk) != FALSE);
+          // Only compare rect if GetClientRect succeeded; a failed query leaves
+          // rect_chk zeroed which would trigger false-positive change detection.
           const bool hdc_chk_changed  = (hDC       != s_fs_owner_hdc);
           const bool hwnd_chk_changed = (hwnd_chk  != s_fs_owner_hwnd);
-          const bool rect_chk_changed = (rect_chk.left   != s_fs_owner_rect.left  ||
+          const bool rect_chk_changed = rect_ok &&
+                                        (rect_chk.left   != s_fs_owner_rect.left  ||
                                          rect_chk.right  != s_fs_owner_rect.right ||
                                          rect_chk.top    != s_fs_owner_rect.top   ||
                                          rect_chk.bottom != s_fs_owner_rect.bottom);
@@ -3744,7 +3748,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             }
             s_fs_owner_hdc  = hDC;
             s_fs_owner_hwnd = hwnd_chk;
-            s_fs_owner_rect = rect_chk;
+            if (rect_ok)
+              s_fs_owner_rect = rect_chk;
           }
         }
 
