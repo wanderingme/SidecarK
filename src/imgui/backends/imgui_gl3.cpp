@@ -219,7 +219,7 @@ ImGui_ImplGL3_RenderDrawData (ImDrawData* draw_data)
   if (  last_enable_cull_face)    glEnable (GL_CULL_FACE);
   if (  last_enable_depth_test)   glEnable (GL_DEPTH_TEST);
   if (! last_enable_scissor_test)                             glDisable (GL_SCISSOR_TEST);
-  if (  last_enable_stencil_test) glEnable (GL_SCISSOR_TEST);
+  if (  last_enable_stencil_test) glEnable (GL_STENCIL_TEST);
 
   glViewport ( last_viewport    [0], last_viewport    [1], (GLsizei)last_viewport    [2], (GLsizei)last_viewport    [3]);
   glScissor  ( last_scissor_box [0], last_scissor_box [1], (GLsizei)last_scissor_box [2], (GLsizei)last_scissor_box [3]);
