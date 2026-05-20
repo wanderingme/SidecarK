@@ -3580,13 +3580,20 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       static bool                s_fs_has_frame = false;
       static std::vector<uint8_t> s_fs_snapshot;
 
-      // Warm-up state:
-      //   0 = unwarmed (initial, or reset after dimension change)
-      //   1 = GPU resources ready (tex storage allocated, shader linked, VAO ready)
-      //   2 = first producer frame uploaded — draw-ready
-      // s_fs_prog_failed: set once if shader link fails; suppresses further attempts.
-      static int  s_fs_warm        = 0;
-      static bool s_fs_prog_failed = false;
+      // Warm-up state machine:
+      //   0  = unwarmed (initial, or after HGLRC/dimension reset)
+      //   1  = tex storage allocated     (Phase 0a done)
+      //   2  = shader compiled+linked    (Phase 0b done)
+      //   3  = VAO/VBO/IBO created       (Phase 0c done — all GPU resources ready)
+      //   4  = first frame uploaded      (draw-ready)
+      // s_fs_prog_failed: set once if shader compile/link fails in this HGLRC;
+      //   cleared on HGLRC change so a new context can retry.
+      static int   s_fs_warm        = 0;
+      static bool  s_fs_prog_failed = false;
+
+      // HGLRC ownership: GL objects are context-owned.  If the game recreates or
+      // switches its GL context, all cached handles become invalid in the new context.
+      static HGLRC s_fs_owner_hglrc = nullptr;
 
       // Control-plane state: mirrors the DXGI path (SidecarK_Control_<pid>).
       static HANDLE              s_fs_ctrlMap         = nullptr;
@@ -3595,199 +3602,279 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       static DWORD               s_fs_ctrlPid         = 0;
       static ULONGLONG           s_fs_ctrlLastAttempt = 0;
 
-      // -- Step 0: open / maintain the SidecarK_Control overlay-enable map --
+      // -- HGLRC ownership check -------------------------------------------
+      // wglSwapBuffers is called on the game's current GL context.  If that
+      // context has changed since we last saw it, all GL object handles are
+      // stale and must not be used in the new context.
+      HGLRC hglrc_now = wglGetCurrentContext ();
+      if (hglrc_now == nullptr)
       {
-        const DWORD pidNow = GetCurrentProcessId ();
-
-        // Invalidate cached map if the PID changed (new game session).
-        if (s_fs_ctrlPid != pidNow)
+        // No current context — skip warm/draw entirely, fall through.
+      }
+      else
+      {
+        if (hglrc_now != s_fs_owner_hglrc)
         {
-          if (s_fs_ctrlBase != nullptr)
-          {
-            UnmapViewOfFile (s_fs_ctrlBase);
-            s_fs_ctrlBase       = nullptr;
-            s_fs_overlayEnabled = nullptr;
-          }
-          if (s_fs_ctrlMap != nullptr)
-          {
-            CloseHandle (s_fs_ctrlMap);
-            s_fs_ctrlMap = nullptr;
-          }
-          s_fs_ctrlPid         = pidNow;
-          s_fs_ctrlLastAttempt = 0;  // force retry immediately
+          // Context changed.  Old GL objects belong to the previous context
+          // which may already be destroyed.  Zero all handles without calling
+          // glDelete* (calling delete for another context's objects is unsafe
+          // unless the contexts are explicitly share-listed).
+          s_fs_tex         = 0;
+          s_fs_prog        = 0;
+          s_fs_vao         = 0;
+          s_fs_vbo         = 0;
+          s_fs_ibo         = 0;
+          s_fs_uTex        = -1;
+          s_fs_warm        = 0;
+          s_fs_has_frame   = false;
+          s_fs_last_ctr    = 0;
+          s_fs_w           = 0;
+          s_fs_h           = 0;
+          s_fs_stride      = 0;
+          s_fs_fmt         = 0;
+          s_fs_prog_failed = false;  // allow shader compile retry in new context
+          s_fs_owner_hglrc = hglrc_now;
+          _SidecarLog_GL (L"[SKF1-WARM] HGLRC changed (%p->%p) — native GL resources reset",
+                          (void *)s_fs_owner_hglrc, (void *)hglrc_now);
         }
 
-        // Rate-limited open attempt (once per second until established).
-        if (s_fs_overlayEnabled == nullptr)
+        // -- Step 0: open / maintain the SidecarK_Control overlay-enable map --
         {
-          const ULONGLONG nowMs = GetTickCount64 ();
-          if (nowMs - s_fs_ctrlLastAttempt >= 1000ull)
+          const DWORD pidNow = GetCurrentProcessId ();
+
+          // Invalidate cached map if the PID changed (new game session).
+          if (s_fs_ctrlPid != pidNow)
           {
-            s_fs_ctrlLastAttempt = nowMs;
-
-            wchar_t ctrl_name [64] = { };
-            wsprintfW (ctrl_name, L"Local\\SidecarK_Control_%lu", (unsigned long)pidNow);
-
-            HANDLE hCtrl = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
-            if (hCtrl != nullptr)
+            if (s_fs_ctrlBase != nullptr)
             {
-              uint8_t* ctrlBase = (uint8_t *)MapViewOfFile (hCtrl, FILE_MAP_READ, 0, 0, 0);
-              if (ctrlBase != nullptr)
+              UnmapViewOfFile (s_fs_ctrlBase);
+              s_fs_ctrlBase       = nullptr;
+              s_fs_overlayEnabled = nullptr;
+            }
+            if (s_fs_ctrlMap != nullptr)
+            {
+              CloseHandle (s_fs_ctrlMap);
+              s_fs_ctrlMap = nullptr;
+            }
+            s_fs_ctrlPid         = pidNow;
+            s_fs_ctrlLastAttempt = 0;  // force retry immediately
+          }
+
+          // Rate-limited open attempt (once per second until established).
+          if (s_fs_overlayEnabled == nullptr)
+          {
+            const ULONGLONG nowMs = GetTickCount64 ();
+            if (nowMs - s_fs_ctrlLastAttempt >= 1000ull)
+            {
+              s_fs_ctrlLastAttempt = nowMs;
+
+              wchar_t ctrl_name [64] = { };
+              wsprintfW (ctrl_name, L"Local\\SidecarK_Control_%lu", (unsigned long)pidNow);
+
+              HANDLE hCtrl = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
+              if (hCtrl != nullptr)
               {
-                // Verify the mapped region is large enough for sig(4) + ver(4) + flag(4).
-                MEMORY_BASIC_INFORMATION ctrlMbi = { };
-                const SIZE_T ctrlRegionSize =
-                  (VirtualQuery (ctrlBase, &ctrlMbi, sizeof (ctrlMbi)) != 0)
-                    ? ctrlMbi.RegionSize : 0;
-                char sig [4] = { };
-                if (ctrlRegionSize >= 4)
-                  memcpy (sig, ctrlBase, sizeof (sig));
-                const uint32_t ctrlVer = (ctrlRegionSize >= 8)
-                  ? *reinterpret_cast<const uint32_t *> (ctrlBase + 0x04) : 0u;
-                if (ctrlRegionSize >= 12 &&
-                    memcmp (sig, "SKC1", sizeof (sig)) == 0 && ctrlVer == 1u)
+                uint8_t* ctrlBase = (uint8_t *)MapViewOfFile (hCtrl, FILE_MAP_READ, 0, 0, 0);
+                if (ctrlBase != nullptr)
                 {
-                  s_fs_ctrlMap        = hCtrl;
-                  s_fs_ctrlBase       = ctrlBase;
-                  s_fs_overlayEnabled = reinterpret_cast<volatile LONG *> (ctrlBase + 0x08);
+                  // Verify the mapped region is large enough for sig(4) + ver(4) + flag(4).
+                  MEMORY_BASIC_INFORMATION ctrlMbi = { };
+                  const SIZE_T ctrlRegionSize =
+                    (VirtualQuery (ctrlBase, &ctrlMbi, sizeof (ctrlMbi)) != 0)
+                      ? ctrlMbi.RegionSize : 0;
+                  char sig [4] = { };
+                  if (ctrlRegionSize >= 4)
+                    memcpy (sig, ctrlBase, sizeof (sig));
+                  const uint32_t ctrlVer = (ctrlRegionSize >= 8)
+                    ? *reinterpret_cast<const uint32_t *> (ctrlBase + 0x04) : 0u;
+                  if (ctrlRegionSize >= 12 &&
+                      memcmp (sig, "SKC1", sizeof (sig)) == 0 && ctrlVer == 1u)
+                  {
+                    s_fs_ctrlMap        = hCtrl;
+                    s_fs_ctrlBase       = ctrlBase;
+                    s_fs_overlayEnabled = reinterpret_cast<volatile LONG *> (ctrlBase + 0x08);
+                  }
+                  else
+                  {
+                    UnmapViewOfFile (ctrlBase);
+                    CloseHandle (hCtrl);
+                  }
                 }
                 else
                 {
-                  UnmapViewOfFile (ctrlBase);
                   CloseHandle (hCtrl);
                 }
-              }
-              else
-              {
-                CloseHandle (hCtrl);
               }
             }
           }
         }
-      }
 
-      // Read the authoritative overlay-enabled flag (fail-closed: off if map
-      // not yet established, matching the DXGI control-plane behaviour).
-      const bool s_fs_overlay_enabled =
-        (s_fs_overlayEnabled != nullptr) &&
-        (*s_fs_overlayEnabled != 0);
+        // Read the authoritative overlay-enabled flag (fail-closed: off if map
+        // not yet established, matching the DXGI control-plane behaviour).
+        const bool s_fs_overlay_enabled =
+          (s_fs_overlayEnabled != nullptr) &&
+          (*s_fs_overlayEnabled != 0);
 
-      // When the overlay is turned off, invalidate the cached frame so that
-      // the stale texture is never composited and fresh frames are uploaded
-      // on the next ON transition.
-      if (! s_fs_overlay_enabled)
-        s_fs_has_frame = false;
+        // When the overlay is turned off, invalidate the cached frame so that
+        // the stale texture is never composited and fresh frames are uploaded
+        // on the next ON transition.
+        if (! s_fs_overlay_enabled)
+          s_fs_has_frame = false;
 
-      // -- Step 1: open / maintain the SKF1 shared-memory mapping ----------
-      if (s_fs_base == nullptr)
-      {
-        if (s_fs_hMap != nullptr)
-        {
-          CloseHandle (s_fs_hMap);
-          s_fs_hMap = nullptr;
-        }
-
-        s_fs_hMap = OpenFileMappingW (FILE_MAP_READ, FALSE, map_name);
-        if (s_fs_hMap != nullptr)
-        {
-          s_fs_base = (uint8_t *)MapViewOfFile (s_fs_hMap, FILE_MAP_READ, 0, 0, 0);
-          if (s_fs_base != nullptr)
-          {
-            MEMORY_BASIC_INFORMATION mbi = { };
-            if (VirtualQuery (s_fs_base, &mbi, sizeof (mbi)) != 0)
-              s_fs_map_bytes = mbi.RegionSize;
-          }
-          if (s_fs_base == nullptr || s_fs_map_bytes == 0)
-          {
-            if (s_fs_base) { UnmapViewOfFile (s_fs_base); s_fs_base = nullptr; }
-            CloseHandle (s_fs_hMap);
-            s_fs_hMap      = nullptr;
-            s_fs_map_bytes = 0;
-          }
-        }
-      }
-
-      // Helper lambda: parse the SKF1 header at s_fs_base and return whether
-      // the layout is valid.  Fills out the dimension/offset fields by reference.
-      // Does not require the overlay to be enabled.
-      auto skf1_parse = [&](uint32_t& out_data_off, uint32_t& out_pix_fmt,
-                             uint32_t& out_width,    uint32_t& out_height,
-                             uint32_t& out_stride) -> bool
-      {
+        // -- Step 1: open / maintain the SKF1 shared-memory mapping ----------
         if (s_fs_base == nullptr)
-          return false;
-        const uint8_t* b = s_fs_base;
-        if (*(const uint32_t *)(b + 0x00) != 0x31464B53u)  // 'SKF1'
-          return false;
-        if (*(const uint32_t *)(b + 0x04) != 1u)
-          return false;
-        const uint32_t hdr_bytes = *(const uint32_t *)(b + 0x08);
-        out_data_off = *(const uint32_t *)(b + 0x0C);
-        out_pix_fmt  = *(const uint32_t *)(b + 0x10);
-        out_width    = *(const uint32_t *)(b + 0x14);
-        out_height   = *(const uint32_t *)(b + 0x18);
-        out_stride   = *(const uint32_t *)(b + 0x1C);
-        const uint64_t px_bytes = (uint64_t)out_stride * (uint64_t)out_height;
-        return ( hdr_bytes == 0x20u && out_data_off == 0x24u &&
-                 out_pix_fmt == 1u  &&
-                 out_width  > 0u   && out_height > 0u &&
-                 out_stride == (uint32_t)((uint64_t)out_width * 4u) &&
-                 ((uint64_t)out_data_off + px_bytes) <= (uint64_t)s_fs_map_bytes );
-      };
-
-      // -- Phase 0 -> 1: pre-warm GPU resources ----------------------------
-      // Runs when the mapping is open, warm state is 0, and the shader has
-      // not permanently failed.  Runs regardless of overlay-enabled so that
-      // resources are ready before the first visible composite draw.
-      if (s_fs_base != nullptr && s_fs_warm == 0 && ! s_fs_prog_failed)
-      {
-        uint32_t pw_data_off = 0, pw_pix_fmt = 0;
-        uint32_t pw_width    = 0, pw_height  = 0, pw_stride = 0;
-        const bool pw_ok = skf1_parse (pw_data_off, pw_pix_fmt,
-                                       pw_width, pw_height, pw_stride);
-
-        if (pw_ok)
         {
-          // Resize snapshot buffer to hold one full producer frame.
-          const size_t snap_bytes = (size_t)pw_stride * (size_t)pw_height;
-          if (s_fs_snapshot.size () != snap_bytes)
-            s_fs_snapshot.resize (snap_bytes);
-
-          // Save minimal GL state touched during resource creation.
-          GLint pw_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,     &pw_sv_active);
-          GLint pw_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D, &pw_sv_t2d);
-          GLint pw_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,   &pw_sv_unpack);
-          GLint pw_sv_vao    = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &pw_sv_vao);
-          GLint pw_sv_arr    = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &pw_sv_arr);
-          GLint pw_sv_elem   = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &pw_sv_elem);
-
-          // Allocate or re-allocate texture storage with null pixels (no upload
-          // cost; this only reserves GPU memory for the given dimensions).
-          if (s_fs_tex == 0)
-            glGenTextures (1, &s_fs_tex);
-
-          if (s_fs_tex != 0)
+          if (s_fs_hMap != nullptr)
           {
-            glActiveTexture (GL_TEXTURE0);
-            glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
-            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
-            glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
-            glPixelStorei   (GL_UNPACK_ALIGNMENT, 1);
-            // Allocate GPU storage (nullptr pixels — just reserves memory).
-            glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
-                          (GLsizei)pw_width, (GLsizei)pw_height, 0,
-                          GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
-            s_fs_w      = pw_width;
-            s_fs_h      = pw_height;
-            s_fs_stride = pw_stride;
-            s_fs_fmt    = pw_pix_fmt;
+            CloseHandle (s_fs_hMap);
+            s_fs_hMap = nullptr;
           }
 
-          // Compile / link the compositor shader once per GL context.
-          // s_fs_prog survives dimension re-warm (geometry is dimension-independent).
-          if (s_fs_prog == 0)
+          s_fs_hMap = OpenFileMappingW (FILE_MAP_READ, FALSE, map_name);
+          if (s_fs_hMap != nullptr)
+          {
+            s_fs_base = (uint8_t *)MapViewOfFile (s_fs_hMap, FILE_MAP_READ, 0, 0, 0);
+            if (s_fs_base != nullptr)
+            {
+              MEMORY_BASIC_INFORMATION mbi = { };
+              if (VirtualQuery (s_fs_base, &mbi, sizeof (mbi)) != 0)
+                s_fs_map_bytes = mbi.RegionSize;
+            }
+            if (s_fs_base == nullptr || s_fs_map_bytes == 0)
+            {
+              if (s_fs_base) { UnmapViewOfFile (s_fs_base); s_fs_base = nullptr; }
+              CloseHandle (s_fs_hMap);
+              s_fs_hMap      = nullptr;
+              s_fs_map_bytes = 0;
+            }
+          }
+        }
+
+        // Helper lambda: parse the SKF1 header at s_fs_base.
+        // Does not require the overlay to be enabled.
+        auto skf1_parse = [&](uint32_t& out_data_off, uint32_t& out_pix_fmt,
+                               uint32_t& out_width,    uint32_t& out_height,
+                               uint32_t& out_stride) -> bool
+        {
+          if (s_fs_base == nullptr)
+            return false;
+          const uint8_t* b = s_fs_base;
+          if (*(const uint32_t *)(b + 0x00) != 0x31464B53u)  // 'SKF1'
+            return false;
+          if (*(const uint32_t *)(b + 0x04) != 1u)
+            return false;
+          const uint32_t hdr_bytes = *(const uint32_t *)(b + 0x08);
+          out_data_off = *(const uint32_t *)(b + 0x0C);
+          out_pix_fmt  = *(const uint32_t *)(b + 0x10);
+          out_width    = *(const uint32_t *)(b + 0x14);
+          out_height   = *(const uint32_t *)(b + 0x18);
+          out_stride   = *(const uint32_t *)(b + 0x1C);
+          const uint64_t px_bytes = (uint64_t)out_stride * (uint64_t)out_height;
+          return ( hdr_bytes == 0x20u && out_data_off == 0x24u &&
+                   out_pix_fmt == 1u  &&
+                   out_width  > 0u   && out_height > 0u &&
+                   out_stride == (uint32_t)((uint64_t)out_width * 4u) &&
+                   ((uint64_t)out_data_off + px_bytes) <= (uint64_t)s_fs_map_bytes );
+        };
+
+        // Warm phases use else-if so only one phase runs per SwapBuffers call,
+        // spreading the GPU resource setup work across multiple frames.
+
+        // -- Phase 0a (warm==0): snapshot buffer + texture storage -----------
+        // Allocates the CPU snapshot heap and reserves GPU texture memory via
+        // glTexImage2D(nullptr).  No pixel data is uploaded in this phase.
+        if (s_fs_warm == 0 && s_fs_base != nullptr)
+        {
+          uint32_t pa_data_off = 0, pa_pix_fmt = 0;
+          uint32_t pa_width    = 0, pa_height  = 0, pa_stride = 0;
+          const bool pa_ok = skf1_parse (pa_data_off, pa_pix_fmt,
+                                         pa_width, pa_height, pa_stride);
+          if (pa_ok)
+          {
+            // Resize CPU snapshot buffer.
+            const size_t snap_bytes = (size_t)pa_stride * (size_t)pa_height;
+            if (s_fs_snapshot.size () != snap_bytes)
+              s_fs_snapshot.resize (snap_bytes);
+
+            // Save GL state touched during texture allocation.
+            GLint pa_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &pa_sv_active);
+            GLint pa_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &pa_sv_t2d);
+            GLint pa_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,             &pa_sv_unpack);
+            GLint pa_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING,  &pa_sv_pbo);
+
+            if (s_fs_tex == 0)
+              glGenTextures (1, &s_fs_tex);
+
+            bool pa_tex_ok = false;
+            if (s_fs_tex != 0)
+            {
+              glActiveTexture (GL_TEXTURE0);
+              glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
+              glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+              glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+              glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
+              glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
+              glPixelStorei   (GL_UNPACK_ALIGNMENT, 1);
+              // Zero PBO so nullptr is treated as a CPU pointer, not a PBO offset.
+              if (pa_sv_pbo != 0)
+                glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
+              // Clear any previous GL errors before the allocation attempt.
+              while (glGetError () != GL_NO_ERROR) { }
+              glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
+                            (GLsizei)pa_width, (GLsizei)pa_height, 0,
+                            GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+              pa_tex_ok = (glGetError () == GL_NO_ERROR);
+              if (pa_tex_ok)
+              {
+                s_fs_w      = pa_width;
+                s_fs_h      = pa_height;
+                s_fs_stride = pa_stride;
+                s_fs_fmt    = pa_pix_fmt;
+              }
+              else
+              {
+                // Allocation failed — clean up and retry next frame.
+                glDeleteTextures (1, &s_fs_tex);
+                s_fs_tex = 0;
+                _SidecarLog_GL (L"[SKF1-WARM] phase 0a: glTexImage2D failed — will retry");
+              }
+              if (pa_sv_pbo != 0)
+                glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)pa_sv_pbo);
+            }
+
+            // Restore GL state.
+            glBindTexture   (GL_TEXTURE_2D, (GLuint)pa_sv_t2d);
+            glActiveTexture ((GLenum)pa_sv_active);
+            glPixelStorei   (GL_UNPACK_ALIGNMENT, pa_sv_unpack);
+
+            if (pa_tex_ok)
+            {
+              s_fs_warm = 1;
+              _SidecarLog_GL (L"[SKF1-WARM] phase 0a->1: tex storage ready (%ux%u)",
+                              pa_width, pa_height);
+            }
+          }
+          else if (s_fs_base != nullptr)
+          {
+            // Bad header layout — drop mapping; will re-open next frame.
+            UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
+            CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
+            s_fs_map_bytes  = 0;
+          }
+        }
+
+        // -- Phase 0b (warm==1): shader compile + link -----------------------
+        // Compiles and links the fullscreen compositor shader.  Shader objects
+        // are dimension-independent so they survive dimension re-warm.
+        // If s_fs_prog is already nonzero (dimension re-warm), fast-forwards.
+        else if (s_fs_warm == 1 && ! s_fs_prog_failed)
+        {
+          if (s_fs_prog != 0)
+          {
+            // Shader already compiled in a previous session (dimension re-warm).
+            s_fs_warm = 2;
+          }
+          else
           {
             const char* vs_src =
               "#version 130\n"
@@ -3806,41 +3893,73 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             GLuint vsh = glCreateShader (GL_VERTEX_SHADER);
             glShaderSource  (vsh, 1, &vs_src, nullptr);
             glCompileShader (vsh);
+
             GLuint fsh = glCreateShader (GL_FRAGMENT_SHADER);
             glShaderSource  (fsh, 1, &fs_src, nullptr);
             glCompileShader (fsh);
 
-            s_fs_prog = glCreateProgram ();
-            glAttachShader       (s_fs_prog, vsh);
-            glAttachShader       (s_fs_prog, fsh);
-            glBindAttribLocation (s_fs_prog, 0, "aPos");
-            glBindAttribLocation (s_fs_prog, 1, "aUV");
-            glLinkProgram        (s_fs_prog);
+            GLint vs_ok = GL_FALSE, fs_ok = GL_FALSE;
+            glGetShaderiv (vsh, GL_COMPILE_STATUS, &vs_ok);
+            glGetShaderiv (fsh, GL_COMPILE_STATUS, &fs_ok);
 
-            // Check link status; set prog_failed permanently on failure so
-            // we never attempt shader compilation again on subsequent frames.
-            GLint link_ok = GL_FALSE;
-            glGetProgramiv (s_fs_prog, GL_LINK_STATUS, &link_ok);
-            if (link_ok == GL_FALSE)
+            if (vs_ok == GL_FALSE || fs_ok == GL_FALSE)
             {
-              glDeleteProgram (s_fs_prog);
-              s_fs_prog       = 0;
+              glDeleteShader (vsh);
+              glDeleteShader (fsh);
               s_fs_prog_failed = true;
-              _SidecarLog_GL (L"[SKF1-WARM] shader link failed — compositor disabled");
+              _SidecarLog_GL (L"[SKF1-WARM] phase 0b: shader compile failed (vs=%d fs=%d)"
+                              L" — compositor disabled", (int)vs_ok, (int)fs_ok);
             }
             else
             {
-              s_fs_uTex = glGetUniformLocation (s_fs_prog, "uTex");
+              s_fs_prog = glCreateProgram ();
+              glAttachShader       (s_fs_prog, vsh);
+              glAttachShader       (s_fs_prog, fsh);
+              glBindAttribLocation (s_fs_prog, 0, "aPos");
+              glBindAttribLocation (s_fs_prog, 1, "aUV");
+              glLinkProgram        (s_fs_prog);
+
+              GLint link_ok = GL_FALSE;
+              glGetProgramiv (s_fs_prog, GL_LINK_STATUS, &link_ok);
+              glDeleteShader (vsh);
+              glDeleteShader (fsh);
+
+              if (link_ok == GL_FALSE)
+              {
+                glDeleteProgram (s_fs_prog);
+                s_fs_prog        = 0;
+                s_fs_prog_failed = true;
+                _SidecarLog_GL (L"[SKF1-WARM] phase 0b: shader link failed"
+                                L" — compositor disabled");
+              }
+              else
+              {
+                s_fs_uTex = glGetUniformLocation (s_fs_prog, "uTex");
+                s_fs_warm = 2;
+                _SidecarLog_GL (L"[SKF1-WARM] phase 0b->2: shader ready");
+              }
             }
-
-            glDeleteShader (vsh);
-            glDeleteShader (fsh);
           }
+        }
 
-          // Create fullscreen-quad geometry once per GL context.
-          // Survives dimension re-warm.
-          if (s_fs_vao == 0 && ! s_fs_prog_failed)
+        // -- Phase 0c (warm==2): VAO/VBO/IBO setup ---------------------------
+        // Creates fullscreen-quad geometry.  Dimension-independent; survives
+        // dimension re-warm.  If s_fs_vao is already nonzero (dimension re-warm),
+        // fast-forwards to warm state 3.
+        else if (s_fs_warm == 2)
+        {
+          if (s_fs_vao != 0)
           {
+            // Geometry already created (dimension re-warm) — skip.
+            s_fs_warm = 3;
+          }
+          else
+          {
+            // Save GL state touched during geometry upload.
+            GLint pc_sv_vao  = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &pc_sv_vao);
+            GLint pc_sv_arr  = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &pc_sv_arr);
+            GLint pc_sv_elem = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &pc_sv_elem);
+
             // V is flipped (1.0 at bottom, 0.0 at top) so that the top-down
             // SKF1 image appears right-side-up in OpenGL's Y-up coordinate system.
             const float verts [16] = {
@@ -3863,246 +3982,262 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
             glEnableVertexAttribArray (0);
             glEnableVertexAttribArray (1);
             glVertexAttribPointer (0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)0);
-            glVertexAttribPointer (1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float), (void *)(2 * sizeof (float)));
-          }
+            glVertexAttribPointer (1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof (float),
+                                   (void *)(2 * sizeof (float)));
 
-          // Restore GL state.
-          glBindVertexArray ((GLuint)pw_sv_vao);
-          glBindBuffer (GL_ARRAY_BUFFER,         (GLuint)pw_sv_arr);
-          glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, (GLuint)pw_sv_elem);
-          glBindTexture   (GL_TEXTURE_2D, (GLuint)pw_sv_t2d);
-          glActiveTexture ((GLenum)pw_sv_active);
-          glPixelStorei   (GL_UNPACK_ALIGNMENT, pw_sv_unpack);
+            // Restore GL state.
+            glBindVertexArray ((GLuint)pc_sv_vao);
+            glBindBuffer (GL_ARRAY_BUFFER,         (GLuint)pc_sv_arr);
+            glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, (GLuint)pc_sv_elem);
 
-          // Advance to warm state 1 if all required resources are ready.
-          if (s_fs_tex != 0 && ! s_fs_prog_failed && s_fs_vao != 0)
-          {
-            s_fs_warm = 1;
-            _SidecarLog_GL (L"[SKF1-WARM] phase 0->1: resources ready (%ux%u)", pw_width, pw_height);
+            s_fs_warm = 3;
+            _SidecarLog_GL (L"[SKF1-WARM] phase 0c->3: geometry ready");
           }
         }
-        else if (s_fs_base != nullptr)
-        {
-          // Bad header layout — drop mapping; will re-open next frame.
-          UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
-          CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
-          s_fs_map_bytes  = 0;
-        }
-      }
 
-      // -- Phase 1 -> 2: first-frame preload --------------------------------
-      // Upload the first stable producer frame so the texture is ready before
-      // the first visible composite draw.  Runs regardless of overlay-enabled.
-      if (s_fs_base != nullptr && s_fs_warm == 1)
-      {
-        uint32_t pl_data_off = 0, pl_pix_fmt = 0;
-        uint32_t pl_width    = 0, pl_height  = 0, pl_stride = 0;
-        const bool pl_ok = skf1_parse (pl_data_off, pl_pix_fmt,
-                                       pl_width, pl_height, pl_stride);
-
-        if (pl_ok)
+        // -- Phase 1 (warm==3): first stable producer frame upload -----------
+        // Uploads the first valid producer frame via glTexSubImage2D so the
+        // texture contains real content before the first composite draw.
+        // Runs regardless of overlay-enabled.
+        else if (s_fs_warm == 3 && s_fs_base != nullptr)
         {
-          // Detect dimension change: drop back to phase 0 to re-allocate storage.
-          if (pl_width != s_fs_w || pl_height != s_fs_h ||
-              pl_stride != s_fs_stride || pl_pix_fmt != s_fs_fmt)
+          uint32_t pl_data_off = 0, pl_pix_fmt = 0;
+          uint32_t pl_width    = 0, pl_height  = 0, pl_stride = 0;
+          const bool pl_ok = skf1_parse (pl_data_off, pl_pix_fmt,
+                                         pl_width, pl_height, pl_stride);
+          if (pl_ok)
           {
-            s_fs_warm      = 0;
-            s_fs_has_frame = false;
-          }
-          else
-          {
-            // Try to capture the first stable producer frame.
-            const uint64_t ctr_off = (uint64_t)pl_data_off - 4ull;
-            const uint32_t c1 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
-            if (c1 != 0u)
+            // Dimension change at this stage: delete texture, reset to phase 0a.
+            if (pl_width != s_fs_w || pl_height != s_fs_h ||
+                pl_stride != s_fs_stride || pl_pix_fmt != s_fs_fmt)
             {
-              const size_t snap_bytes = (size_t)pl_stride * (size_t)pl_height;
-              memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)pl_data_off, snap_bytes);
-              const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
-
-              if (c1 == c2) // Stable read.
+              if (s_fs_tex != 0)
               {
-                GLint pl_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,     &pl_sv_active);
-                GLint pl_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D, &pl_sv_t2d);
-                GLint pl_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,   &pl_sv_unpack);
-
-                glActiveTexture (GL_TEXTURE0);
-                glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
-                glPixelStorei   (GL_UNPACK_ALIGNMENT, 1);
-                glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
-                                 (GLsizei)pl_width, (GLsizei)pl_height,
-                                 GL_BGRA, GL_UNSIGNED_BYTE,
-                                 s_fs_snapshot.data ());
-                s_fs_last_ctr  = c1;
-                s_fs_has_frame = true;
-                s_fs_warm      = 2;
-
-                glBindTexture   (GL_TEXTURE_2D, (GLuint)pl_sv_t2d);
-                glActiveTexture ((GLenum)pl_sv_active);
-                glPixelStorei   (GL_UNPACK_ALIGNMENT, pl_sv_unpack);
-
-                _SidecarLog_GL (L"[SKF1-WARM] phase 1->2: first frame uploaded (ctr=%u)", c1);
+                glDeleteTextures (1, &s_fs_tex);
+                s_fs_tex = 0;
               }
+              s_fs_w = 0; s_fs_h = 0; s_fs_stride = 0; s_fs_fmt = 0;
+              s_fs_warm      = 0;
+              s_fs_has_frame = false;
+              s_fs_last_ctr  = 0;
+              _SidecarLog_GL (L"[SKF1-WARM] phase 1: dimension change — re-warm");
             }
-          }
-        }
-        else if (s_fs_base != nullptr)
-        {
-          // Bad layout — drop mapping, re-open next frame, re-warm.
-          UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
-          CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
-          s_fs_map_bytes  = 0;
-          s_fs_warm       = 0;
-          s_fs_has_frame  = false;
-        }
-      }
-
-      // -- Step 2 (warm == 2 only): update texture when producer frame advances
-      // Uses only glTexSubImage2D — never glTexImage2D in this phase.
-      // Gated on overlay-enabled to avoid unnecessary GPU work while hidden.
-      if (s_fs_warm == 2 && s_fs_overlay_enabled && s_fs_base != nullptr)
-      {
-        uint32_t fu_data_off = 0, fu_pix_fmt = 0;
-        uint32_t fu_width    = 0, fu_height  = 0, fu_stride = 0;
-        const bool fu_ok = skf1_parse (fu_data_off, fu_pix_fmt,
-                                       fu_width, fu_height, fu_stride);
-
-        if (fu_ok)
-        {
-          // Dimension change: reset to phase 0 so storage is re-allocated.
-          if (fu_width != s_fs_w || fu_height != s_fs_h ||
-              fu_stride != s_fs_stride || fu_pix_fmt != s_fs_fmt)
-          {
-            s_fs_warm      = 0;
-            s_fs_has_frame = false;
-          }
-          else
-          {
-            const uint64_t ctr_off = (uint64_t)fu_data_off - 4ull;
-            const uint32_t c1 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
-            if (c1 != 0u)
+            else
             {
-              const size_t snap_bytes = (size_t)fu_stride * (size_t)fu_height;
-              if (s_fs_snapshot.size () != snap_bytes)
-                s_fs_snapshot.resize (snap_bytes);
-              memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)fu_data_off, snap_bytes);
-              const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
-
-              if (c1 == c2 && (c1 != s_fs_last_ctr || ! s_fs_has_frame))
+              // Double-counter stable read.
+              const uint64_t ctr_off = (uint64_t)pl_data_off - 4ull;
+              const uint32_t c1 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
+              if (c1 != 0u)
               {
-                if (s_fs_tex != 0)
+                const size_t snap_bytes = (size_t)pl_stride * (size_t)pl_height;
+                memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)pl_data_off, snap_bytes);
+                const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
+
+                if (c1 == c2)  // Stable read — proceed with upload.
                 {
-                  GLint fu_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,     &fu_sv_active);
-                  GLint fu_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D, &fu_sv_t2d);
-                  GLint fu_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,   &fu_sv_unpack);
+                  GLint pl_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,              &pl_sv_active);
+                  GLint pl_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,          &pl_sv_t2d);
+                  GLint pl_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &pl_sv_unpack);
+                  GLint pl_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &pl_sv_pbo);
 
                   glActiveTexture (GL_TEXTURE0);
                   glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
                   glPixelStorei   (GL_UNPACK_ALIGNMENT, 1);
+                  if (pl_sv_pbo != 0)
+                    glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
+
                   glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
-                                   (GLsizei)fu_width, (GLsizei)fu_height,
+                                   (GLsizei)pl_width, (GLsizei)pl_height,
                                    GL_BGRA, GL_UNSIGNED_BYTE,
                                    s_fs_snapshot.data ());
                   s_fs_last_ctr  = c1;
                   s_fs_has_frame = true;
+                  s_fs_warm      = 4;
 
-                  glBindTexture   (GL_TEXTURE_2D, (GLuint)fu_sv_t2d);
-                  glActiveTexture ((GLenum)fu_sv_active);
-                  glPixelStorei   (GL_UNPACK_ALIGNMENT, fu_sv_unpack);
+                  if (pl_sv_pbo != 0)
+                    glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)pl_sv_pbo);
+                  glBindTexture   (GL_TEXTURE_2D, (GLuint)pl_sv_t2d);
+                  glActiveTexture ((GLenum)pl_sv_active);
+                  glPixelStorei   (GL_UNPACK_ALIGNMENT, pl_sv_unpack);
+
+                  _SidecarLog_GL (L"[SKF1-WARM] phase 1->4: first frame uploaded (ctr=%u)", c1);
                 }
               }
             }
           }
+          else if (s_fs_base != nullptr)
+          {
+            // Bad layout — drop mapping, re-open next frame, re-warm.
+            UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
+            CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
+            s_fs_map_bytes  = 0;
+            s_fs_warm       = 0;
+            s_fs_has_frame  = false;
+            s_fs_last_ctr   = 0;
+          }
         }
-        else if (s_fs_base != nullptr)
+
+        // -- Phase 2 (warm==4, overlay enabled): update texture on frame advance
+        // Uses only glTexSubImage2D — never glTexImage2D in this phase.
+        // Only runs when overlay is enabled to avoid unnecessary GPU work.
+        if (s_fs_warm == 4 && s_fs_overlay_enabled && s_fs_base != nullptr)
         {
-          // Bad layout — drop mapping, re-open next frame, re-warm.
-          UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
-          CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
-          s_fs_map_bytes  = 0;
-          s_fs_warm       = 0;
-          s_fs_has_frame  = false;
+          uint32_t fu_data_off = 0, fu_pix_fmt = 0;
+          uint32_t fu_width    = 0, fu_height  = 0, fu_stride = 0;
+          const bool fu_ok = skf1_parse (fu_data_off, fu_pix_fmt,
+                                         fu_width, fu_height, fu_stride);
+          if (fu_ok)
+          {
+            // Dimension change: delete texture, reset to phase 0a.
+            if (fu_width != s_fs_w || fu_height != s_fs_h ||
+                fu_stride != s_fs_stride || fu_pix_fmt != s_fs_fmt)
+            {
+              if (s_fs_tex != 0)
+              {
+                glDeleteTextures (1, &s_fs_tex);
+                s_fs_tex = 0;
+              }
+              s_fs_w = 0; s_fs_h = 0; s_fs_stride = 0; s_fs_fmt = 0;
+              s_fs_warm      = 0;
+              s_fs_has_frame = false;
+              s_fs_last_ctr  = 0;
+              _SidecarLog_GL (L"[SKF1-WARM] draw-ready: dimension change — re-warm");
+            }
+            else
+            {
+              const uint64_t ctr_off = (uint64_t)fu_data_off - 4ull;
+              const uint32_t c1 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
+              if (c1 != 0u)
+              {
+                const size_t snap_bytes = (size_t)fu_stride * (size_t)fu_height;
+                if (s_fs_snapshot.size () != snap_bytes)
+                  s_fs_snapshot.resize (snap_bytes);
+                memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)fu_data_off, snap_bytes);
+                const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
+
+                if (c1 == c2 && (c1 != s_fs_last_ctr || ! s_fs_has_frame))
+                {
+                  if (s_fs_tex != 0)
+                  {
+                    GLint fu_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,              &fu_sv_active);
+                    GLint fu_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,          &fu_sv_t2d);
+                    GLint fu_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &fu_sv_unpack);
+                    GLint fu_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &fu_sv_pbo);
+
+                    glActiveTexture (GL_TEXTURE0);
+                    glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
+                    glPixelStorei   (GL_UNPACK_ALIGNMENT, 1);
+                    if (fu_sv_pbo != 0)
+                      glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
+
+                    glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
+                                     (GLsizei)fu_width, (GLsizei)fu_height,
+                                     GL_BGRA, GL_UNSIGNED_BYTE,
+                                     s_fs_snapshot.data ());
+                    s_fs_last_ctr  = c1;
+                    s_fs_has_frame = true;
+
+                    if (fu_sv_pbo != 0)
+                      glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)fu_sv_pbo);
+                    glBindTexture   (GL_TEXTURE_2D, (GLuint)fu_sv_t2d);
+                    glActiveTexture ((GLenum)fu_sv_active);
+                    glPixelStorei   (GL_UNPACK_ALIGNMENT, fu_sv_unpack);
+                  }
+                }
+              }
+            }
+          }
+          else if (s_fs_base != nullptr)
+          {
+            // Bad layout — drop mapping, re-open next frame, re-warm.
+            UnmapViewOfFile (s_fs_base); s_fs_base     = nullptr;
+            CloseHandle     (s_fs_hMap); s_fs_hMap     = nullptr;
+            s_fs_map_bytes  = 0;
+            s_fs_warm       = 0;
+            s_fs_has_frame  = false;
+            s_fs_last_ctr   = 0;
+          }
         }
-      }
 
-      // -- Step 3: composite overlay over FBO 0 ----------------------------
-      // Only draws when fully warm (s_fs_warm == 2) with all resources valid.
-      // No shader compilation, no glTexImage2D, no VAO creation in this phase.
-      if (s_fs_overlay_enabled && s_fs_warm == 2 &&
-          s_fs_has_frame && s_fs_tex != 0 && s_fs_prog != 0 && s_fs_vao != 0)
-      {
-        // Save GL state.
-        GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
-        GLint     sv_active  = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &sv_active);
-        GLint     sv_tex2d   = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &sv_tex2d);
-        GLint     sv_vao     = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &sv_vao);
-        GLint     sv_arr     = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &sv_arr);
-        GLint     sv_elem    = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &sv_elem);
-        GLint     sv_fbo     = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &sv_fbo);
-        GLint     sv_vp [4]  = { }; glGetIntegerv (GL_VIEWPORT,    sv_vp);
-        GLint     sv_sci [4] = { }; glGetIntegerv (GL_SCISSOR_BOX, sv_sci);
-        GLint     sv_bsrc_rgb = 0; glGetIntegerv (GL_BLEND_SRC_RGB,   &sv_bsrc_rgb);
-        GLint     sv_bdst_rgb = 0; glGetIntegerv (GL_BLEND_DST_RGB,   &sv_bdst_rgb);
-        GLint     sv_bsrc_a   = 0; glGetIntegerv (GL_BLEND_SRC_ALPHA, &sv_bsrc_a);
-        GLint     sv_bdst_a   = 0; glGetIntegerv (GL_BLEND_DST_ALPHA, &sv_bdst_a);
-        GLboolean sv_cmask [4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
-        glGetBooleanv (GL_COLOR_WRITEMASK, sv_cmask);
-        GLint     sv_unpack  = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT, &sv_unpack);
-        const GLboolean sv_scissor = glIsEnabled (GL_SCISSOR_TEST);
-        const GLboolean sv_blend   = glIsEnabled (GL_BLEND);
-        const GLboolean sv_depth   = glIsEnabled (GL_DEPTH_TEST);
-        const GLboolean sv_stencil = glIsEnabled (GL_STENCIL_TEST);
-        const GLboolean sv_cull    = glIsEnabled (GL_CULL_FACE);
-
-        // Set overlay draw state.
-        glBindFramebuffer (GL_FRAMEBUFFER, 0);
-        if (sv_scissor) glDisable (GL_SCISSOR_TEST);
-        if (sv_depth)   glDisable (GL_DEPTH_TEST);
-        if (sv_stencil) glDisable (GL_STENCIL_TEST);
-        if (sv_cull)    glDisable (GL_CULL_FACE);
-        glColorMask         (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glEnable            (GL_BLEND);
-        // Pre-multiplied alpha: ONE, ONE_MINUS_SRC_ALPHA
-        glBlendFuncSeparate (GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
-                             GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        glViewport (0, 0,
-                    (GLsizei)(rcWnd.right  - rcWnd.left),
-                    (GLsizei)(rcWnd.bottom - rcWnd.top));
-
-        // Draw: all resources are pre-warmed; no lazy init here.
-        glUseProgram    (s_fs_prog);
-        glActiveTexture (GL_TEXTURE0);
-        glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
-        if (s_fs_uTex >= 0)
-          glUniform1i (s_fs_uTex, 0);
-        glBindVertexArray (s_fs_vao);
-        glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
-
-        // Restore GL state.
-        glBindVertexArray  ((GLuint)sv_vao);
-        glBindBuffer       (GL_ARRAY_BUFFER,         (GLuint)sv_arr);
-        glBindBuffer       (GL_ELEMENT_ARRAY_BUFFER, (GLuint)sv_elem);
-        glUseProgram       ((GLuint)sv_prog);
-        glActiveTexture    ((GLenum)sv_active);
-        glBindTexture      (GL_TEXTURE_2D, (GLuint)sv_tex2d);
-        glBindFramebuffer  (GL_FRAMEBUFFER, (GLuint)sv_fbo);
-        glViewport         (sv_vp [0], sv_vp [1], sv_vp [2], sv_vp [3]);
-        glColorMask        (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
-        glBlendFuncSeparate ((GLenum)sv_bsrc_rgb, (GLenum)sv_bdst_rgb,
-                             (GLenum)sv_bsrc_a,   (GLenum)sv_bdst_a);
-        if (sv_blend)   glEnable  (GL_BLEND);    else glDisable (GL_BLEND);
-        if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
-        if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
-        if (sv_cull)    glEnable  (GL_CULL_FACE);    else glDisable (GL_CULL_FACE);
-        if (sv_scissor)
+        // -- Phase 2: composite overlay over FBO 0 ---------------------------
+        // Only draws when fully warm (s_fs_warm == 4) with all resources valid.
+        // No shader compilation, no glTexImage2D, no VAO creation in this phase.
+        if (s_fs_overlay_enabled && s_fs_warm == 4 &&
+            s_fs_has_frame && s_fs_tex != 0 && s_fs_prog != 0 && s_fs_vao != 0)
         {
-          glEnable  (GL_SCISSOR_TEST);
-          glScissor (sv_sci [0], sv_sci [1], sv_sci [2], sv_sci [3]);
+          // Save GL state.
+          GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
+          GLint     sv_active  = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &sv_active);
+          GLint     sv_tex2d   = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &sv_tex2d);
+          GLint     sv_vao     = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &sv_vao);
+          GLint     sv_arr     = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &sv_arr);
+          GLint     sv_elem    = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &sv_elem);
+          GLint     sv_fbo     = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &sv_fbo);
+          GLint     sv_vp [4]  = { }; glGetIntegerv (GL_VIEWPORT,    sv_vp);
+          GLint     sv_sci [4] = { }; glGetIntegerv (GL_SCISSOR_BOX, sv_sci);
+          GLint     sv_bsrc_rgb = 0; glGetIntegerv (GL_BLEND_SRC_RGB,   &sv_bsrc_rgb);
+          GLint     sv_bdst_rgb = 0; glGetIntegerv (GL_BLEND_DST_RGB,   &sv_bdst_rgb);
+          GLint     sv_bsrc_a   = 0; glGetIntegerv (GL_BLEND_SRC_ALPHA, &sv_bsrc_a);
+          GLint     sv_bdst_a   = 0; glGetIntegerv (GL_BLEND_DST_ALPHA, &sv_bdst_a);
+          GLboolean sv_cmask [4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+          glGetBooleanv (GL_COLOR_WRITEMASK, sv_cmask);
+          GLint     sv_unpack  = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT, &sv_unpack);
+          const GLboolean sv_scissor = glIsEnabled (GL_SCISSOR_TEST);
+          const GLboolean sv_blend   = glIsEnabled (GL_BLEND);
+          const GLboolean sv_depth   = glIsEnabled (GL_DEPTH_TEST);
+          const GLboolean sv_stencil = glIsEnabled (GL_STENCIL_TEST);
+          const GLboolean sv_cull    = glIsEnabled (GL_CULL_FACE);
+
+          // Set overlay draw state.
+          glBindFramebuffer (GL_FRAMEBUFFER, 0);
+          if (sv_scissor) glDisable (GL_SCISSOR_TEST);
+          if (sv_depth)   glDisable (GL_DEPTH_TEST);
+          if (sv_stencil) glDisable (GL_STENCIL_TEST);
+          if (sv_cull)    glDisable (GL_CULL_FACE);
+          glColorMask         (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+          glEnable            (GL_BLEND);
+          // Pre-multiplied alpha: ONE, ONE_MINUS_SRC_ALPHA
+          glBlendFuncSeparate (GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+                               GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+          glViewport (0, 0,
+                      (GLsizei)(rcWnd.right  - rcWnd.left),
+                      (GLsizei)(rcWnd.bottom - rcWnd.top));
+
+          // Draw: all resources are pre-warmed; no lazy init here.
+          glUseProgram    (s_fs_prog);
+          glActiveTexture (GL_TEXTURE0);
+          glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
+          if (s_fs_uTex >= 0)
+            glUniform1i (s_fs_uTex, 0);
+          glBindVertexArray (s_fs_vao);
+          glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
+
+          // Restore GL state.
+          glBindVertexArray  ((GLuint)sv_vao);
+          glBindBuffer       (GL_ARRAY_BUFFER,         (GLuint)sv_arr);
+          glBindBuffer       (GL_ELEMENT_ARRAY_BUFFER, (GLuint)sv_elem);
+          glUseProgram       ((GLuint)sv_prog);
+          glActiveTexture    ((GLenum)sv_active);
+          glBindTexture      (GL_TEXTURE_2D, (GLuint)sv_tex2d);
+          glBindFramebuffer  (GL_FRAMEBUFFER, (GLuint)sv_fbo);
+          glViewport         (sv_vp [0], sv_vp [1], sv_vp [2], sv_vp [3]);
+          glColorMask        (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
+          glBlendFuncSeparate ((GLenum)sv_bsrc_rgb, (GLenum)sv_bdst_rgb,
+                               (GLenum)sv_bsrc_a,   (GLenum)sv_bdst_a);
+          if (sv_blend)   glEnable  (GL_BLEND);    else glDisable (GL_BLEND);
+          if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
+          if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
+          if (sv_cull)    glEnable  (GL_CULL_FACE);    else glDisable (GL_CULL_FACE);
+          if (sv_scissor)
+          {
+            glEnable  (GL_SCISSOR_TEST);
+            glScissor (sv_sci [0], sv_sci [1], sv_sci [2], sv_sci [3]);
+          }
+          else
+            glDisable (GL_SCISSOR_TEST);
+          glPixelStorei (GL_UNPACK_ALIGNMENT, sv_unpack);
         }
-        else
-          glDisable (GL_SCISSOR_TEST);
-        glPixelStorei (GL_UNPACK_ALIGNMENT, sv_unpack);
-      }
+      } // end if (hglrc_now != nullptr)
     } // end use_gl_skf1_fallback
 
     bool _SkipThisFrame = false;
