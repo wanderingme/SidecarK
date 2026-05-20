@@ -3633,9 +3633,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           s_fs_stride      = 0;
           s_fs_fmt         = 0;
           s_fs_prog_failed = false;  // allow shader compile retry in new context
+          const HGLRC hglrc_old = s_fs_owner_hglrc;
           s_fs_owner_hglrc = hglrc_now;
           _SidecarLog_GL (L"[SKF1-WARM] HGLRC changed (%p->%p) — native GL resources reset",
-                          (void *)s_fs_owner_hglrc, (void *)hglrc_now);
+                          (void *)hglrc_old, (void *)hglrc_now);
         }
 
         // -- Step 0: open / maintain the SidecarK_Control overlay-enable map --
@@ -3818,8 +3819,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               // Zero PBO so nullptr is treated as a CPU pointer, not a PBO offset.
               if (pa_sv_pbo != 0)
                 glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
-              // Clear any previous GL errors before the allocation attempt.
-              while (glGetError () != GL_NO_ERROR) { }
+              // Clear any previous GL errors before the allocation attempt
+              // (bounded to avoid infinite loop on pathological driver state).
+              for (int _err_i = 0; _err_i < 32 && glGetError () != GL_NO_ERROR; ++_err_i) { }
               glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
                             (GLsizei)pa_width, (GLsizei)pa_height, 0,
                             GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
