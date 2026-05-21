@@ -3293,6 +3293,26 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       s_gl_skf1_force  = (env_len > 0 && env_buf [0] == '1');
     }
 
+    // [SIDECARK_GL_ISO_MODE] SidecarK-managed OpenGL isolation toggle.
+    // Reads SIDECARK_GL_ISO_MODE once and caches the result.  Supports values
+    // A–L (case-insensitive).  Unset or invalid value = 'L' (current behavior).
+    // Each mode always falls through to the real/original wglSwapBuffers call.
+    // Only affects the SidecarK-managed OpenGL / use_gl_skf1_fallback path.
+    static bool s_iso_mode_checked = false;
+    static char s_iso_mode         = 'L';
+    if (! s_iso_mode_checked)
+    {
+      s_iso_mode_checked = true;
+      char iso_buf [4]   = { };
+      if (GetEnvironmentVariableA ("SIDECARK_GL_ISO_MODE", iso_buf, sizeof (iso_buf)) > 0)
+      {
+        char c = iso_buf [0];
+        if (c >= 'a' && c <= 'z') c = (char)(c - ('a' - 'A'));
+        if (c >= 'A' && c <= 'L') s_iso_mode = c;
+      }
+    }
+    const char iso_mode = s_iso_mode;
+
     bool use_gl_skf1_fallback = false;
     // For SidecarK-managed pure-GL processes D3D11 is intentionally
     // skipped, so activate the SKF1 fallback path directly.
@@ -3361,10 +3381,13 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               // uploaded).  This prevents the ImGui/font-atlas first-use cost
               // from landing on a visible game frame.  While not ready the game
               // continues through the real wglSwapBuffers below.
+              // [ISO] Modes A–K suppress SK_Overlay_DrawGL on the skf1 path;
+              // only mode L (current behavior) allows it.
               if (! use_gl_skf1_fallback ||
                   InterlockedCompareExchange (&s_skf1_compositor_fully_warm, 0, 0) != 0)
               {
-                SK_Overlay_DrawGL ();
+                if (! use_gl_skf1_fallback || iso_mode == 'L')
+                  SK_Overlay_DrawGL ();
               }
               tls_gl_in_overlay_submit = false;
             }
@@ -3589,7 +3612,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     // the SidecarK-managed pure-GL path (where D3D11 bootstrap is intentionally
     // skipped).  This block maintains its own mapping / texture state
     // independently of the BFI path so the two never share stale handles.
-    if (use_gl_skf1_fallback)
+    // [ISO] Mode A (hook-only pass-through) and mode B (managed detection only)
+    // skip this block entirely and fall through to the real wglSwapBuffers call.
+    if (use_gl_skf1_fallback && iso_mode != 'A' && iso_mode != 'B')
     {
       // All statics in this block are accessed only from SK_GL_SwapBuffers on the
       // GL render thread; no synchronization is needed for non-atomic statics here.
@@ -3878,8 +3903,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // glTexImage2D(nullptr).  Runs only after c_skf1_stable_frames consecutive
         // matching frames (same HGLRC and same valid SKF1 layout), preventing
         // wasted resource allocation during title-card churn.
+        // [ISO] Mode E and above only; modes C/D stop before GL object creation.
         if (s_fs_warm == 0 && s_fs_base != nullptr &&
-            s_fs_stable_frames >= c_skf1_stable_frames)
+            s_fs_stable_frames >= c_skf1_stable_frames && iso_mode >= 'E')
         {
           uint32_t pa_data_off = 0, pa_pix_fmt = 0;
           uint32_t pa_width    = 0, pa_height  = 0, pa_stride = 0;
@@ -3967,7 +3993,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // -- Phase 0b-vs (warm==1): create and compile vertex shader ---------
         // Dimension-independent.  If s_fs_prog is already valid (dimension re-warm,
         // shader survived), fast-forward to warm==4 in a single frame.
-        else if (s_fs_warm == 1 && ! s_fs_prog_failed)
+        // [ISO] Mode F and above only; mode E stops after texture allocation.
+        else if (s_fs_warm == 1 && ! s_fs_prog_failed && iso_mode >= 'F')
         {
           if (s_fs_prog != 0)
           {
@@ -4004,7 +4031,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // -- Phase 0b-fs (warm==2): check VS status, create and compile FS ---
         // Checking VS compile status one frame after glCompileShader gives the
         // driver a full frame to complete any background compilation work.
-        else if (s_fs_warm == 2 && ! s_fs_prog_failed)
+        // [ISO] Mode F and above only.
+        else if (s_fs_warm == 2 && ! s_fs_prog_failed && iso_mode >= 'F')
         {
           GLint vs_ok = GL_FALSE;
           glGetShaderiv (s_fs_vsh, GL_COMPILE_STATUS, &vs_ok);
@@ -4045,7 +4073,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         }
 
         // -- Phase 0b-link (warm==3): check FS status, link program ----------
-        else if (s_fs_warm == 3 && ! s_fs_prog_failed)
+        // [ISO] Mode F and above only.
+        else if (s_fs_warm == 3 && ! s_fs_prog_failed && iso_mode >= 'F')
         {
           GLint fs_ok = GL_FALSE;
           glGetShaderiv (s_fs_fsh, GL_COMPILE_STATUS, &fs_ok);
@@ -4109,7 +4138,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // Creates fullscreen-quad geometry.  Dimension-independent; survives
         // dimension re-warm.  If s_fs_vao is already nonzero (dimension re-warm),
         // fast-forwards to warm state 5.
-        else if (s_fs_warm == 4)
+        // [ISO] Mode G and above only; mode F stops after shader link.
+        else if (s_fs_warm == 4 && iso_mode >= 'G')
         {
           if (s_fs_vao != 0)
           {
@@ -4178,7 +4208,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // Uploads the first valid producer frame via glTexSubImage2D so the
         // texture contains real content before the first composite draw.
         // Runs regardless of overlay-enabled.
-        else if (s_fs_warm == 5 && s_fs_base != nullptr)
+        // [ISO] Mode H and above only; mode G stops after VAO/VBO/IBO setup.
+        else if (s_fs_warm == 5 && s_fs_base != nullptr && iso_mode >= 'H')
         {
           uint32_t pl_data_off = 0, pl_pix_fmt = 0;
           uint32_t pl_width    = 0, pl_height  = 0, pl_stride = 0;
@@ -4256,7 +4287,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                   // pixel unpack state (PBO, alignment, row length) inside
                   // ImGui_ImplGL3_CreateFontsTexture.  The only state it does
                   // not save is GL_ACTIVE_TEXTURE, so we guard that here.
-                  if (! s_fs_imgui_prewarmed)
+                  // [ISO] Mode I and above only; mode H stops after first upload.
+                  if (! s_fs_imgui_prewarmed && iso_mode >= 'I')
                   {
                     s_fs_imgui_prewarmed = true;
                     GLint pw_sv_active = 0;
@@ -4286,7 +4318,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // -- Phase 2 (warm==6, overlay enabled): update texture on frame advance
         // Uses only glTexSubImage2D — never glTexImage2D in this phase.
         // Gated on overlay-enabled to avoid unnecessary GPU work while hidden.
-        if (s_fs_warm == 6 && s_fs_overlay_enabled && s_fs_base != nullptr)
+        // [ISO] Mode J and above only; modes H/I stop after Phase 1 / ImGui prewarm.
+        if (s_fs_warm == 6 && s_fs_overlay_enabled && s_fs_base != nullptr && iso_mode >= 'J')
         {
           uint32_t fu_data_off = 0, fu_pix_fmt = 0;
           uint32_t fu_width    = 0, fu_height  = 0, fu_stride = 0;
@@ -4375,8 +4408,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // -- Composite overlay over FBO 0 ------------------------------------
         // Only draws when fully warm (s_fs_warm == 6) with all resources valid.
         // No shader compilation, no glTexImage2D, no VAO creation in this phase.
+        // [ISO] Mode K and above only; mode J stops after Phase 2 texture update.
         if (s_fs_overlay_enabled && s_fs_warm == 6 &&
-            s_fs_has_frame && s_fs_tex != 0 && s_fs_prog != 0 && s_fs_vao != 0)
+            s_fs_has_frame && s_fs_tex != 0 && s_fs_prog != 0 && s_fs_vao != 0 &&
+            iso_mode >= 'K')
         {
           // Save exactly the GL state this block mutates and nothing more.
           // Upload-only state (pixel unpack, PBO, depth func/mask, stencil
