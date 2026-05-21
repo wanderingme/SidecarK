@@ -5973,6 +5973,33 @@ SK_HookGL (LPVOID)
     }
   }
 
+  // SIDECARK_GL_HOOK_MODE=none: skip all OpenGL hook installation.
+  // Use this to test whether injection/DLL load alone causes the fullscreen
+  // hitch, independently of MH_CreateHook, MH_EnableHook, thread suspension,
+  // queued hook application, and dummy-context / GLEW setup.
+  // Unset or any other value: current behaviour, unchanged.
+  {
+    static bool s_hook_mode_none_checked = false;
+    static bool s_hook_mode_none         = false;
+    if (! s_hook_mode_none_checked)
+    {
+      s_hook_mode_none_checked = true;
+      char buf [8] = { };
+      if (GetEnvironmentVariableA ("SIDECARK_GL_HOOK_MODE", buf, sizeof (buf)) > 0)
+        s_hook_mode_none = (_stricmp (buf, "none") == 0);
+    }
+    if (s_hook_mode_none)
+    {
+      TryWriteTerminalMarker ("hook_mode_none");
+      // Unconditionally advance __SK_GL_initialized to 2 so no internal
+      // spin-wait ever blocks, regardless of prior state.
+      InterlockedExchange (&__SK_GL_initialized, 2);
+      WriteRelease        (&__gl_ready, TRUE);
+      SK_Thread_CloseSelf ();
+      return 0;
+    }
+  }
+
   static uint64_t s_firstAttempt  = 0;
   static uint64_t s_lastAttempt   = 0;
   static bool     s_retryActive   = false;
