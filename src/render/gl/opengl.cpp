@@ -5189,6 +5189,31 @@ BOOL
 WINAPI
 wglSwapBuffers (HDC hDC)
 {
+  // [SIDECARK_GL_ISO_MODE=0] Pre-wrapper pass-through isolation mode.
+  // Skips all SidecarK prologue work — WaitForInit_GL, SK_GL_TrackHDC,
+  // SK_InstallWindowHook, SK_Inject_SetFocusWindow, sync-interval handling,
+  // SK_BeginBufferSwap, glFlush, and SK_GL_SwapBuffers — and calls the
+  // real/original wglSwapBuffers immediately.  Used to isolate whether the
+  // base fullscreen hitch is at the raw hook/trampoline level or inside the
+  // SidecarK wrapper preamble (i.e. above the existing Mode A gate).
+  //
+  // Falls back to normal behavior if wgl_swap_buffers is not yet set, so
+  // there is no crash risk during early startup.  Parsed and cached once;
+  // no per-frame env-var read.  Does not affect A–L or unset behavior.
+  {
+    static bool s_mode0_checked = false;
+    static bool s_mode0_active  = false;
+    if (! s_mode0_checked)
+    {
+      s_mode0_checked = true;
+      char iso_buf [4] = { };
+      if (GetEnvironmentVariableA ("SIDECARK_GL_ISO_MODE", iso_buf, sizeof (iso_buf)) > 0)
+        s_mode0_active = (iso_buf [0] == '0');
+    }
+    if (s_mode0_active && wgl_swap_buffers != nullptr)
+      return wgl_swap_buffers (hDC);
+  }
+
   tls_gl_present_depth++;
   bool reentered = (tls_gl_present_depth > 1);
   if (reentered && tls_gl_in_overlay_submit)
