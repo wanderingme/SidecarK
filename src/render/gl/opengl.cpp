@@ -158,7 +158,7 @@ static volatile LONG s_gl_gate_present_not_ready_hits = 0;
 static volatile LONG s_gl_gate_ready_logged = 0;
 static volatile LONG s_gl_suppressed_by_dxgi_owner_hits = 0;
 
-// Returns true when this process is under SidecarK/Virule management,
+// Returns true when this process is under SidecarK/external management,
 // detected via the process-specific Local\SidecarK_Control_<pid> mapping.
 // Confirmed once and permanently cached; pre-confirmation attempts are
 // rate-limited to avoid per-frame overhead during early startup.
