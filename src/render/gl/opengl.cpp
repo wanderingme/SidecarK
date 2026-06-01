@@ -3293,6 +3293,26 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       s_gl_skf1_force  = (env_len > 0 && env_buf [0] == '1');
     }
 
+    // [SIDECARK_GL_ISO_MODE] SidecarK-managed OpenGL isolation toggle.
+    // Reads SIDECARK_GL_ISO_MODE once and caches the result.  Supports values
+    // A–L (case-insensitive).  Unset or invalid value = 'L' (current behavior).
+    // Each mode always falls through to the real/original wglSwapBuffers call.
+    // Only affects the SidecarK-managed OpenGL / use_gl_skf1_fallback path.
+    static bool s_iso_mode_checked = false;
+    static char s_iso_mode         = 'L';
+    if (! s_iso_mode_checked)
+    {
+      s_iso_mode_checked = true;
+      char iso_buf [4]   = { };
+      if (GetEnvironmentVariableA ("SIDECARK_GL_ISO_MODE", iso_buf, sizeof (iso_buf)) > 0)
+      {
+        char c = iso_buf [0];
+        if (c >= 'a' && c <= 'z') c = (char)(c - ('a' - 'A'));
+        if (c >= 'A' && c <= 'L') s_iso_mode = c;
+      }
+    }
+    const char iso_mode = s_iso_mode;
+
     bool use_gl_skf1_fallback = false;
     // For SidecarK-managed pure-GL processes D3D11 is intentionally
     // skipped, so activate the SKF1 fallback path directly.
@@ -3361,10 +3381,13 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
               // uploaded).  This prevents the ImGui/font-atlas first-use cost
               // from landing on a visible game frame.  While not ready the game
               // continues through the real wglSwapBuffers below.
+              // [ISO] Modes A–K suppress SK_Overlay_DrawGL on the skf1 path;
+              // only mode L (current behavior) allows it.
               if (! use_gl_skf1_fallback ||
                   InterlockedCompareExchange (&s_skf1_compositor_fully_warm, 0, 0) != 0)
               {
-                SK_Overlay_DrawGL ();
+                if (! use_gl_skf1_fallback || iso_mode == 'L')
+                  SK_Overlay_DrawGL ();
               }
               tls_gl_in_overlay_submit = false;
             }
@@ -3589,7 +3612,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
     // the SidecarK-managed pure-GL path (where D3D11 bootstrap is intentionally
     // skipped).  This block maintains its own mapping / texture state
     // independently of the BFI path so the two never share stale handles.
-    if (use_gl_skf1_fallback)
+    // [ISO] Mode A (hook-only pass-through) and mode B (managed detection only)
+    // skip this block entirely and fall through to the real wglSwapBuffers call.
+    if (use_gl_skf1_fallback && iso_mode != 'A' && iso_mode != 'B')
     {
       // All statics in this block are accessed only from SK_GL_SwapBuffers on the
       // GL render thread; no synchronization is needed for non-atomic statics here.
@@ -3878,8 +3903,9 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // glTexImage2D(nullptr).  Runs only after c_skf1_stable_frames consecutive
         // matching frames (same HGLRC and same valid SKF1 layout), preventing
         // wasted resource allocation during title-card churn.
+        // [ISO] Mode E and above only; modes C/D stop before GL object creation.
         if (s_fs_warm == 0 && s_fs_base != nullptr &&
-            s_fs_stable_frames >= c_skf1_stable_frames)
+            s_fs_stable_frames >= c_skf1_stable_frames && iso_mode >= 'E')
         {
           uint32_t pa_data_off = 0, pa_pix_fmt = 0;
           uint32_t pa_width    = 0, pa_height  = 0, pa_stride = 0;
@@ -3967,7 +3993,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // -- Phase 0b-vs (warm==1): create and compile vertex shader ---------
         // Dimension-independent.  If s_fs_prog is already valid (dimension re-warm,
         // shader survived), fast-forward to warm==4 in a single frame.
-        else if (s_fs_warm == 1 && ! s_fs_prog_failed)
+        // [ISO] Mode F and above only; mode E stops after texture allocation.
+        else if (s_fs_warm == 1 && ! s_fs_prog_failed && iso_mode >= 'F')
         {
           if (s_fs_prog != 0)
           {
@@ -4004,7 +4031,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // -- Phase 0b-fs (warm==2): check VS status, create and compile FS ---
         // Checking VS compile status one frame after glCompileShader gives the
         // driver a full frame to complete any background compilation work.
-        else if (s_fs_warm == 2 && ! s_fs_prog_failed)
+        // [ISO] Mode F and above only.
+        else if (s_fs_warm == 2 && ! s_fs_prog_failed && iso_mode >= 'F')
         {
           GLint vs_ok = GL_FALSE;
           glGetShaderiv (s_fs_vsh, GL_COMPILE_STATUS, &vs_ok);
@@ -4045,7 +4073,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         }
 
         // -- Phase 0b-link (warm==3): check FS status, link program ----------
-        else if (s_fs_warm == 3 && ! s_fs_prog_failed)
+        // [ISO] Mode F and above only.
+        else if (s_fs_warm == 3 && ! s_fs_prog_failed && iso_mode >= 'F')
         {
           GLint fs_ok = GL_FALSE;
           glGetShaderiv (s_fs_fsh, GL_COMPILE_STATUS, &fs_ok);
@@ -4109,7 +4138,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // Creates fullscreen-quad geometry.  Dimension-independent; survives
         // dimension re-warm.  If s_fs_vao is already nonzero (dimension re-warm),
         // fast-forwards to warm state 5.
-        else if (s_fs_warm == 4)
+        // [ISO] Mode G and above only; mode F stops after shader link.
+        else if (s_fs_warm == 4 && iso_mode >= 'G')
         {
           if (s_fs_vao != 0)
           {
@@ -4178,7 +4208,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // Uploads the first valid producer frame via glTexSubImage2D so the
         // texture contains real content before the first composite draw.
         // Runs regardless of overlay-enabled.
-        else if (s_fs_warm == 5 && s_fs_base != nullptr)
+        // [ISO] Mode H and above only; mode G stops after VAO/VBO/IBO setup.
+        else if (s_fs_warm == 5 && s_fs_base != nullptr && iso_mode >= 'H')
         {
           uint32_t pl_data_off = 0, pl_pix_fmt = 0;
           uint32_t pl_width    = 0, pl_height  = 0, pl_stride = 0;
@@ -4256,7 +4287,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                   // pixel unpack state (PBO, alignment, row length) inside
                   // ImGui_ImplGL3_CreateFontsTexture.  The only state it does
                   // not save is GL_ACTIVE_TEXTURE, so we guard that here.
-                  if (! s_fs_imgui_prewarmed)
+                  // [ISO] Mode I and above only; mode H stops after first upload.
+                  if (! s_fs_imgui_prewarmed && iso_mode >= 'I')
                   {
                     s_fs_imgui_prewarmed = true;
                     GLint pw_sv_active = 0;
@@ -4286,7 +4318,8 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // -- Phase 2 (warm==6, overlay enabled): update texture on frame advance
         // Uses only glTexSubImage2D — never glTexImage2D in this phase.
         // Gated on overlay-enabled to avoid unnecessary GPU work while hidden.
-        if (s_fs_warm == 6 && s_fs_overlay_enabled && s_fs_base != nullptr)
+        // [ISO] Mode J and above only; modes H/I stop after Phase 1 / ImGui prewarm.
+        if (s_fs_warm == 6 && s_fs_overlay_enabled && s_fs_base != nullptr && iso_mode >= 'J')
         {
           uint32_t fu_data_off = 0, fu_pix_fmt = 0;
           uint32_t fu_width    = 0, fu_height  = 0, fu_stride = 0;
@@ -4375,8 +4408,10 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // -- Composite overlay over FBO 0 ------------------------------------
         // Only draws when fully warm (s_fs_warm == 6) with all resources valid.
         // No shader compilation, no glTexImage2D, no VAO creation in this phase.
+        // [ISO] Mode K and above only; mode J stops after Phase 2 texture update.
         if (s_fs_overlay_enabled && s_fs_warm == 6 &&
-            s_fs_has_frame && s_fs_tex != 0 && s_fs_prog != 0 && s_fs_vao != 0)
+            s_fs_has_frame && s_fs_tex != 0 && s_fs_prog != 0 && s_fs_vao != 0 &&
+            iso_mode >= 'K')
         {
           // Save exactly the GL state this block mutates and nothing more.
           // Upload-only state (pixel unpack, PBO, depth func/mask, stencil
@@ -5154,6 +5189,31 @@ BOOL
 WINAPI
 wglSwapBuffers (HDC hDC)
 {
+  // [SIDECARK_GL_ISO_MODE=0] Pre-wrapper pass-through isolation mode.
+  // Skips all SidecarK prologue work — WaitForInit_GL, SK_GL_TrackHDC,
+  // SK_InstallWindowHook, SK_Inject_SetFocusWindow, sync-interval handling,
+  // SK_BeginBufferSwap, glFlush, and SK_GL_SwapBuffers — and calls the
+  // real/original wglSwapBuffers immediately.  Used to isolate whether the
+  // base fullscreen hitch is at the raw hook/trampoline level or inside the
+  // SidecarK wrapper preamble (i.e. above the existing Mode A gate).
+  //
+  // Falls back to normal behavior if wgl_swap_buffers is not yet set, so
+  // there is no crash risk during early startup.  Parsed and cached once;
+  // no per-frame env-var read.  Does not affect A–L or unset behavior.
+  {
+    static bool s_mode0_checked = false;
+    static bool s_mode0_active  = false;
+    if (! s_mode0_checked)
+    {
+      s_mode0_checked = true;
+      char iso_buf [4] = { };
+      if (GetEnvironmentVariableA ("SIDECARK_GL_ISO_MODE", iso_buf, sizeof (iso_buf)) > 0)
+        s_mode0_active = (iso_buf [0] == '0');
+    }
+    if (s_mode0_active && wgl_swap_buffers != nullptr)
+      return wgl_swap_buffers (hDC);
+  }
+
   tls_gl_present_depth++;
   bool reentered = (tls_gl_present_depth > 1);
   if (reentered && tls_gl_in_overlay_submit)
@@ -5913,6 +5973,98 @@ SK_HookGL (LPVOID)
     }
   }
 
+  // SIDECARK_GL_HOOK_MODE env-var: temporary isolation modes for testing hook cost.
+  //   none        – skip all OpenGL hook installation entirely.
+  //   enable_late – install hooks but delay hook activation (MH_EnableHook /
+  //                 SK_ApplyQueuedHooks) by SIDECARK_GL_HOOK_DELAY_MS ms
+  //                 (default 5000, range 0–30000).
+  // Unset or any other value: current behaviour, unchanged.
+  static bool     s_gl_hookmode_checked    = false;
+  static bool     s_gl_hookmode_none       = false;
+  static bool     s_gl_hookmode_enablelate = false;
+  static uint32_t s_gl_hookmode_delay_ms   = 5000;
+
+  if (! s_gl_hookmode_checked)
+  {
+    s_gl_hookmode_checked = true;
+    char buf [16] = { };
+    if (GetEnvironmentVariableA ("SIDECARK_GL_HOOK_MODE", buf, sizeof (buf)) > 0)
+    {
+      s_gl_hookmode_none       = (_stricmp (buf, "none")        == 0);
+      s_gl_hookmode_enablelate = (_stricmp (buf, "enable_late") == 0);
+    }
+    if (s_gl_hookmode_enablelate)
+    {
+      char delay_buf [16] = { };
+      if (GetEnvironmentVariableA ("SIDECARK_GL_HOOK_DELAY_MS", delay_buf, sizeof (delay_buf)) > 0)
+      {
+        const long val = strtol (delay_buf, nullptr, 10);
+        if (val >= 0 && val <= 30000)
+          s_gl_hookmode_delay_ms = (uint32_t)val;
+      }
+
+      // One-shot: write diagnostic confirming enable_late was recognized and
+      // will delay OpenGL hook activation.  Gated on s_gl_hookmode_checked so
+      // it fires at most once per process lifetime.
+      if (SidecarK_DiagnosticsEnabled ())
+      {
+        const DWORD pid = GetCurrentProcessId ();
+
+        wchar_t wszTempPath [MAX_PATH] = { };
+        wchar_t wszFullPath [MAX_PATH] = { };
+
+        if (GetTempPathW (MAX_PATH, wszTempPath) > 0)
+        {
+          wchar_t wszFile [64] = { };
+          wsprintfW (wszFile, L"sk_gl_hook_install_%lu.txt", (unsigned long)pid);
+          lstrcpynW (wszFullPath, wszTempPath, MAX_PATH);
+          lstrcatW  (wszFullPath, wszFile);
+        }
+        else
+        {
+          wsprintfW (wszFullPath, L"sk_gl_hook_install_%lu.txt", (unsigned long)pid);
+        }
+
+        HANDLE hFile =
+          CreateFileW ( wszFullPath, FILE_APPEND_DATA,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        nullptr, OPEN_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, nullptr );
+
+        if (hFile != INVALID_HANDLE_VALUE)
+        {
+          char   szLine [256] = { };
+          const int len =
+            _snprintf_s ( szLine, _TRUNCATE,
+                          "SIDECARK_GL_HOOK_MODE=enable_late active\r\n"
+                          "SIDECARK_GL_HOOK_DELAY_MS=%lu\r\n"
+                          "OpenGL hook activation delayed\r\n",
+                          (unsigned long)s_gl_hookmode_delay_ms );
+
+          if (len > 0)
+          {
+            DWORD dwWritten = 0;
+            SetFilePointer (hFile, 0, nullptr, FILE_END);
+            WriteFile (hFile, szLine, (DWORD)len, &dwWritten, nullptr);
+          }
+
+          CloseHandle (hFile);
+        }
+      }
+    }
+  }
+
+  if (s_gl_hookmode_none)
+  {
+    TryWriteTerminalMarker ("hook_mode_none");
+    // Unconditionally advance __SK_GL_initialized to 2 so no internal
+    // spin-wait ever blocks, regardless of prior state.
+    InterlockedExchange (&__SK_GL_initialized, 2);
+    WriteRelease        (&__gl_ready, TRUE);
+    SK_Thread_CloseSelf ();
+    return 0;
+  }
+
   static uint64_t s_firstAttempt  = 0;
   static uint64_t s_lastAttempt   = 0;
   static bool     s_retryActive   = false;
@@ -5938,13 +6090,24 @@ SK_HookGL (LPVOID)
   static MH_STATUS s_enable_SwapBuffers     = (MH_STATUS)0;
   static bool      s_permfail_SwapBuffers   = false;
 
+  // enable_late: addresses of the two present hooks that must not become active
+  // until the delay expires.  Set during hook creation; used in the activation
+  // block to call MH_EnableHook directly after the sleep.
+  static FARPROC   s_enablelate_pfn_wglSwapBuffers = nullptr;
+  static FARPROC   s_enablelate_pfn_SwapBuffers     = nullptr;
+
   const uint64_t now = GetTickCount64 ();
 
   if (! s_retryActive)
   {
-    s_firstAttempt = now;
-    s_lastAttempt  = 0;
-    s_retryActive  = true;
+    s_firstAttempt  = now;
+    s_lastAttempt   = 0;
+    // In enable_late mode the retry block is intentionally skipped: it has its
+    // own MH_CreateHook/MH_EnableHook path that would activate the swap hooks
+    // immediately, before the required delay.  enable_late does a single hook
+    // creation pass inside the InterlockedCompareExchangeAcquire guard and then
+    // waits on s_gl_hookmode_enablelate_delay_ms before enabling.
+    s_retryActive   = (! s_gl_hookmode_enablelate);
     s_attempt_index = 0;
   }
 
@@ -6356,6 +6519,42 @@ SK_HookGL (LPVOID)
          static_cast_pfn <void*> (wglSwapBuffers),
          static_cast_p2p <void> (&gdi_swap_buffers) );
 
+      // enable_late: SK_CreateDLLHook2 queues both hooks for enabling via
+      // SK_QueueEnableHook.  Dozens of other SK_ApplyQueuedHooks() call sites
+      // (thread init, scheduler, input, etc.) would otherwise activate them
+      // before the delay expires.  Counter the queued enable now so that every
+      // SK_ApplyQueuedHooks() call during the delay period is a no-op for these
+      // two hooks.  After the delay the activation block calls MH_EnableHook
+      // directly on the saved addresses.
+      if (s_gl_hookmode_enablelate)
+      {
+        // Cancel the queued enables that SK_CreateDLLHook2 placed on both swap
+        // hooks.  MH_QueueDisableHook resets queueEnable to FALSE so that any
+        // SK_ApplyQueuedHooks() call from another subsystem (thread init,
+        // scheduler, input, etc.) sees isEnabled == queueEnable == FALSE and
+        // leaves the hooks disabled.  If either call fails the hook will be
+        // enabled the next time SK_ApplyQueuedHooks fires, revealing a
+        // MinHook state inconsistency that warrants investigation.
+        if (pfn_wglSwapBuffers != nullptr)
+        {
+          MH_STATUS st = MH_QueueDisableHook ((LPVOID)pfn_wglSwapBuffers);
+          if (st == MH_OK || st == MH_ERROR_DISABLED)
+            s_enablelate_pfn_wglSwapBuffers = pfn_wglSwapBuffers;
+          else
+            SK_LOG0 ( (L"enable_late: MH_QueueDisableHook(wglSwapBuffers) failed: %d", (int)st),
+                       L" OpenGL32 " );
+        }
+        if (pfn_SwapBuffers != nullptr)
+        {
+          MH_STATUS st = MH_QueueDisableHook ((LPVOID)pfn_SwapBuffers);
+          if (st == MH_OK || st == MH_ERROR_DISABLED)
+            s_enablelate_pfn_SwapBuffers = pfn_SwapBuffers;
+          else
+            SK_LOG0 ( (L"enable_late: MH_QueueDisableHook(SwapBuffers) failed: %d", (int)st),
+                       L" OpenGL32 " );
+        }
+      }
+
       SK_CreateDLLHook2 (         SK_GetModuleFullName (local_gl).c_str (),
                                  "wglSwapMultipleBuffers",
          static_cast_pfn <void*> (wglSwapMultipleBuffers),
@@ -6373,18 +6572,21 @@ SK_HookGL (LPVOID)
 
       if (SK_GetDLLRole () == DLL_ROLE::OpenGL)
       {
-        if (SK_GetFramesDrawn () > 1)
+        if (SK_GetFramesDrawn () > 1 && (! s_gl_hookmode_enablelate))
           SK_ApplyQueuedHooks ();
 
         // Load user-defined DLLs (Plug-In)
         SK_RunLHIfBitness (64, SK_LoadPlugIns64 (), SK_LoadPlugIns32 ());
       }
 
-      stEnable_wglSwapBuffers =
-        ( (pfn_wglSwapBuffers != nullptr) ? MH_EnableHook ((LPVOID)pfn_wglSwapBuffers) : MH_ERROR_FUNCTION_NOT_FOUND );
+      if (! s_gl_hookmode_enablelate)
+      {
+        stEnable_wglSwapBuffers =
+          ( (pfn_wglSwapBuffers != nullptr) ? MH_EnableHook ((LPVOID)pfn_wglSwapBuffers) : MH_ERROR_FUNCTION_NOT_FOUND );
 
-      stEnable_SwapBuffers =
-        ( (pfn_SwapBuffers != nullptr) ? MH_EnableHook ((LPVOID)pfn_SwapBuffers) : MH_ERROR_FUNCTION_NOT_FOUND );
+        stEnable_SwapBuffers =
+          ( (pfn_SwapBuffers != nullptr) ? MH_EnableHook ((LPVOID)pfn_SwapBuffers) : MH_ERROR_FUNCTION_NOT_FOUND );
+      }
 
       SK_GL_WriteHookInstallMarker (
         L"wglSwapBuffers",
@@ -6928,11 +7130,77 @@ SK_HookGL (LPVOID)
 
     pTLS->render->gl->ctx_init_thread = false;
 
-    if (SK_GetFramesDrawn () > 1)
+    if (SK_GetFramesDrawn () > 1 && (! s_gl_hookmode_enablelate))
       SK_ApplyQueuedHooks ();
 
     WriteRelease                (&__gl_ready,    TRUE);
     InterlockedIncrementRelease (&__SK_GL_initialized);
+  }
+
+  // enable_late: boot state is already released above; now sleep then activate.
+  if (s_gl_hookmode_enablelate)
+  {
+    if (s_gl_hookmode_delay_ms > 0)
+      Sleep (s_gl_hookmode_delay_ms);
+
+    // One-shot: write diagnostic that the delay has expired and hooks are
+    // about to be activated.
+    if (SidecarK_DiagnosticsEnabled ())
+    {
+      const DWORD pid = GetCurrentProcessId ();
+
+      wchar_t wszTempPath [MAX_PATH] = { };
+      wchar_t wszFullPath [MAX_PATH] = { };
+
+      if (GetTempPathW (MAX_PATH, wszTempPath) > 0)
+      {
+        wchar_t wszFile [64] = { };
+        wsprintfW (wszFile, L"sk_gl_hook_install_%lu.txt", (unsigned long)pid);
+        lstrcpynW (wszFullPath, wszTempPath, MAX_PATH);
+        lstrcatW  (wszFullPath, wszFile);
+      }
+      else
+      {
+        wsprintfW (wszFullPath, L"sk_gl_hook_install_%lu.txt", (unsigned long)pid);
+      }
+
+      HANDLE hFile =
+        CreateFileW ( wszFullPath, FILE_APPEND_DATA,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE,
+                      nullptr, OPEN_ALWAYS,
+                      FILE_ATTRIBUTE_NORMAL, nullptr );
+
+      if (hFile != INVALID_HANDLE_VALUE)
+      {
+        static const char szLine [] =
+          "OpenGL hook activation now applying queued hooks\r\n";
+        DWORD dwWritten = 0;
+        SetFilePointer (hFile, 0, nullptr, FILE_END);
+        WriteFile (hFile, szLine, (DWORD)sizeof (szLine) - 1, &dwWritten, nullptr);
+        CloseHandle (hFile);
+      }
+    }
+
+    // Explicitly enable the two present hooks that were dequeued during hook
+    // creation.  These must be enabled before SK_ApplyQueuedHooks so that the
+    // hooked swap path is live the moment any other queued hooks activate.
+    if (s_enablelate_pfn_wglSwapBuffers != nullptr)
+    {
+      MH_STATUS st = MH_EnableHook ((LPVOID)s_enablelate_pfn_wglSwapBuffers);
+      if (st != MH_OK && st != MH_ERROR_ENABLED)
+        SK_LOG0 ( (L"enable_late: MH_EnableHook(wglSwapBuffers) failed: %d", (int)st),
+                   L" OpenGL32 " );
+    }
+    if (s_enablelate_pfn_SwapBuffers != nullptr)
+    {
+      MH_STATUS st = MH_EnableHook ((LPVOID)s_enablelate_pfn_SwapBuffers);
+      if (st != MH_OK && st != MH_ERROR_ENABLED)
+        SK_LOG0 ( (L"enable_late: MH_EnableHook(SwapBuffers) failed: %d", (int)st),
+                   L" OpenGL32 " );
+    }
+
+    SK_ApplyQueuedHooks ();
+    TryWriteTerminalMarker ("hook_mode_enable_late_activated");
   }
 
   SK_Thread_SpinUntilAtomicMin (&__SK_GL_initialized, 2);
