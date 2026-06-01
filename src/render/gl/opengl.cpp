@@ -5776,50 +5776,50 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
           // and this copy: only proceed if the snapshot buffer is large enough.
           if (s_fs_snapshot.size () >= snap_bytes)
           {
-          memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)pl_data_off, snap_bytes);
-          const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
-          if (c1 == c2)
-          {
-            GLint pl_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,              &pl_sv_active);
-            GLint pl_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,          &pl_sv_t2d);
-            GLint pl_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &pl_sv_unpack);
-            GLint pl_sv_rowlen = 0; glGetIntegerv (GL_UNPACK_ROW_LENGTH,           &pl_sv_rowlen);
-            GLint pl_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &pl_sv_pbo);
-
-            glActiveTexture (GL_TEXTURE0);
-            glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
-            glPixelStorei   (GL_UNPACK_ALIGNMENT,  1);
-            glPixelStorei   (GL_UNPACK_ROW_LENGTH, 0);
-            if (pl_sv_pbo != 0)
-              glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
-            glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
-                             (GLsizei)pl_width, (GLsizei)pl_height,
-                             GL_BGRA, GL_UNSIGNED_BYTE,
-                             s_fs_snapshot.data ());
-            s_fs_last_ctr  = c1;
-            s_fs_has_frame = true;
-            s_fs_warm      = 6;
-            InterlockedExchange (&s_skf1_compositor_fully_warm, 1);
-
-            if (pl_sv_pbo != 0)
-              glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)pl_sv_pbo);
-            glBindTexture   (GL_TEXTURE_2D, (GLuint)pl_sv_t2d);
-            glActiveTexture ((GLenum)pl_sv_active);
-            glPixelStorei   (GL_UNPACK_ALIGNMENT,  pl_sv_unpack);
-            glPixelStorei   (GL_UNPACK_ROW_LENGTH, pl_sv_rowlen);
-
-            _SidecarLog_GL (L"[SKF1-WARM] phase 1->6: first frame uploaded (ctr=%u)", c1);
-
-            if (! s_fs_imgui_prewarmed)
+            memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)pl_data_off, snap_bytes);
+            const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
+            if (c1 == c2)
             {
-              s_fs_imgui_prewarmed = true;
-              GLint pw_sv_active = 0;
-              glGetIntegerv (GL_ACTIVE_TEXTURE, &pw_sv_active);
+              GLint pl_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,              &pl_sv_active);
+              GLint pl_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,          &pl_sv_t2d);
+              GLint pl_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &pl_sv_unpack);
+              GLint pl_sv_rowlen = 0; glGetIntegerv (GL_UNPACK_ROW_LENGTH,           &pl_sv_rowlen);
+              GLint pl_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &pl_sv_pbo);
+
               glActiveTexture (GL_TEXTURE0);
-              ImGui_ImplGL3_CreateDeviceObjects ();
-              glActiveTexture ((GLenum)pw_sv_active);
+              glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
+              glPixelStorei   (GL_UNPACK_ALIGNMENT,  1);
+              glPixelStorei   (GL_UNPACK_ROW_LENGTH, 0);
+              if (pl_sv_pbo != 0)
+                glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
+              glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
+                               (GLsizei)pl_width, (GLsizei)pl_height,
+                               GL_BGRA, GL_UNSIGNED_BYTE,
+                               s_fs_snapshot.data ());
+              s_fs_last_ctr  = c1;
+              s_fs_has_frame = true;
+              s_fs_warm      = 6;
+              InterlockedExchange (&s_skf1_compositor_fully_warm, 1);
+
+              if (pl_sv_pbo != 0)
+                glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)pl_sv_pbo);
+              glBindTexture   (GL_TEXTURE_2D, (GLuint)pl_sv_t2d);
+              glActiveTexture ((GLenum)pl_sv_active);
+              glPixelStorei   (GL_UNPACK_ALIGNMENT,  pl_sv_unpack);
+              glPixelStorei   (GL_UNPACK_ROW_LENGTH, pl_sv_rowlen);
+
+              _SidecarLog_GL (L"[SKF1-WARM] phase 1->6: first frame uploaded (ctr=%u)", c1);
+
+              if (! s_fs_imgui_prewarmed)
+              {
+                s_fs_imgui_prewarmed = true;
+                GLint pw_sv_active = 0;
+                glGetIntegerv (GL_ACTIVE_TEXTURE, &pw_sv_active);
+                glActiveTexture (GL_TEXTURE0);
+                ImGui_ImplGL3_CreateDeviceObjects ();
+                glActiveTexture ((GLenum)pw_sv_active);
+              }
             }
-          }
           } // if (s_fs_snapshot.size() >= snap_bytes)
         }
       }
@@ -5871,38 +5871,38 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
           // and this copy: only proceed if the snapshot buffer is large enough.
           if (s_fs_snapshot.size () >= snap_bytes)
           {
-          memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)fu_data_off, snap_bytes);
-          const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
-          if (c1 == c2 && (c1 != s_fs_last_ctr || ! s_fs_has_frame))
-          {
-            if (s_fs_tex != 0)
+            memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)fu_data_off, snap_bytes);
+            const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
+            if (c1 == c2 && (c1 != s_fs_last_ctr || ! s_fs_has_frame))
             {
-              GLint fu_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,              &fu_sv_active);
-              GLint fu_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,          &fu_sv_t2d);
-              GLint fu_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &fu_sv_unpack);
-              GLint fu_sv_rowlen = 0; glGetIntegerv (GL_UNPACK_ROW_LENGTH,           &fu_sv_rowlen);
-              GLint fu_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &fu_sv_pbo);
+              if (s_fs_tex != 0)
+              {
+                GLint fu_sv_active = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,              &fu_sv_active);
+                GLint fu_sv_t2d    = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,          &fu_sv_t2d);
+                GLint fu_sv_unpack = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &fu_sv_unpack);
+                GLint fu_sv_rowlen = 0; glGetIntegerv (GL_UNPACK_ROW_LENGTH,           &fu_sv_rowlen);
+                GLint fu_sv_pbo    = 0; glGetIntegerv (GL_PIXEL_UNPACK_BUFFER_BINDING, &fu_sv_pbo);
 
-              glActiveTexture (GL_TEXTURE0);
-              glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
-              glPixelStorei   (GL_UNPACK_ALIGNMENT,  1);
-              glPixelStorei   (GL_UNPACK_ROW_LENGTH, 0);
-              if (fu_sv_pbo != 0)
-                glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
-              glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
-                               (GLsizei)fu_width, (GLsizei)fu_height,
-                               GL_BGRA, GL_UNSIGNED_BYTE,
-                               s_fs_snapshot.data ());
-              s_fs_last_ctr  = c1;
-              s_fs_has_frame = true;
-              if (fu_sv_pbo != 0)
-                glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)fu_sv_pbo);
-              glBindTexture   (GL_TEXTURE_2D, (GLuint)fu_sv_t2d);
-              glActiveTexture ((GLenum)fu_sv_active);
-              glPixelStorei   (GL_UNPACK_ALIGNMENT,  fu_sv_unpack);
-              glPixelStorei   (GL_UNPACK_ROW_LENGTH, fu_sv_rowlen);
+                glActiveTexture (GL_TEXTURE0);
+                glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
+                glPixelStorei   (GL_UNPACK_ALIGNMENT,  1);
+                glPixelStorei   (GL_UNPACK_ROW_LENGTH, 0);
+                if (fu_sv_pbo != 0)
+                  glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
+                glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0,
+                                 (GLsizei)fu_width, (GLsizei)fu_height,
+                                 GL_BGRA, GL_UNSIGNED_BYTE,
+                                 s_fs_snapshot.data ());
+                s_fs_last_ctr  = c1;
+                s_fs_has_frame = true;
+                if (fu_sv_pbo != 0)
+                  glBindBuffer (GL_PIXEL_UNPACK_BUFFER, (GLuint)fu_sv_pbo);
+                glBindTexture   (GL_TEXTURE_2D, (GLuint)fu_sv_t2d);
+                glActiveTexture ((GLenum)fu_sv_active);
+                glPixelStorei   (GL_UNPACK_ALIGNMENT,  fu_sv_unpack);
+                glPixelStorei   (GL_UNPACK_ROW_LENGTH, fu_sv_rowlen);
+              }
             }
-          }
           } // if (s_fs_snapshot.size() >= snap_bytes)
         }
       }
