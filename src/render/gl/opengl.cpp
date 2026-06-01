@@ -5258,10 +5258,12 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
     fclose (f);
   };
 
-  // Build the SKF1 frame mapping name once (constant for the life of the process)
-  wchar_t map_name [128] = { };
-  wsprintfW (map_name, L"Local\\SidecarK_Frame_v1_%lu",
-             (unsigned long)GetCurrentProcessId ());
+  // Frame mapping name: built once at first call and cached as a static;
+  // the process PID is constant for the lifetime of the process.
+  static wchar_t map_name [128] = { };
+  if (map_name [0] == L'\0')
+    wsprintfW (map_name, L"Local\\SidecarK_Frame_v1_%lu",
+               (unsigned long)GetCurrentProcessId ());
 
   // -- HGLRC / context check --------------------------------------------------
   HGLRC hglrc_now = wglGetCurrentContext ();
@@ -5770,6 +5772,10 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
         if (c1 != 0u)
         {
           const size_t snap_bytes = (size_t)pl_stride * (size_t)pl_height;
+          // Guard against a producer modifying the header between skf1_parse
+          // and this copy: only proceed if the snapshot buffer is large enough.
+          if (s_fs_snapshot.size () >= snap_bytes)
+          {
           memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)pl_data_off, snap_bytes);
           const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
           if (c1 == c2)
@@ -5814,6 +5820,7 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
               glActiveTexture ((GLenum)pw_sv_active);
             }
           }
+          } // if (s_fs_snapshot.size() >= snap_bytes)
         }
       }
     }
@@ -5860,6 +5867,10 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
           const size_t snap_bytes = (size_t)fu_stride * (size_t)fu_height;
           if (s_fs_snapshot.size () != snap_bytes)
             s_fs_snapshot.resize (snap_bytes);
+          // Guard against a producer modifying the header between skf1_parse
+          // and this copy: only proceed if the snapshot buffer is large enough.
+          if (s_fs_snapshot.size () >= snap_bytes)
+          {
           memcpy (s_fs_snapshot.data (), s_fs_base + (size_t)fu_data_off, snap_bytes);
           const uint32_t c2 = *(const uint32_t *)(s_fs_base + (size_t)ctr_off);
           if (c1 == c2 && (c1 != s_fs_last_ctr || ! s_fs_has_frame))
@@ -5892,6 +5903,7 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
               glPixelStorei   (GL_UNPACK_ROW_LENGTH, fu_sv_rowlen);
             }
           }
+          } // if (s_fs_snapshot.size() >= snap_bytes)
         }
       }
     }
@@ -7137,6 +7149,12 @@ SK_HookGL (LPVOID)
     // (dummy window, GLEW init, gl* hook batch, render stats, frame limiter)
     // must not run.  The minimal swap hooks installed by Mechanism-1 above
     // are sufficient; this flag skips the heavy else-branch below.
+    //
+    // The DLL-name guard ensures we only enter minimal mode in the *hooking*
+    // deployment (SpecialK injected as a wrapper DLL, name != OpenGL32.dll).
+    // When SpecialK IS OpenGL32.dll (DLL_ROLE=OpenGL32), the if-branch above
+    // handles initialisation and the else-branch never runs, so the flag is
+    // irrelevant in that case — but the guard makes the intent explicit.
     const bool _sk_gl_minimal =
       (InterlockedCompareExchange (&g_sk_gl_virule_minimal, 0, 0) != 0) &&
       (! StrStrIW (SK_GetDLLName ().c_str (), L"OpenGL32.dll"));
@@ -7216,9 +7234,13 @@ SK_HookGL (LPVOID)
           (wglMakeCurrent_pfn)SK_GetProcAddress (local_gl, "wglMakeCurrent");
 
         // If Mechanism-1 was somehow unable to fill wgl_swap_buffers
-        // (e.g. hook create returned MH_ERROR_ALREADY_CREATED on a very
-        // early call), fall back to a direct GetProcAddress trampoline so
-        // the fast path in the detour always has a callable pointer.
+        // (e.g. MH_CreateHook returned a permanent-failure code), fall back
+        // to a direct GetProcAddress pointer.  This is safe only when the
+        // hook was NOT installed (i.e. Mechanism-1 returned a true failure,
+        // not MH_ERROR_ALREADY_CREATED — in the latter case wgl_swap_buffers
+        // is already set by the earlier MH_CreateHook call that succeeded).
+        // GetProcAddress returns the unhooked function address when the hook
+        // was never applied; no infinite-recursion risk exists in that case.
         if (wgl_swap_buffers == nullptr)
         {
           GetModuleHandleExW (GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
