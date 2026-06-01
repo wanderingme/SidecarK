@@ -6002,6 +6002,55 @@ SK_HookGL (LPVOID)
         if (val >= 0 && val <= 30000)
           s_gl_hookmode_delay_ms = (uint32_t)val;
       }
+
+      // One-shot: write diagnostic confirming enable_late was recognized and
+      // will delay OpenGL hook activation.  Gated on s_gl_hookmode_checked so
+      // it fires at most once per process lifetime.
+      if (SidecarK_DiagnosticsEnabled ())
+      {
+        const DWORD pid = GetCurrentProcessId ();
+
+        wchar_t wszTempPath [MAX_PATH] = { };
+        wchar_t wszFullPath [MAX_PATH] = { };
+
+        if (GetTempPathW (MAX_PATH, wszTempPath) > 0)
+        {
+          wchar_t wszFile [64] = { };
+          wsprintfW (wszFile, L"sk_gl_hook_install_%lu.txt", (unsigned long)pid);
+          lstrcpynW (wszFullPath, wszTempPath, MAX_PATH);
+          lstrcatW  (wszFullPath, wszFile);
+        }
+        else
+        {
+          wsprintfW (wszFullPath, L"sk_gl_hook_install_%lu.txt", (unsigned long)pid);
+        }
+
+        HANDLE hFile =
+          CreateFileW ( wszFullPath, FILE_APPEND_DATA,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        nullptr, OPEN_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, nullptr );
+
+        if (hFile != INVALID_HANDLE_VALUE)
+        {
+          char   szLine [256] = { };
+          const int len =
+            _snprintf_s ( szLine, _TRUNCATE,
+                          "SIDECARK_GL_HOOK_MODE=enable_late active\r\n"
+                          "SIDECARK_GL_HOOK_DELAY_MS=%lu\r\n"
+                          "OpenGL hook activation delayed\r\n",
+                          (unsigned long)s_gl_hookmode_delay_ms );
+
+          if (len > 0)
+          {
+            DWORD dwWritten = 0;
+            SetFilePointer (hFile, 0, nullptr, FILE_END);
+            WriteFile (hFile, szLine, (DWORD)len, &dwWritten, nullptr);
+          }
+
+          CloseHandle (hFile);
+        }
+      }
     }
   }
 
@@ -6041,13 +6090,24 @@ SK_HookGL (LPVOID)
   static MH_STATUS s_enable_SwapBuffers     = (MH_STATUS)0;
   static bool      s_permfail_SwapBuffers   = false;
 
+  // enable_late: addresses of the two present hooks that must not become active
+  // until the delay expires.  Set during hook creation; used in the activation
+  // block to call MH_EnableHook directly after the sleep.
+  static FARPROC   s_enablelate_pfn_wglSwapBuffers = nullptr;
+  static FARPROC   s_enablelate_pfn_SwapBuffers     = nullptr;
+
   const uint64_t now = GetTickCount64 ();
 
   if (! s_retryActive)
   {
     s_firstAttempt  = now;
     s_lastAttempt   = 0;
-    s_retryActive   = (! s_gl_hookmode_enablelate); // skip retry block in enable_late
+    // In enable_late mode the retry block is intentionally skipped: it has its
+    // own MH_CreateHook/MH_EnableHook path that would activate the swap hooks
+    // immediately, before the required delay.  enable_late does a single hook
+    // creation pass inside the InterlockedCompareExchangeAcquire guard and then
+    // waits on s_gl_hookmode_enablelate_delay_ms before enabling.
+    s_retryActive   = (! s_gl_hookmode_enablelate);
     s_attempt_index = 0;
   }
 
@@ -6458,6 +6518,42 @@ SK_HookGL (LPVOID)
                                  "SwapBuffers",
          static_cast_pfn <void*> (wglSwapBuffers),
          static_cast_p2p <void> (&gdi_swap_buffers) );
+
+      // enable_late: SK_CreateDLLHook2 queues both hooks for enabling via
+      // SK_QueueEnableHook.  Dozens of other SK_ApplyQueuedHooks() call sites
+      // (thread init, scheduler, input, etc.) would otherwise activate them
+      // before the delay expires.  Counter the queued enable now so that every
+      // SK_ApplyQueuedHooks() call during the delay period is a no-op for these
+      // two hooks.  After the delay the activation block calls MH_EnableHook
+      // directly on the saved addresses.
+      if (s_gl_hookmode_enablelate)
+      {
+        // Cancel the queued enables that SK_CreateDLLHook2 placed on both swap
+        // hooks.  MH_QueueDisableHook resets queueEnable to FALSE so that any
+        // SK_ApplyQueuedHooks() call from another subsystem (thread init,
+        // scheduler, input, etc.) sees isEnabled == queueEnable == FALSE and
+        // leaves the hooks disabled.  If either call fails the hook will be
+        // enabled the next time SK_ApplyQueuedHooks fires, revealing a
+        // MinHook state inconsistency that warrants investigation.
+        if (pfn_wglSwapBuffers != nullptr)
+        {
+          MH_STATUS st = MH_QueueDisableHook ((LPVOID)pfn_wglSwapBuffers);
+          if (st == MH_OK || st == MH_ERROR_NOT_ENABLED)
+            s_enablelate_pfn_wglSwapBuffers = pfn_wglSwapBuffers;
+          else
+            SK_LOG0 ( (L"enable_late: MH_QueueDisableHook(wglSwapBuffers) failed: %d", (int)st),
+                       L" OpenGL32 " );
+        }
+        if (pfn_SwapBuffers != nullptr)
+        {
+          MH_STATUS st = MH_QueueDisableHook ((LPVOID)pfn_SwapBuffers);
+          if (st == MH_OK || st == MH_ERROR_NOT_ENABLED)
+            s_enablelate_pfn_SwapBuffers = pfn_SwapBuffers;
+          else
+            SK_LOG0 ( (L"enable_late: MH_QueueDisableHook(SwapBuffers) failed: %d", (int)st),
+                       L" OpenGL32 " );
+        }
+      }
 
       SK_CreateDLLHook2 (         SK_GetModuleFullName (local_gl).c_str (),
                                  "wglSwapMultipleBuffers",
@@ -7046,6 +7142,63 @@ SK_HookGL (LPVOID)
   {
     if (s_gl_hookmode_delay_ms > 0)
       Sleep (s_gl_hookmode_delay_ms);
+
+    // One-shot: write diagnostic that the delay has expired and hooks are
+    // about to be activated.
+    if (SidecarK_DiagnosticsEnabled ())
+    {
+      const DWORD pid = GetCurrentProcessId ();
+
+      wchar_t wszTempPath [MAX_PATH] = { };
+      wchar_t wszFullPath [MAX_PATH] = { };
+
+      if (GetTempPathW (MAX_PATH, wszTempPath) > 0)
+      {
+        wchar_t wszFile [64] = { };
+        wsprintfW (wszFile, L"sk_gl_hook_install_%lu.txt", (unsigned long)pid);
+        lstrcpynW (wszFullPath, wszTempPath, MAX_PATH);
+        lstrcatW  (wszFullPath, wszFile);
+      }
+      else
+      {
+        wsprintfW (wszFullPath, L"sk_gl_hook_install_%lu.txt", (unsigned long)pid);
+      }
+
+      HANDLE hFile =
+        CreateFileW ( wszFullPath, FILE_APPEND_DATA,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE,
+                      nullptr, OPEN_ALWAYS,
+                      FILE_ATTRIBUTE_NORMAL, nullptr );
+
+      if (hFile != INVALID_HANDLE_VALUE)
+      {
+        static const char szLine [] =
+          "OpenGL hook activation now applying queued hooks\r\n";
+        DWORD dwWritten = 0;
+        SetFilePointer (hFile, 0, nullptr, FILE_END);
+        WriteFile (hFile, szLine, (DWORD)sizeof (szLine) - 1, &dwWritten, nullptr);
+        CloseHandle (hFile);
+      }
+    }
+
+    // Explicitly enable the two present hooks that were dequeued during hook
+    // creation.  These must be enabled before SK_ApplyQueuedHooks so that the
+    // hooked swap path is live the moment any other queued hooks activate.
+    if (s_enablelate_pfn_wglSwapBuffers != nullptr)
+    {
+      MH_STATUS st = MH_EnableHook ((LPVOID)s_enablelate_pfn_wglSwapBuffers);
+      if (st != MH_OK && st != MH_ERROR_ENABLED)
+        SK_LOG0 ( (L"enable_late: MH_EnableHook(wglSwapBuffers) failed: %d", (int)st),
+                   L" OpenGL32 " );
+    }
+    if (s_enablelate_pfn_SwapBuffers != nullptr)
+    {
+      MH_STATUS st = MH_EnableHook ((LPVOID)s_enablelate_pfn_SwapBuffers);
+      if (st != MH_OK && st != MH_ERROR_ENABLED)
+        SK_LOG0 ( (L"enable_late: MH_EnableHook(SwapBuffers) failed: %d", (int)st),
+                   L" OpenGL32 " );
+    }
+
     SK_ApplyQueuedHooks ();
     TryWriteTerminalMarker ("hook_mode_enable_late_activated");
   }
