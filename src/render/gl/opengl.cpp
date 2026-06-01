@@ -6538,7 +6538,7 @@ SK_HookGL (LPVOID)
         if (pfn_wglSwapBuffers != nullptr)
         {
           MH_STATUS st = MH_QueueDisableHook ((LPVOID)pfn_wglSwapBuffers);
-          if (st == MH_OK || st == MH_ERROR_NOT_ENABLED)
+          if (st == MH_OK || st == MH_ERROR_DISABLED)
             s_enablelate_pfn_wglSwapBuffers = pfn_wglSwapBuffers;
           else
             SK_LOG0 ( (L"enable_late: MH_QueueDisableHook(wglSwapBuffers) failed: %d", (int)st),
@@ -6547,7 +6547,7 @@ SK_HookGL (LPVOID)
         if (pfn_SwapBuffers != nullptr)
         {
           MH_STATUS st = MH_QueueDisableHook ((LPVOID)pfn_SwapBuffers);
-          if (st == MH_OK || st == MH_ERROR_NOT_ENABLED)
+          if (st == MH_OK || st == MH_ERROR_DISABLED)
             s_enablelate_pfn_SwapBuffers = pfn_SwapBuffers;
           else
             SK_LOG0 ( (L"enable_late: MH_QueueDisableHook(SwapBuffers) failed: %d", (int)st),
