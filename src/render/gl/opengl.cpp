@@ -7791,6 +7791,7 @@ SK_HookGL (LPVOID)
         wgl_swap_multiple_buffers =
       (wglSwapMultipleBuffers_pfn)SK_GetProcAddress (local_gl, "wglSwapMultipleBuffers");
 
+    {
     HWND hWndDummy =
       CreateWindowW ( L"STATIC", nullptr, 0, 0, 0, 0, 0,
                         nullptr, nullptr, nullptr, 0 );
@@ -7902,6 +7903,7 @@ SK_HookGL (LPVOID)
 
       DestroyWindow (hWndDummy);
     }
+    } // hWndDummy scope
 
 
     sk_gl_virule_done:;
