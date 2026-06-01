@@ -5973,31 +5973,47 @@ SK_HookGL (LPVOID)
     }
   }
 
-  // SIDECARK_GL_HOOK_MODE=none: skip all OpenGL hook installation.
-  // Use this to test whether injection/DLL load alone causes the fullscreen
-  // hitch, independently of MH_CreateHook, MH_EnableHook, thread suspension,
-  // queued hook application, and dummy-context / GLEW setup.
+  // SIDECARK_GL_HOOK_MODE env-var: temporary isolation modes for testing hook cost.
+  //   none        – skip all OpenGL hook installation entirely.
+  //   enable_late – install hooks but delay hook activation (MH_EnableHook /
+  //                 SK_ApplyQueuedHooks) by SIDECARK_GL_HOOK_DELAY_MS ms
+  //                 (default 5000, range 0–30000).
   // Unset or any other value: current behaviour, unchanged.
+  static bool     s_gl_hookmode_checked    = false;
+  static bool     s_gl_hookmode_none       = false;
+  static bool     s_gl_hookmode_enablelate = false;
+  static uint32_t s_gl_hookmode_delay_ms   = 5000;
+
+  if (! s_gl_hookmode_checked)
   {
-    static bool s_hook_mode_none_checked = false;
-    static bool s_hook_mode_none         = false;
-    if (! s_hook_mode_none_checked)
+    s_gl_hookmode_checked = true;
+    char buf [16] = { };
+    if (GetEnvironmentVariableA ("SIDECARK_GL_HOOK_MODE", buf, sizeof (buf)) > 0)
     {
-      s_hook_mode_none_checked = true;
-      char buf [8] = { };
-      if (GetEnvironmentVariableA ("SIDECARK_GL_HOOK_MODE", buf, sizeof (buf)) > 0)
-        s_hook_mode_none = (_stricmp (buf, "none") == 0);
+      s_gl_hookmode_none       = (_stricmp (buf, "none")        == 0);
+      s_gl_hookmode_enablelate = (_stricmp (buf, "enable_late") == 0);
     }
-    if (s_hook_mode_none)
+    if (s_gl_hookmode_enablelate)
     {
-      TryWriteTerminalMarker ("hook_mode_none");
-      // Unconditionally advance __SK_GL_initialized to 2 so no internal
-      // spin-wait ever blocks, regardless of prior state.
-      InterlockedExchange (&__SK_GL_initialized, 2);
-      WriteRelease        (&__gl_ready, TRUE);
-      SK_Thread_CloseSelf ();
-      return 0;
+      char delay_buf [16] = { };
+      if (GetEnvironmentVariableA ("SIDECARK_GL_HOOK_DELAY_MS", delay_buf, sizeof (delay_buf)) > 0)
+      {
+        const long val = strtol (delay_buf, nullptr, 10);
+        if (val >= 0 && val <= 30000)
+          s_gl_hookmode_delay_ms = (uint32_t)val;
+      }
     }
+  }
+
+  if (s_gl_hookmode_none)
+  {
+    TryWriteTerminalMarker ("hook_mode_none");
+    // Unconditionally advance __SK_GL_initialized to 2 so no internal
+    // spin-wait ever blocks, regardless of prior state.
+    InterlockedExchange (&__SK_GL_initialized, 2);
+    WriteRelease        (&__gl_ready, TRUE);
+    SK_Thread_CloseSelf ();
+    return 0;
   }
 
   static uint64_t s_firstAttempt  = 0;
@@ -6029,9 +6045,9 @@ SK_HookGL (LPVOID)
 
   if (! s_retryActive)
   {
-    s_firstAttempt = now;
-    s_lastAttempt  = 0;
-    s_retryActive  = true;
+    s_firstAttempt  = now;
+    s_lastAttempt   = 0;
+    s_retryActive   = (! s_gl_hookmode_enablelate); // skip retry block in enable_late
     s_attempt_index = 0;
   }
 
@@ -6460,18 +6476,21 @@ SK_HookGL (LPVOID)
 
       if (SK_GetDLLRole () == DLL_ROLE::OpenGL)
       {
-        if (SK_GetFramesDrawn () > 1)
+        if (SK_GetFramesDrawn () > 1 && (! s_gl_hookmode_enablelate))
           SK_ApplyQueuedHooks ();
 
         // Load user-defined DLLs (Plug-In)
         SK_RunLHIfBitness (64, SK_LoadPlugIns64 (), SK_LoadPlugIns32 ());
       }
 
-      stEnable_wglSwapBuffers =
-        ( (pfn_wglSwapBuffers != nullptr) ? MH_EnableHook ((LPVOID)pfn_wglSwapBuffers) : MH_ERROR_FUNCTION_NOT_FOUND );
+      if (! s_gl_hookmode_enablelate)
+      {
+        stEnable_wglSwapBuffers =
+          ( (pfn_wglSwapBuffers != nullptr) ? MH_EnableHook ((LPVOID)pfn_wglSwapBuffers) : MH_ERROR_FUNCTION_NOT_FOUND );
 
-      stEnable_SwapBuffers =
-        ( (pfn_SwapBuffers != nullptr) ? MH_EnableHook ((LPVOID)pfn_SwapBuffers) : MH_ERROR_FUNCTION_NOT_FOUND );
+        stEnable_SwapBuffers =
+          ( (pfn_SwapBuffers != nullptr) ? MH_EnableHook ((LPVOID)pfn_SwapBuffers) : MH_ERROR_FUNCTION_NOT_FOUND );
+      }
 
       SK_GL_WriteHookInstallMarker (
         L"wglSwapBuffers",
@@ -7015,11 +7034,20 @@ SK_HookGL (LPVOID)
 
     pTLS->render->gl->ctx_init_thread = false;
 
-    if (SK_GetFramesDrawn () > 1)
+    if (SK_GetFramesDrawn () > 1 && (! s_gl_hookmode_enablelate))
       SK_ApplyQueuedHooks ();
 
     WriteRelease                (&__gl_ready,    TRUE);
     InterlockedIncrementRelease (&__SK_GL_initialized);
+  }
+
+  // enable_late: boot state is already released above; now sleep then activate.
+  if (s_gl_hookmode_enablelate)
+  {
+    if (s_gl_hookmode_delay_ms > 0)
+      Sleep (s_gl_hookmode_delay_ms);
+    SK_ApplyQueuedHooks ();
+    TryWriteTerminalMarker ("hook_mode_enable_late_activated");
   }
 
   SK_Thread_SpinUntilAtomicMin (&__SK_GL_initialized, 2);
