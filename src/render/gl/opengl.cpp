@@ -5512,7 +5512,7 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
         if (pa_sv_pbo != 0)
           glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
         static const int c_max_err_drain = 32;
-        for (int _edi = 0; _edi < c_max_err_drain && glGetError () != GL_NO_ERROR; ++_edi) { }
+        for (int drain_idx = 0; drain_idx < c_max_err_drain && glGetError () != GL_NO_ERROR; ++drain_idx) { }
         glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8,
                       (GLsizei)pa_width, (GLsizei)pa_height, 0,
                       GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
@@ -5562,6 +5562,10 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
     }
     else
     {
+      // GLSL 1.30 (OpenGL 3.0) is the minimum version that supports the
+      // in/out variable qualifier syntax used here; it is available on all
+      // hardware that supports the EXT_framebuffer_object path required for
+      // rendering into FBO 0 and is safe to request unconditionally.
       const char* vs_src =
         "#version 130\n"
         "in vec2 aPos;\n"
@@ -5701,7 +5705,7 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
          1.0f,  1.0f,  1.0f, 0.0f,
         -1.0f,  1.0f,  0.0f, 0.0f
       };
-      const uint16_t idx [6] = { 0, 1, 2, 0, 2, 3 };
+      const GLushort idx [6] = { 0, 1, 2, 0, 2, 3 };
 
       glGenVertexArrays (1, &s_fs_vao);
       glGenBuffers      (1, &s_fs_vbo);
