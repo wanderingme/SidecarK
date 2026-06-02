@@ -267,7 +267,7 @@ struct ObsSafeState
     {
       ++candidate_frames;
       const ULONGLONG now = GetTickCount64();
-      const bool stable_by_frames = (candidate_frames >= 5);
+      const bool stable_by_frames = (candidate_frames >= kObsStableFrames);
       const bool stable_by_time   = (now - candidate_first_ms >= 500ull);
 
       if ((stable_by_frames || stable_by_time) && !target_stable)
@@ -342,17 +342,17 @@ struct ObsSafeState
 // ---------------------------------------------------------------------------
 // PART 6 — SKF1 header validation helpers
 // ---------------------------------------------------------------------------
-static inline bool IsMeaningfulOverlaySize(int w, int h)
+static inline bool IsMeaningfulOverlaySize(uint32_t w, uint32_t h)
 {
-  return w >= 64 && h >= 64;
+  return w >= 64u && h >= 64u;
 }
 
-static inline bool MappedBufferCanContain(int w, int h, int stride,
+static inline bool MappedBufferCanContain(uint32_t w, uint32_t h, uint32_t stride,
                                            size_t data_offset,
                                            size_t mapped_bytes)
 {
-  if (w <= 0 || h <= 0 || stride <= 0) return false;
-  if (data_offset >= mapped_bytes)     return false;
+  if (w == 0 || h == 0 || stride == 0) return false;
+  if (data_offset >= mapped_bytes)      return false;
   const uint64_t needed = (uint64_t)data_offset + (uint64_t)stride * (uint64_t)h;
   return needed <= (uint64_t)mapped_bytes;
 }

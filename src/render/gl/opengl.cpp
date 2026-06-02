@@ -6112,7 +6112,6 @@ do_overlay_draw:
         GLint     sv_arr     = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &sv_arr);
         GLint     sv_elem    = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &sv_elem);
         GLint     sv_fbo     = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &sv_fbo);
-        GLint     sv_rbo     = 0; glGetIntegerv (GL_RENDERBUFFER_BINDING,         &sv_rbo);
         GLint     sv_vp [4]  = { }; glGetIntegerv (GL_VIEWPORT,    sv_vp);
         GLint     sv_sci [4] = { }; glGetIntegerv (GL_SCISSOR_BOX, sv_sci);
         GLint     sv_bsrc_rgb = 0; glGetIntegerv (GL_BLEND_SRC_RGB,   &sv_bsrc_rgb);
@@ -6166,7 +6165,6 @@ do_overlay_draw:
         glActiveTexture     ((GLenum)sv_active);
         glBindTexture       (GL_TEXTURE_2D, (GLuint)sv_tex2d);
         glBindFramebuffer   (GL_FRAMEBUFFER, (GLuint)sv_fbo);
-        glBindRenderbuffer  (GL_RENDERBUFFER, (GLuint)sv_rbo);
         glViewport          (sv_vp [0], sv_vp [1], sv_vp [2], sv_vp [3]);
         glColorMask         (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
         glDepthMask         (sv_dmask);

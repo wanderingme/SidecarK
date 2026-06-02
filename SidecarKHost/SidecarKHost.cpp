@@ -1654,8 +1654,9 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
     {
       // PART 3 — command instrumentation: OBS-safe mode flag
       wchar_t obs_env[8]{};
-      GetEnvironmentVariableW(L"VIRULE_OBS_DETECTED", obs_env, _countof(obs_env));
-      const bool obs_safe_mode = (wcscmp(obs_env, L"1") == 0);
+      const bool obs_safe_mode =
+        (GetEnvironmentVariableW(L"VIRULE_OBS_DETECTED", obs_env, _countof(obs_env)) > 0) &&
+        (wcscmp(obs_env, L"1") == 0);
 
       // PART 2 — NO_COMMAND_EFFECTS debug mode
       wchar_t no_cmd_env[8]{};
@@ -1684,22 +1685,25 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
 
       bool cmd_ok = false;
 
+      // Helper: apply overlay mode only when effects are not suppressed
+      auto setOverlayMode = [&](SidecarKOverlayMode mode) {
+        if (!no_cmd_effects && overlayMode)
+          *overlayMode = static_cast<uint32_t>(mode);
+      };
+
       if (_stricmp(cmd, "overlay on") == 0)
       {
-        if (!no_cmd_effects && overlayMode)
-          *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::Interactive);
+        setOverlayMode(SidecarKOverlayMode::Interactive);
         resp = "ok\n"; respLen = 3; cmd_ok = true;
       }
       else if (_stricmp(cmd, "overlay toast") == 0)
       {
-        if (!no_cmd_effects && overlayMode)
-          *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::ToastOnly);
+        setOverlayMode(SidecarKOverlayMode::ToastOnly);
         resp = "ok\n"; respLen = 3; cmd_ok = true;
       }
       else if (_stricmp(cmd, "overlay off") == 0)
       {
-        if (!no_cmd_effects && overlayMode)
-          *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::Off);
+        setOverlayMode(SidecarKOverlayMode::Off);
         resp = "ok\n"; respLen = 3; cmd_ok = true;
       }
       else if (_stricmp(cmd, "ping") == 0)
