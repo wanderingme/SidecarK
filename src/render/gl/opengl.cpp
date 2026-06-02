@@ -54,6 +54,7 @@ extern bool SidecarK_DiagnosticsEnabled ();
 #include <SpecialK/render/dxgi/dxgi_hdr.h>
 
 #include <SpecialK/render/gl/opengl_backend.h>
+#include <SpecialK/render/gl/obs_compat.h>
 #include <imgui/backends/imgui_gl3.h>
 #include <../depends/include/GL/glew.h>
 #include <../depends/include/GL/wglew.h>
@@ -93,6 +94,49 @@ extern std::atomic_bool g_dxgi_overlay_owner;
 
 thread_local int  tls_gl_present_depth      = 0;
 thread_local bool tls_gl_in_overlay_submit  = false;
+
+// OBS compat: log-function bridge — wired once so obs_compat.h can log via
+// the same SidecarK_Overlay.log sink as the rest of the GL code.
+static void SK_GL_OBSCompat_LogFn (const wchar_t* fmt, ...)
+{
+  if (! SidecarK_DiagnosticsEnabled ())
+    return;
+  wchar_t buf [512] = { };
+  va_list ap;
+  va_start (ap, fmt);
+  _vsnwprintf_s (buf, _TRUNCATE, fmt, ap);
+  va_end (ap);
+
+  wchar_t path [MAX_PATH] = { };
+  DWORD cch = GetTempPathW (MAX_PATH, path);
+  if (cch == 0 || cch >= MAX_PATH)
+    return;
+  wcscat_s (path, L"SidecarK_Overlay.log");
+  FILE* f = nullptr;
+  _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+  if (f == nullptr)
+    return;
+  SYSTEMTIME st = { };
+  GetLocalTime (&st);
+  fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu [obs] %ls\n",
+            st.wYear, st.wMonth, st.wDay,
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+            (unsigned long)GetCurrentProcessId (), buf);
+  fclose (f);
+}
+
+// One-time init: wire OBSCompat log fn, run debug-mode init, run OBS detect.
+static void SK_GL_OBSCompat_EnsureInit ()
+{
+  static volatile LONG s_done = 0;
+  if (InterlockedCompareExchange (&s_done, 1, 0) != 0)
+    return;
+  SidecarK_OBSCompat::SetLogFn (SK_GL_OBSCompat_LogFn);
+  // Trigger debug-mode init (logs active modes)
+  (void)SidecarK_OBSCompat::GetDebugModes ();
+  // Trigger OBS detection (logs result)
+  (void)SidecarK_OBSCompat::DetectOBS ();
+}
 
 struct SK_GL_Context {
 };
@@ -5178,6 +5222,41 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
 {
   static constexpr uint32_t c_skf1_max_dim = 16384u;
 
+  // -- One-shot OBS compat init (Part 1 + Part 2) ----------------------------
+  SK_GL_OBSCompat_EnsureInit ();
+
+  // Convenience aliases
+  const SidecarK_OBSCompat::DebugModes& dbgModes = SidecarK_OBSCompat::GetDebugModes ();
+  const SidecarK_OBSCompat::OBSDetectResult& obsInfo = SidecarK_OBSCompat::DetectOBS ();
+
+  // Per-function OBS-safe state (Part 8/9)
+  static SidecarK_OBSCompat::ObsSafeState s_obs_safe;
+
+  // PART 5 — recursion guard (per-thread depth counter)
+  thread_local int tls_virule_depth = 0;
+  ++tls_virule_depth;
+  const bool tls_recursion = (tls_virule_depth > 1);
+  if (tls_recursion)
+  {
+    if (SidecarK_DiagnosticsEnabled ())
+      SK_GL_OBSCompat_LogFn (L"render_hook: recursion_guard triggered; passthrough");
+    --tls_virule_depth;
+    const BOOL r = pfnOriginal (hDC);
+    if (SidecarK_DiagnosticsEnabled ())
+      SK_GL_OBSCompat_LogFn (L"render_hook: original_called=1 (recursion)");
+    return r;
+  }
+
+  // PART 2 — HOOK_PASSTHROUGH: install hook normally, call original once, done.
+  if (dbgModes.hook_passthrough)
+  {
+    --tls_virule_depth;
+    const BOOL r = pfnOriginal (hDC);
+    if (SidecarK_DiagnosticsEnabled ())
+      SK_GL_OBSCompat_LogFn (L"render_hook: original_called=1 (HOOK_PASSTHROUGH)");
+    return r;
+  }
+
   // SKF1 frame shared-memory state
   static HANDLE               s_fs_hMap      = nullptr;
   static uint8_t*             s_fs_base      = nullptr;
@@ -5230,6 +5309,11 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
   // Lazy ImGui GL backend init: called once after GLEW is ready.
   static volatile LONG s_imgui_init_done = 0;
 
+  // PART 4 — per-frame logging (first N frames + state transitions)
+  static volatile LONG s_frame_count = 0;
+  const LONG           frame_num = InterlockedIncrement (&s_frame_count);
+  const bool           log_this_frame = (frame_num <= 10) && SidecarK_DiagnosticsEnabled ();
+
   // Diagnostics helper (matches _SidecarLog_GL lambda in SK_GL_SwapBuffers)
   auto _SidecarLog_GL = [](const wchar_t* fmt, ...)
   {
@@ -5258,6 +5342,31 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
     fclose (f);
   };
 
+  // PART 4 — hook enter log (first frames)
+  if (log_this_frame)
+  {
+    _SidecarLog_GL (L"render_hook: enter api=OpenGL frame=%ld thread=%lu obs=%d",
+                    (long)frame_num, (unsigned long)GetCurrentThreadId (),
+                    obsInfo.detected ? 1 : 0);
+  }
+
+  // Helper lambda: call original once and return (used as fail-open).
+  // Always decrements tls_virule_depth before returning.
+  auto CallOriginalOnce = [&](BOOL* out_r = nullptr) -> BOOL
+  {
+    if (log_this_frame)
+      _SidecarLog_GL (L"render_hook: before_original");
+    BOOL r = pfnOriginal (hDC);
+    if (log_this_frame)
+      _SidecarLog_GL (L"render_hook: after_original result=%d", (int)r);
+    if (SidecarK_DiagnosticsEnabled ())
+      _SidecarLog_GL (L"render_hook: original_called=1");
+    _SidecarLog_GL (L"render_hook: leave");
+    --tls_virule_depth;
+    if (out_r) *out_r = r;
+    return r;
+  };
+
   // Frame mapping name: built once at first call and cached as a static;
   // the process PID is constant for the lifetime of the process.
   static wchar_t map_name [128] = { };
@@ -5268,7 +5377,7 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
   // -- HGLRC / context check --------------------------------------------------
   HGLRC hglrc_now = wglGetCurrentContext ();
   if (hglrc_now == nullptr)
-    return pfnOriginal (hDC);
+    return CallOriginalOnce ();
 
   // -- Lazy GLEW init ---------------------------------------------------------
   // Must have a current context before calling glewInit.
@@ -5288,6 +5397,21 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
   HWND hWnd    = WindowFromDC  (hDC);
   RECT rcWnd   = { };
   GetClientRect (hWnd, &rcWnd);
+  const uint32_t wnd_w = (uint32_t)(rcWnd.right  - rcWnd.left);
+  const uint32_t wnd_h = (uint32_t)(rcWnd.bottom - rcWnd.top);
+
+  // PART 9 — observe render-target size; also drives OBS-safe draw gating.
+  // Pass the OBS log fn so transitions are logged.
+  const bool draw_stable = s_obs_safe.ObserveSize (wnd_w, wnd_h, obsInfo,
+                                                    SK_GL_OBSCompat_LogFn);
+
+  // PART 8 — if OBS detected and target not yet stable, skip draw this frame.
+  if (obsInfo.detected && !draw_stable)
+  {
+    if (log_this_frame)
+      _SidecarLog_GL (L"obs_safe: skip draw reason=invalid_backbuffer");
+    return CallOriginalOnce ();
+  }
 
   // -- HGLRC ownership check --------------------------------------------------
   if (hglrc_now != s_fs_owner_hglrc)
@@ -5390,6 +5514,25 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
 
   if (! s_fs_overlay_enabled)
     s_fs_has_frame = false;
+
+  // PART 4 — first render hook with OBS compat mode active
+  if (frame_num == 1 && SidecarK_DiagnosticsEnabled ())
+  {
+    _SidecarLog_GL (L"render_hook: enter api=OpenGL frame=1 thread=%lu obs_detected=%d obs_safe=%d",
+                    (unsigned long)GetCurrentThreadId (),
+                    obsInfo.detected ? 1 : 0,
+                    (obsInfo.detected && draw_stable) ? 1 : 0);
+    if (obsInfo.detected)
+      _SidecarLog_GL (L"sidecar_obs_detect: compat_mode=obs_game_capture_safe");
+  }
+
+  // PART 2 — NO_SHARED_MEMORY_READ: skip all shared-memory read and warm phases.
+  if (dbgModes.no_shared_memory_read)
+  {
+    if (log_this_frame)
+      _SidecarLog_GL (L"sidecar_debug_mode: NO_SHARED_MEMORY_READ — skip shm read");
+    goto do_overlay_draw;
+  }
 
   // -- Step 1: open / maintain the SKF1 shared-memory mapping ----------------
   if (s_fs_base == nullptr)
@@ -5921,71 +6064,147 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
   }
 
   // -- Composite overlay over FBO 0 -------------------------------------------
+do_overlay_draw:
   if (s_fs_overlay_enabled && s_fs_warm == 6 &&
       s_fs_has_frame && s_fs_tex != 0 && s_fs_prog != 0 && s_fs_vao != 0)
   {
-    GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
-    GLint     sv_active  = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &sv_active);
-    GLint     sv_tex2d   = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &sv_tex2d);
-    GLint     sv_vao     = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &sv_vao);
-    GLint     sv_elem    = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &sv_elem);
-    GLint     sv_fbo     = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &sv_fbo);
-    GLint     sv_vp [4]  = { }; glGetIntegerv (GL_VIEWPORT,    sv_vp);
-    GLint     sv_sci [4] = { }; glGetIntegerv (GL_SCISSOR_BOX, sv_sci);
-    GLint     sv_bsrc_rgb = 0; glGetIntegerv (GL_BLEND_SRC_RGB,   &sv_bsrc_rgb);
-    GLint     sv_bdst_rgb = 0; glGetIntegerv (GL_BLEND_DST_RGB,   &sv_bdst_rgb);
-    GLint     sv_bsrc_a   = 0; glGetIntegerv (GL_BLEND_SRC_ALPHA, &sv_bsrc_a);
-    GLint     sv_bdst_a   = 0; glGetIntegerv (GL_BLEND_DST_ALPHA, &sv_bdst_a);
-    GLboolean sv_cmask [4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
-    glGetBooleanv (GL_COLOR_WRITEMASK, sv_cmask);
-    const GLboolean sv_scissor = glIsEnabled (GL_SCISSOR_TEST);
-    const GLboolean sv_blend   = glIsEnabled (GL_BLEND);
-    const GLboolean sv_depth   = glIsEnabled (GL_DEPTH_TEST);
-    const GLboolean sv_stencil = glIsEnabled (GL_STENCIL_TEST);
-    const GLboolean sv_cull    = glIsEnabled (GL_CULL_FACE);
+    // PART 4 — log before overlay check
+    if (log_this_frame)
+      _SidecarLog_GL (L"render_hook: before_overlay_check");
 
-    glBindFramebuffer (GL_FRAMEBUFFER, 0);
-    if (sv_scissor) glDisable (GL_SCISSOR_TEST);
-    if (sv_depth)   glDisable (GL_DEPTH_TEST);
-    if (sv_stencil) glDisable (GL_STENCIL_TEST);
-    if (sv_cull)    glDisable (GL_CULL_FACE);
-    glColorMask         (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glEnable            (GL_BLEND);
-    glBlendFuncSeparate (GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
-                         GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    glViewport (0, 0,
-                (GLsizei)(rcWnd.right  - rcWnd.left),
-                (GLsizei)(rcWnd.bottom - rcWnd.top));
-
-    glUseProgram    (s_fs_prog);
-    glActiveTexture (GL_TEXTURE0);
-    glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
-    if (s_fs_uTex >= 0)
-      glUniform1i (s_fs_uTex, 0);
-    glBindVertexArray (s_fs_vao);
-    glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
-
-    glBindVertexArray  ((GLuint)sv_vao);
-    glBindBuffer       (GL_ELEMENT_ARRAY_BUFFER, (GLuint)sv_elem);
-    glUseProgram       ((GLuint)sv_prog);
-    glActiveTexture    ((GLenum)sv_active);
-    glBindTexture      (GL_TEXTURE_2D, (GLuint)sv_tex2d);
-    glBindFramebuffer  (GL_FRAMEBUFFER, (GLuint)sv_fbo);
-    glViewport         (sv_vp [0], sv_vp [1], sv_vp [2], sv_vp [3]);
-    glColorMask        (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
-    glBlendFuncSeparate ((GLenum)sv_bsrc_rgb, (GLenum)sv_bdst_rgb,
-                         (GLenum)sv_bsrc_a,   (GLenum)sv_bdst_a);
-    if (sv_blend)   glEnable  (GL_BLEND);        else glDisable (GL_BLEND);
-    if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
-    if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
-    if (sv_cull)    glEnable  (GL_CULL_FACE);    else glDisable (GL_CULL_FACE);
-    if (sv_scissor)
+    // PART 2 — NO_BLIT: skip the GPU draw path
+    if (dbgModes.no_blit)
     {
-      glEnable  (GL_SCISSOR_TEST);
-      glScissor (sv_sci [0], sv_sci [1], sv_sci [2], sv_sci [3]);
+      if (log_this_frame)
+        _SidecarLog_GL (L"sidecar_debug_mode: NO_BLIT — skip overlay blit");
     }
     else
-      glDisable (GL_SCISSOR_TEST);
+    {
+      // PART 7 — log first-frame GL state
+      if (frame_num <= 3 && SidecarK_DiagnosticsEnabled ())
+      {
+        GLint dbg_prog = 0; glGetIntegerv (GL_CURRENT_PROGRAM,     &dbg_prog);
+        GLint dbg_vp[4] = {}; glGetIntegerv (GL_VIEWPORT,          dbg_vp);
+        GLint dbg_fbo = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,  &dbg_fbo);
+        GLint dbg_tex = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,   &dbg_tex);
+        const GLboolean dbg_blend = glIsEnabled (GL_BLEND);
+        const GLenum dbg_err = glGetError ();
+        _SidecarLog_GL (L"gl_state: context_current=%p", (void *)hglrc_now);
+        _SidecarLog_GL (L"gl_state: viewport_before=%d,%d,%d,%d",
+                        dbg_vp[0], dbg_vp[1], dbg_vp[2], dbg_vp[3]);
+        _SidecarLog_GL (L"gl_state: framebuffer_before=%d", dbg_fbo);
+        _SidecarLog_GL (L"gl_state: program_before=%d",     dbg_prog);
+        _SidecarLog_GL (L"gl_state: texture_before=%d",     dbg_tex);
+        _SidecarLog_GL (L"gl_state: blend_before=%d",       (int)dbg_blend);
+        if (dbg_err != GL_NO_ERROR)
+          _SidecarLog_GL (L"gl_state: error_before=0x%X",   (unsigned)dbg_err);
+      }
+
+      // PART 12 — wrap blit in SEH crash boundary
+      bool blit_ok = false;
+      __try
+      {
+        // PART 7 — save ALL GL state we mutate
+        GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
+        GLint     sv_active  = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &sv_active);
+        GLint     sv_tex2d   = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &sv_tex2d);
+        GLint     sv_vao     = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &sv_vao);
+        GLint     sv_arr     = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &sv_arr);
+        GLint     sv_elem    = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &sv_elem);
+        GLint     sv_fbo     = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &sv_fbo);
+        GLint     sv_rbo     = 0; glGetIntegerv (GL_RENDERBUFFER_BINDING,         &sv_rbo);
+        GLint     sv_vp [4]  = { }; glGetIntegerv (GL_VIEWPORT,    sv_vp);
+        GLint     sv_sci [4] = { }; glGetIntegerv (GL_SCISSOR_BOX, sv_sci);
+        GLint     sv_bsrc_rgb = 0; glGetIntegerv (GL_BLEND_SRC_RGB,   &sv_bsrc_rgb);
+        GLint     sv_bdst_rgb = 0; glGetIntegerv (GL_BLEND_DST_RGB,   &sv_bdst_rgb);
+        GLint     sv_bsrc_a   = 0; glGetIntegerv (GL_BLEND_SRC_ALPHA, &sv_bsrc_a);
+        GLint     sv_bdst_a   = 0; glGetIntegerv (GL_BLEND_DST_ALPHA, &sv_bdst_a);
+        GLint     sv_unpack   = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &sv_unpack);
+        GLboolean sv_cmask [4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+        glGetBooleanv (GL_COLOR_WRITEMASK,  sv_cmask);
+        GLboolean sv_dmask = GL_TRUE;
+        glGetBooleanv (GL_DEPTH_WRITEMASK,  &sv_dmask);
+        const GLboolean sv_scissor = glIsEnabled (GL_SCISSOR_TEST);
+        const GLboolean sv_blend   = glIsEnabled (GL_BLEND);
+        const GLboolean sv_depth   = glIsEnabled (GL_DEPTH_TEST);
+        const GLboolean sv_stencil = glIsEnabled (GL_STENCIL_TEST);
+        const GLboolean sv_cull    = glIsEnabled (GL_CULL_FACE);
+
+        // PART 4 — before blit
+        if (log_this_frame)
+          _SidecarLog_GL (L"render_hook: before_overlay_blit");
+
+        glBindFramebuffer (GL_FRAMEBUFFER, 0);
+        if (sv_scissor) glDisable (GL_SCISSOR_TEST);
+        if (sv_depth)   glDisable (GL_DEPTH_TEST);
+        if (sv_stencil) glDisable (GL_STENCIL_TEST);
+        if (sv_cull)    glDisable (GL_CULL_FACE);
+        glColorMask         (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDepthMask         (GL_FALSE);
+        glEnable            (GL_BLEND);
+        glBlendFuncSeparate (GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+                             GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glViewport (0, 0, (GLsizei)wnd_w, (GLsizei)wnd_h);
+
+        glUseProgram    (s_fs_prog);
+        glActiveTexture (GL_TEXTURE0);
+        glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
+        if (s_fs_uTex >= 0)
+          glUniform1i (s_fs_uTex, 0);
+        glBindVertexArray (s_fs_vao);
+        glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
+
+        // PART 4 — after blit
+        if (log_this_frame)
+          _SidecarLog_GL (L"render_hook: after_overlay_blit");
+
+        // PART 7 — restore all saved GL state
+        glBindVertexArray   ((GLuint)sv_vao);
+        glBindBuffer        (GL_ARRAY_BUFFER,         (GLuint)sv_arr);
+        glBindBuffer        (GL_ELEMENT_ARRAY_BUFFER, (GLuint)sv_elem);
+        glUseProgram        ((GLuint)sv_prog);
+        glActiveTexture     ((GLenum)sv_active);
+        glBindTexture       (GL_TEXTURE_2D, (GLuint)sv_tex2d);
+        glBindFramebuffer   (GL_FRAMEBUFFER, (GLuint)sv_fbo);
+        glBindRenderbuffer  (GL_RENDERBUFFER, (GLuint)sv_rbo);
+        glViewport          (sv_vp [0], sv_vp [1], sv_vp [2], sv_vp [3]);
+        glColorMask         (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
+        glDepthMask         (sv_dmask);
+        glPixelStorei       (GL_UNPACK_ALIGNMENT, sv_unpack);
+        glBlendFuncSeparate ((GLenum)sv_bsrc_rgb, (GLenum)sv_bdst_rgb,
+                             (GLenum)sv_bsrc_a,   (GLenum)sv_bdst_a);
+        if (sv_blend)   glEnable  (GL_BLEND);        else glDisable (GL_BLEND);
+        if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
+        if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
+        if (sv_cull)    glEnable  (GL_CULL_FACE);    else glDisable (GL_CULL_FACE);
+        if (sv_scissor)
+        {
+          glEnable  (GL_SCISSOR_TEST);
+          glScissor (sv_sci [0], sv_sci [1], sv_sci [2], sv_sci [3]);
+        }
+        else
+          glDisable (GL_SCISSOR_TEST);
+
+        // Check for GL errors after draw + restore (Part 7)
+        const GLenum post_err = glGetError ();
+        if (post_err != GL_NO_ERROR && SidecarK_DiagnosticsEnabled ())
+          _SidecarLog_GL (L"gl_state: error_after=0x%X", (unsigned)post_err);
+
+        blit_ok = true;
+      }
+      __except (EXCEPTION_EXECUTE_HANDLER)
+      {
+        // PART 12 — crash boundary: disable overlay draw, log fault stage
+        InterlockedExchange (&g_overlay_disabled, 1);
+        const DWORD code = GetExceptionCode ();
+        if (SidecarK_DiagnosticsEnabled ())
+        {
+          _SidecarLog_GL (L"sidecar_fault: stage=overlay_blit exception=0x%08X", (unsigned)code);
+          _SidecarLog_GL (L"sidecar_fault: disabling overlay draw for session; passthrough enabled");
+        }
+      }
+      (void)blit_ok;
+    }
   }
 
   // -- SK overlay draw (toast / ImGui) ----------------------------------------
@@ -5999,13 +6218,22 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
         InterlockedCompareExchange (&s_skf1_compositor_fully_warm, 0, 0) != 0)
     {
       tls_gl_in_overlay_submit = true;
-      SK_Overlay_DrawGL ();
+      __try
+      {
+        SK_Overlay_DrawGL ();
+      }
+      __except (EXCEPTION_EXECUTE_HANDLER)
+      {
+        const DWORD code = GetExceptionCode ();
+        if (SidecarK_DiagnosticsEnabled ())
+          _SidecarLog_GL (L"sidecar_fault: stage=sk_overlay_draw exception=0x%08X", (unsigned)code);
+      }
       tls_gl_in_overlay_submit = false;
     }
   }
 
   // Always call the real swap — fail-open.
-  return pfnOriginal (hDC);
+  return CallOriginalOnce ();
 }
 
 //

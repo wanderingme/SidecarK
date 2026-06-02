@@ -1652,24 +1652,59 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
 
     if (done)
     {
+      // PART 3 — command instrumentation: OBS-safe mode flag
+      wchar_t obs_env[8]{};
+      GetEnvironmentVariableW(L"VIRULE_OBS_DETECTED", obs_env, _countof(obs_env));
+      const bool obs_safe_mode = (wcscmp(obs_env, L"1") == 0);
+
+      // PART 2 — NO_COMMAND_EFFECTS debug mode
+      wchar_t no_cmd_env[8]{};
+      GetEnvironmentVariableW(L"VIRULE_SIDECAR_NO_COMMAND_EFFECTS", no_cmd_env, _countof(no_cmd_env));
+      const bool no_cmd_effects = (wcscmp(no_cmd_env, L"1") == 0);
+
+      // PART 3 — log before/after for overlay commands
+      const bool is_overlay_cmd =
+        (_stricmp(cmd, "overlay on")    == 0) ||
+        (_stricmp(cmd, "overlay toast") == 0) ||
+        (_stricmp(cmd, "overlay off")   == 0);
+
+      const uint32_t state_before = (overlayMode != nullptr) ? *overlayMode : 0u;
+      const ULONGLONG cmd_start_ms = GetTickCount64();
+
+      if (is_overlay_cmd)
+      {
+        HostLogAppendf(L"sidecar_cmd: begin cmd='%S'", cmd);
+        HostLogAppendf(L"sidecar_cmd: state_before overlay_enabled=%u",
+                       (unsigned)state_before);
+        if (obs_safe_mode)
+          HostLogAppendf(L"sidecar_cmd: obs_safe_mode=1");
+        if (no_cmd_effects)
+          HostLogAppendf(L"sidecar_debug_mode: NO_COMMAND_EFFECTS — accepting cmd without effect");
+      }
+
+      bool cmd_ok = false;
+
       if (_stricmp(cmd, "overlay on") == 0)
       {
-        if (overlayMode) *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::Interactive);
-        resp = "ok\n"; respLen = 3;
+        if (!no_cmd_effects && overlayMode)
+          *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::Interactive);
+        resp = "ok\n"; respLen = 3; cmd_ok = true;
       }
       else if (_stricmp(cmd, "overlay toast") == 0)
       {
-        if (overlayMode) *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::ToastOnly);
-        resp = "ok\n"; respLen = 3;
+        if (!no_cmd_effects && overlayMode)
+          *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::ToastOnly);
+        resp = "ok\n"; respLen = 3; cmd_ok = true;
       }
       else if (_stricmp(cmd, "overlay off") == 0)
       {
-        if (overlayMode) *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::Off);
-        resp = "ok\n"; respLen = 3;
+        if (!no_cmd_effects && overlayMode)
+          *overlayMode = static_cast<uint32_t>(SidecarKOverlayMode::Off);
+        resp = "ok\n"; respLen = 3; cmd_ok = true;
       }
       else if (_stricmp(cmd, "ping") == 0)
       {
-        resp = "pong\n"; respLen = 5;
+        resp = "pong\n"; respLen = 5; cmd_ok = true;
       }
       else if (_stricmp(cmd, "status") == 0)
       {
@@ -1688,17 +1723,28 @@ static void RunControlPipeServer(const std::wstring& pipeName, volatile uint32_t
           stateStr, (unsigned)pid, (unsigned)overlayModeVal, (unsigned)w, (unsigned)h, (unsigned)fc);
         if (n > 0 && n < (int)sizeof(statusBuf))
           { resp = statusBuf; respLen = (DWORD)n; }
+        cmd_ok = true;
       }
       else if (_stricmp(cmd, "quit") == 0)
       {
-        resp = "ok\n"; respLen = 3;
+        resp = "ok\n"; respLen = 3; cmd_ok = true;
         g_shutdown.store(true);
       }
       else if (_stricmp(cmd, "DLL_READY_IDLE") == 0)
       {
         g_dll_ready_idle.store(true);
         HostLogAppendf(L"dll_ready_idle_received ts=%llu pid=%lu", (unsigned long long)GetTickCount64(), (unsigned long)targetPid);
-        resp = "ok\n"; respLen = 3;
+        resp = "ok\n"; respLen = 3; cmd_ok = true;
+      }
+
+      // PART 3 — log state_after and end for overlay commands
+      if (is_overlay_cmd)
+      {
+        const uint32_t state_after = (overlayMode != nullptr) ? *overlayMode : 0u;
+        const ULONGLONG elapsed_ms = GetTickCount64() - cmd_start_ms;
+        HostLogAppendf(L"sidecar_cmd: state_after overlay_enabled=%u", (unsigned)state_after);
+        HostLogAppendf(L"sidecar_cmd: end cmd='%S' ok=%d elapsed_ms=%llu",
+                       cmd, cmd_ok ? 1 : 0, (unsigned long long)elapsed_ms);
       }
     }
 
@@ -2663,8 +2709,20 @@ int wmain(int argc, wchar_t** argv)
     AppendLogf(logPath, L"remote_inject_start pid=%lu dll=%ls ts=%llu", (unsigned long)targetPid, dllToInject.c_str(), (unsigned long long)GetTickCount64());
     HostLogAppendf(L"remote_inject_start pid=%lu dll=%ls ts=%llu", (unsigned long)targetPid, dllToInject.c_str(), (unsigned long long)GetTickCount64());
 
-    const InjectResult injectResult = InjectDllByCreateRemoteThread(targetPid, dllToInject);
-    const DWORD injectLastError = GetLastError();
+    // PART 2 — VIRULE_SIDECAR_NO_INJECT debug mode: skip actual injection
+    wchar_t no_inject_env[8]{};
+    GetEnvironmentVariableW(L"VIRULE_SIDECAR_NO_INJECT", no_inject_env, _countof(no_inject_env));
+    const bool no_inject_mode = (wcscmp(no_inject_env, L"1") == 0);
+    if (no_inject_mode)
+    {
+      AppendLogf(logPath, L"sidecar_debug_mode: NO_INJECT — skipping injection into pid=%lu", (unsigned long)targetPid);
+      HostLogAppendf(L"sidecar_debug_mode: NO_INJECT — skipping injection into pid=%lu", (unsigned long)targetPid);
+    }
+
+    const InjectResult injectResult = no_inject_mode
+      ? InjectResult::Success
+      : InjectDllByCreateRemoteThread(targetPid, dllToInject);
+    const DWORD injectLastError = no_inject_mode ? 0 : GetLastError();
 
     const int remoteOk = (injectResult == InjectResult::Success || injectResult == InjectResult::AlreadyLoaded) ? 1 : 0;
     AppendLogf(logPath, L"remote_inject_result pid=%lu ok=%d last_error=%lu ts=%llu", (unsigned long)targetPid, remoteOk, (unsigned long)injectLastError, (unsigned long long)GetTickCount64());
