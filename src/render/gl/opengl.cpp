@@ -5695,7 +5695,7 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
 
   // Log overlay-enable state transitions (0→1 or 1→0) unconditionally.
   {
-    static volatile LONG s_prev_overlay = -1;
+    static volatile LONG s_prev_overlay = -1; // -1 = uninitialized; ensures first frame always logs
     const LONG cur = s_fs_overlay_enabled ? 1L : 0L;
     const LONG prev = InterlockedExchange (&s_prev_overlay, cur);
     if (prev != cur)
