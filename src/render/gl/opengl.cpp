@@ -5194,6 +5194,161 @@ SK_GL_TrackHDC (HDC hDC)
 #endif
 }
 
+// File-scope diagnostics helper for the minimal/Virule swap path.
+// Mirrors the _SidecarLog_GL lambda inside SK_GL_ViruleSKF1_SwapBuffers but
+// lives at file scope so it can be called from the SEH helper functions below
+// (which must not contain C++ objects in order to host __try/__except).
+static void SK_GL_ViruleSKF1_LogFn (const wchar_t* fmt, ...)
+{
+  if (! SidecarK_DiagnosticsEnabled ())
+    return;
+  wchar_t path [MAX_PATH] = { };
+  DWORD cch = GetTempPathW (MAX_PATH, path);
+  if (cch == 0 || cch >= MAX_PATH)
+    return;
+  wcscat_s (path, L"SidecarK_Overlay.log");
+  FILE* f = nullptr;
+  _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+  if (f == nullptr)
+    return;
+  SYSTEMTIME st = { };
+  GetLocalTime (&st);
+  fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu [minimal] ",
+            st.wYear, st.wMonth, st.wDay,
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+            (unsigned long)GetCurrentProcessId ());
+  va_list args;
+  va_start (args, fmt);
+  vfwprintf (f, fmt, args);
+  va_end (args);
+  fwprintf (f, L"\n");
+  fclose (f);
+}
+
+// SEH helper: performs the overlay blit inside a __try/__except boundary.
+// Extracted from SK_GL_ViruleSKF1_SwapBuffers so that the outer function
+// (which contains C++ lambdas and std::vector) can satisfy MSVC's requirement
+// that functions using __try must not require object unwinding (C2712).
+// All parameters are POD types; no C++ objects are constructed here.
+static bool SK_GL_ViruleSKF1_DoBlit_SEH (
+  GLuint prog, GLuint tex, GLint uTex, GLuint vao,
+  GLsizei wnd_w, GLsizei wnd_h, bool log_this_frame)
+{
+  bool blit_ok = false;
+  __try
+  {
+    // PART 7 — save ALL GL state we mutate
+    GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
+    GLint     sv_active  = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &sv_active);
+    GLint     sv_tex2d   = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &sv_tex2d);
+    GLint     sv_vao     = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &sv_vao);
+    GLint     sv_arr     = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &sv_arr);
+    GLint     sv_elem    = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &sv_elem);
+    GLint     sv_fbo     = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &sv_fbo);
+    GLint     sv_vp [4]  = { }; glGetIntegerv (GL_VIEWPORT,    sv_vp);
+    GLint     sv_sci [4] = { }; glGetIntegerv (GL_SCISSOR_BOX, sv_sci);
+    GLint     sv_bsrc_rgb = 0; glGetIntegerv (GL_BLEND_SRC_RGB,   &sv_bsrc_rgb);
+    GLint     sv_bdst_rgb = 0; glGetIntegerv (GL_BLEND_DST_RGB,   &sv_bdst_rgb);
+    GLint     sv_bsrc_a   = 0; glGetIntegerv (GL_BLEND_SRC_ALPHA, &sv_bsrc_a);
+    GLint     sv_bdst_a   = 0; glGetIntegerv (GL_BLEND_DST_ALPHA, &sv_bdst_a);
+    GLint     sv_unpack   = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &sv_unpack);
+    GLboolean sv_cmask [4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+    glGetBooleanv (GL_COLOR_WRITEMASK,  sv_cmask);
+    GLboolean sv_dmask = GL_TRUE;
+    glGetBooleanv (GL_DEPTH_WRITEMASK,  &sv_dmask);
+    const GLboolean sv_scissor = glIsEnabled (GL_SCISSOR_TEST);
+    const GLboolean sv_blend   = glIsEnabled (GL_BLEND);
+    const GLboolean sv_depth   = glIsEnabled (GL_DEPTH_TEST);
+    const GLboolean sv_stencil = glIsEnabled (GL_STENCIL_TEST);
+    const GLboolean sv_cull    = glIsEnabled (GL_CULL_FACE);
+
+    // PART 4 — before blit
+    if (log_this_frame)
+      SK_GL_ViruleSKF1_LogFn (L"render_hook: before_overlay_blit");
+
+    glBindFramebuffer (GL_FRAMEBUFFER, 0);
+    if (sv_scissor) glDisable (GL_SCISSOR_TEST);
+    if (sv_depth)   glDisable (GL_DEPTH_TEST);
+    if (sv_stencil) glDisable (GL_STENCIL_TEST);
+    if (sv_cull)    glDisable (GL_CULL_FACE);
+    glColorMask         (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthMask         (GL_FALSE);
+    glEnable            (GL_BLEND);
+    glBlendFuncSeparate (GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+                         GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glViewport (0, 0, wnd_w, wnd_h);
+
+    glUseProgram    (prog);
+    glActiveTexture (GL_TEXTURE0);
+    glBindTexture   (GL_TEXTURE_2D, tex);
+    if (uTex >= 0)
+      glUniform1i (uTex, 0);
+    glBindVertexArray (vao);
+    glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
+
+    // PART 4 — after blit
+    if (log_this_frame)
+      SK_GL_ViruleSKF1_LogFn (L"render_hook: after_overlay_blit");
+
+    // PART 7 — restore all saved GL state
+    glBindVertexArray   ((GLuint)sv_vao);
+    glBindBuffer        (GL_ARRAY_BUFFER,         (GLuint)sv_arr);
+    glBindBuffer        (GL_ELEMENT_ARRAY_BUFFER, (GLuint)sv_elem);
+    glUseProgram        ((GLuint)sv_prog);
+    glActiveTexture     ((GLenum)sv_active);
+    glBindTexture       (GL_TEXTURE_2D, (GLuint)sv_tex2d);
+    glBindFramebuffer   (GL_FRAMEBUFFER, (GLuint)sv_fbo);
+    glViewport          (sv_vp [0], sv_vp [1], sv_vp [2], sv_vp [3]);
+    glColorMask         (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
+    glDepthMask         (sv_dmask);
+    glPixelStorei       (GL_UNPACK_ALIGNMENT, sv_unpack);
+    glBlendFuncSeparate ((GLenum)sv_bsrc_rgb, (GLenum)sv_bdst_rgb,
+                         (GLenum)sv_bsrc_a,   (GLenum)sv_bdst_a);
+    if (sv_blend)   glEnable  (GL_BLEND);        else glDisable (GL_BLEND);
+    if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
+    if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
+    if (sv_cull)    glEnable  (GL_CULL_FACE);    else glDisable (GL_CULL_FACE);
+    if (sv_scissor)
+    {
+      glEnable  (GL_SCISSOR_TEST);
+      glScissor (sv_sci [0], sv_sci [1], sv_sci [2], sv_sci [3]);
+    }
+    else
+      glDisable (GL_SCISSOR_TEST);
+
+    // Check for GL errors after draw + restore (Part 7)
+    const GLenum post_err = glGetError ();
+    if (post_err != GL_NO_ERROR)
+      SK_GL_ViruleSKF1_LogFn (L"gl_state: error_after=0x%X", (unsigned)post_err);
+
+    blit_ok = true;
+  }
+  __except (EXCEPTION_EXECUTE_HANDLER)
+  {
+    // PART 12 — crash boundary: disable overlay draw, log fault stage
+    InterlockedExchange (&g_overlay_disabled, 1);
+    const DWORD code = GetExceptionCode ();
+    SK_GL_ViruleSKF1_LogFn (L"sidecar_fault: stage=overlay_blit exception=0x%08X", (unsigned)code);
+    SK_GL_ViruleSKF1_LogFn (L"sidecar_fault: disabling overlay draw for session; passthrough enabled");
+  }
+  return blit_ok;
+}
+
+// SEH helper: calls SK_Overlay_DrawGL inside a __try/__except boundary.
+// Extracted for the same C2712 reason as SK_GL_ViruleSKF1_DoBlit_SEH above.
+static void SK_GL_ViruleSKF1_DoOverlay_SEH ()
+{
+  __try
+  {
+    SK_Overlay_DrawGL ();
+  }
+  __except (EXCEPTION_EXECUTE_HANDLER)
+  {
+    const DWORD code = GetExceptionCode ();
+    SK_GL_ViruleSKF1_LogFn (L"sidecar_fault: stage=sk_overlay_draw exception=0x%08X", (unsigned)code);
+  }
+}
+
 // Minimal SidecarK/Virule-managed OpenGL swap helper.
 //
 // Called instead of the full SK_GL_SwapBuffers path when the process is
@@ -5526,6 +5681,33 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
       _SidecarLog_GL (L"sidecar_obs_detect: compat_mode=obs_game_capture_safe");
   }
 
+  // Helper lambda: parse the SKF1 header.  Requires s_fs_base != nullptr.
+  auto skf1_parse = [&](uint32_t& out_data_off, uint32_t& out_pix_fmt,
+                         uint32_t& out_width,    uint32_t& out_height,
+                         uint32_t& out_stride) -> bool
+  {
+    if (s_fs_base == nullptr)
+      return false;
+    const uint8_t* b = s_fs_base;
+    if (*(const uint32_t *)(b + 0x00) != 0x31464B53u)  // 'SKF1'
+      return false;
+    if (*(const uint32_t *)(b + 0x04) != 1u)
+      return false;
+    const uint32_t hdr_bytes = *(const uint32_t *)(b + 0x08);
+    out_data_off = *(const uint32_t *)(b + 0x0C);
+    out_pix_fmt  = *(const uint32_t *)(b + 0x10);
+    out_width    = *(const uint32_t *)(b + 0x14);
+    out_height   = *(const uint32_t *)(b + 0x18);
+    out_stride   = *(const uint32_t *)(b + 0x1C);
+    const uint64_t px_bytes = (uint64_t)out_stride * (uint64_t)out_height;
+    return ( hdr_bytes == 0x20u && out_data_off == 0x24u &&
+             out_pix_fmt == 1u  &&
+             out_width  > 0u   && out_height > 0u &&
+             out_width  <= c_skf1_max_dim && out_height <= c_skf1_max_dim &&
+             out_stride == (uint32_t)((uint64_t)out_width * 4u) &&
+             ((uint64_t)out_data_off + px_bytes) <= (uint64_t)s_fs_map_bytes );
+  };
+
   // PART 2 — NO_SHARED_MEMORY_READ: skip all shared-memory read and warm phases.
   if (dbgModes.no_shared_memory_read)
   {
@@ -5561,33 +5743,6 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
       }
     }
   }
-
-  // Helper lambda: parse the SKF1 header.  Requires s_fs_base != nullptr.
-  auto skf1_parse = [&](uint32_t& out_data_off, uint32_t& out_pix_fmt,
-                         uint32_t& out_width,    uint32_t& out_height,
-                         uint32_t& out_stride) -> bool
-  {
-    if (s_fs_base == nullptr)
-      return false;
-    const uint8_t* b = s_fs_base;
-    if (*(const uint32_t *)(b + 0x00) != 0x31464B53u)  // 'SKF1'
-      return false;
-    if (*(const uint32_t *)(b + 0x04) != 1u)
-      return false;
-    const uint32_t hdr_bytes = *(const uint32_t *)(b + 0x08);
-    out_data_off = *(const uint32_t *)(b + 0x0C);
-    out_pix_fmt  = *(const uint32_t *)(b + 0x10);
-    out_width    = *(const uint32_t *)(b + 0x14);
-    out_height   = *(const uint32_t *)(b + 0x18);
-    out_stride   = *(const uint32_t *)(b + 0x1C);
-    const uint64_t px_bytes = (uint64_t)out_stride * (uint64_t)out_height;
-    return ( hdr_bytes == 0x20u && out_data_off == 0x24u &&
-             out_pix_fmt == 1u  &&
-             out_width  > 0u   && out_height > 0u &&
-             out_width  <= c_skf1_max_dim && out_height <= c_skf1_max_dim &&
-             out_stride == (uint32_t)((uint64_t)out_width * 4u) &&
-             ((uint64_t)out_data_off + px_bytes) <= (uint64_t)s_fs_map_bytes );
-  };
 
   // -- Stability observation (warm==0 only) -----------------------------------
   if (s_fs_warm == 0 && s_fs_base != nullptr)
@@ -6101,107 +6256,8 @@ do_overlay_draw:
       }
 
       // PART 12 — wrap blit in SEH crash boundary
-      bool blit_ok = false;
-      __try
-      {
-        // PART 7 — save ALL GL state we mutate
-        GLint     sv_prog    = 0; glGetIntegerv (GL_CURRENT_PROGRAM,              &sv_prog);
-        GLint     sv_active  = 0; glGetIntegerv (GL_ACTIVE_TEXTURE,               &sv_active);
-        GLint     sv_tex2d   = 0; glGetIntegerv (GL_TEXTURE_BINDING_2D,           &sv_tex2d);
-        GLint     sv_vao     = 0; glGetIntegerv (GL_VERTEX_ARRAY_BINDING,         &sv_vao);
-        GLint     sv_arr     = 0; glGetIntegerv (GL_ARRAY_BUFFER_BINDING,         &sv_arr);
-        GLint     sv_elem    = 0; glGetIntegerv (GL_ELEMENT_ARRAY_BUFFER_BINDING, &sv_elem);
-        GLint     sv_fbo     = 0; glGetIntegerv (GL_FRAMEBUFFER_BINDING,          &sv_fbo);
-        GLint     sv_vp [4]  = { }; glGetIntegerv (GL_VIEWPORT,    sv_vp);
-        GLint     sv_sci [4] = { }; glGetIntegerv (GL_SCISSOR_BOX, sv_sci);
-        GLint     sv_bsrc_rgb = 0; glGetIntegerv (GL_BLEND_SRC_RGB,   &sv_bsrc_rgb);
-        GLint     sv_bdst_rgb = 0; glGetIntegerv (GL_BLEND_DST_RGB,   &sv_bdst_rgb);
-        GLint     sv_bsrc_a   = 0; glGetIntegerv (GL_BLEND_SRC_ALPHA, &sv_bsrc_a);
-        GLint     sv_bdst_a   = 0; glGetIntegerv (GL_BLEND_DST_ALPHA, &sv_bdst_a);
-        GLint     sv_unpack   = 0; glGetIntegerv (GL_UNPACK_ALIGNMENT,            &sv_unpack);
-        GLboolean sv_cmask [4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
-        glGetBooleanv (GL_COLOR_WRITEMASK,  sv_cmask);
-        GLboolean sv_dmask = GL_TRUE;
-        glGetBooleanv (GL_DEPTH_WRITEMASK,  &sv_dmask);
-        const GLboolean sv_scissor = glIsEnabled (GL_SCISSOR_TEST);
-        const GLboolean sv_blend   = glIsEnabled (GL_BLEND);
-        const GLboolean sv_depth   = glIsEnabled (GL_DEPTH_TEST);
-        const GLboolean sv_stencil = glIsEnabled (GL_STENCIL_TEST);
-        const GLboolean sv_cull    = glIsEnabled (GL_CULL_FACE);
-
-        // PART 4 — before blit
-        if (log_this_frame)
-          _SidecarLog_GL (L"render_hook: before_overlay_blit");
-
-        glBindFramebuffer (GL_FRAMEBUFFER, 0);
-        if (sv_scissor) glDisable (GL_SCISSOR_TEST);
-        if (sv_depth)   glDisable (GL_DEPTH_TEST);
-        if (sv_stencil) glDisable (GL_STENCIL_TEST);
-        if (sv_cull)    glDisable (GL_CULL_FACE);
-        glColorMask         (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glDepthMask         (GL_FALSE);
-        glEnable            (GL_BLEND);
-        glBlendFuncSeparate (GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
-                             GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        glViewport (0, 0, (GLsizei)wnd_w, (GLsizei)wnd_h);
-
-        glUseProgram    (s_fs_prog);
-        glActiveTexture (GL_TEXTURE0);
-        glBindTexture   (GL_TEXTURE_2D, s_fs_tex);
-        if (s_fs_uTex >= 0)
-          glUniform1i (s_fs_uTex, 0);
-        glBindVertexArray (s_fs_vao);
-        glDrawElements    (GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (void *)0);
-
-        // PART 4 — after blit
-        if (log_this_frame)
-          _SidecarLog_GL (L"render_hook: after_overlay_blit");
-
-        // PART 7 — restore all saved GL state
-        glBindVertexArray   ((GLuint)sv_vao);
-        glBindBuffer        (GL_ARRAY_BUFFER,         (GLuint)sv_arr);
-        glBindBuffer        (GL_ELEMENT_ARRAY_BUFFER, (GLuint)sv_elem);
-        glUseProgram        ((GLuint)sv_prog);
-        glActiveTexture     ((GLenum)sv_active);
-        glBindTexture       (GL_TEXTURE_2D, (GLuint)sv_tex2d);
-        glBindFramebuffer   (GL_FRAMEBUFFER, (GLuint)sv_fbo);
-        glViewport          (sv_vp [0], sv_vp [1], sv_vp [2], sv_vp [3]);
-        glColorMask         (sv_cmask [0], sv_cmask [1], sv_cmask [2], sv_cmask [3]);
-        glDepthMask         (sv_dmask);
-        glPixelStorei       (GL_UNPACK_ALIGNMENT, sv_unpack);
-        glBlendFuncSeparate ((GLenum)sv_bsrc_rgb, (GLenum)sv_bdst_rgb,
-                             (GLenum)sv_bsrc_a,   (GLenum)sv_bdst_a);
-        if (sv_blend)   glEnable  (GL_BLEND);        else glDisable (GL_BLEND);
-        if (sv_depth)   glEnable  (GL_DEPTH_TEST);   else glDisable (GL_DEPTH_TEST);
-        if (sv_stencil) glEnable  (GL_STENCIL_TEST); else glDisable (GL_STENCIL_TEST);
-        if (sv_cull)    glEnable  (GL_CULL_FACE);    else glDisable (GL_CULL_FACE);
-        if (sv_scissor)
-        {
-          glEnable  (GL_SCISSOR_TEST);
-          glScissor (sv_sci [0], sv_sci [1], sv_sci [2], sv_sci [3]);
-        }
-        else
-          glDisable (GL_SCISSOR_TEST);
-
-        // Check for GL errors after draw + restore (Part 7)
-        const GLenum post_err = glGetError ();
-        if (post_err != GL_NO_ERROR && SidecarK_DiagnosticsEnabled ())
-          _SidecarLog_GL (L"gl_state: error_after=0x%X", (unsigned)post_err);
-
-        blit_ok = true;
-      }
-      __except (EXCEPTION_EXECUTE_HANDLER)
-      {
-        // PART 12 — crash boundary: disable overlay draw, log fault stage
-        InterlockedExchange (&g_overlay_disabled, 1);
-        const DWORD code = GetExceptionCode ();
-        if (SidecarK_DiagnosticsEnabled ())
-        {
-          _SidecarLog_GL (L"sidecar_fault: stage=overlay_blit exception=0x%08X", (unsigned)code);
-          _SidecarLog_GL (L"sidecar_fault: disabling overlay draw for session; passthrough enabled");
-        }
-      }
-      (void)blit_ok;
+      SK_GL_ViruleSKF1_DoBlit_SEH (s_fs_prog, s_fs_tex, s_fs_uTex, s_fs_vao,
+                                   (GLsizei)wnd_w, (GLsizei)wnd_h, log_this_frame);
     }
   }
 
@@ -6216,16 +6272,7 @@ do_overlay_draw:
         InterlockedCompareExchange (&s_skf1_compositor_fully_warm, 0, 0) != 0)
     {
       tls_gl_in_overlay_submit = true;
-      __try
-      {
-        SK_Overlay_DrawGL ();
-      }
-      __except (EXCEPTION_EXECUTE_HANDLER)
-      {
-        const DWORD code = GetExceptionCode ();
-        if (SidecarK_DiagnosticsEnabled ())
-          _SidecarLog_GL (L"sidecar_fault: stage=sk_overlay_draw exception=0x%08X", (unsigned)code);
-      }
+      SK_GL_ViruleSKF1_DoOverlay_SEH ();
       tls_gl_in_overlay_submit = false;
     }
   }
