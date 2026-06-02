@@ -133,6 +133,101 @@ bool SidecarK_DiagnosticsEnabled ()
   return ok;
 }
 
+// ---------------------------------------------------------------------------
+// SidecarK_InjectLog — always-on crash-surviving injected-process render log.
+//
+// Writes to %LOCALAPPDATA%\Virule\logs\sidecark_<pid>.log unconditionally,
+// without requiring the SidecarK_Diagnostics_Enable shared-memory token.
+// Uses Win32 CreateFile/WriteFile with FILE_FLAG_WRITE_THROUGH so that every
+// entry is flushed to the OS write cache immediately, surviving hard crashes.
+// Output is UTF-8 plain text, one line per call.
+//
+// Thread safety: the log path is computed once on the first call.  Because the
+// computed value is deterministic (based on the fixed %LOCALAPPDATA% env var
+// and the immutable process PID), a benign write-write race on the very first
+// simultaneous call is acceptable — both threads produce the same path.
+// ---------------------------------------------------------------------------
+void SidecarK_InjectLog (const wchar_t* fmt, ...)
+{
+  if (fmt == nullptr) return;
+
+  // Build and cache the log file path on the first call.
+  static wchar_t s_log_path [MAX_PATH + 1] = { };
+  if (s_log_path [0] == L'\0')
+  {
+    wchar_t base [MAX_PATH] = { };
+    DWORD   cch = GetEnvironmentVariableW (L"LOCALAPPDATA", base, (DWORD)_countof (base));
+    if (cch == 0 || cch >= (DWORD)_countof (base))
+    {
+      // Fallback: use %TEMP% when %LOCALAPPDATA% is unavailable.
+      cch = GetTempPathW ((DWORD)_countof (base), base);
+      if (cch > 0 && base [cch - 1] == L'\\')
+        base [cch - 1] = L'\0';  // strip trailing backslash for _snwprintf_s
+    }
+
+    if (base [0] != L'\0')
+    {
+      wchar_t dir1 [MAX_PATH] = { }, dir2 [MAX_PATH] = { };
+      _snwprintf_s (dir1, _TRUNCATE, L"%ls\\Virule",       base);
+      _snwprintf_s (dir2, _TRUNCATE, L"%ls\\Virule\\logs", base);
+      CreateDirectoryW (dir1, nullptr);  // ignore ERROR_ALREADY_EXISTS
+      CreateDirectoryW (dir2, nullptr);  // ignore ERROR_ALREADY_EXISTS
+      _snwprintf_s (s_log_path, _TRUNCATE,
+                    L"%ls\\Virule\\logs\\sidecark_%lu.log",
+                    base, (unsigned long)GetCurrentProcessId ());
+    }
+  }
+
+  if (s_log_path [0] == L'\0')
+    return;
+
+  // Format the caller's message.
+  wchar_t msg [2048] = { };
+  va_list ap;
+  va_start (ap, fmt);
+  _vsnwprintf_s (msg, _TRUNCATE, fmt, ap);
+  va_end (ap);
+
+  // Compose the log line: timestamp pid tid <message>
+  SYSTEMTIME st = { };
+  GetLocalTime (&st);
+
+  wchar_t line [2304] = { };
+  const int line_cch = _snwprintf_s (line, _TRUNCATE,
+    L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu tid=%lu %ls\n",
+    st.wYear, st.wMonth, st.wDay,
+    st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+    (unsigned long)GetCurrentProcessId (),
+    (unsigned long)GetCurrentThreadId  (),
+    msg);
+  if (line_cch <= 0)
+    return;
+
+  // Convert to UTF-8 for a human-readable plain-text file.
+  char utf8 [4608] = { };
+  const int nb = WideCharToMultiByte (CP_UTF8, 0, line, line_cch,
+                                      utf8, (int)(_countof (utf8) - 1),
+                                      nullptr, nullptr);
+  if (nb <= 0)
+    return;
+
+  HANDLE hFile = CreateFileW (
+    s_log_path,
+    FILE_APPEND_DATA,
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    nullptr,
+    OPEN_ALWAYS,
+    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+    nullptr);
+
+  if (hFile == INVALID_HANDLE_VALUE)
+    return;
+
+  DWORD written = 0;
+  WriteFile (hFile, utf8, (DWORD)nb, &written, nullptr);
+  CloseHandle (hFile);
+}
+
 #pragma comment (lib, "Aux_ulib.lib")
 
 char _RTL_CONSTANT_STRING_type_check (const char    *s);

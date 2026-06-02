@@ -26,6 +26,10 @@
 extern bool SidecarK_DiagnosticsEnabled ();
 #endif
 
+// Always-on crash-surviving injected-process log (src/SpecialK.cpp).
+// No diagnostics token required; writes %LOCALAPPDATA%\Virule\logs\sidecark_<pid>.log.
+extern void SidecarK_InjectLog (const wchar_t* fmt, ...);
+
 #pragma warning ( disable : 4273 )
 
 #define __SK_SUBSYSTEM__ L"  OpenGL  "
@@ -99,13 +103,18 @@ thread_local bool tls_gl_in_overlay_submit  = false;
 // the same SidecarK_Overlay.log sink as the rest of the GL code.
 static void SK_GL_OBSCompat_LogFn (const wchar_t* fmt, ...)
 {
-  if (! SidecarK_DiagnosticsEnabled ())
-    return;
   wchar_t buf [512] = { };
   va_list ap;
   va_start (ap, fmt);
   _vsnwprintf_s (buf, _TRUNCATE, fmt, ap);
   va_end (ap);
+
+  // Always-on: write to the dedicated injected-process crash-surviving log.
+  SidecarK_InjectLog (L"[obs] %ls", buf);
+
+  // Gated: also write to the legacy diagnostics log when enabled.
+  if (! SidecarK_DiagnosticsEnabled ())
+    return;
 
   wchar_t path [MAX_PATH] = { };
   DWORD cch = GetTempPathW (MAX_PATH, path);
@@ -5200,6 +5209,18 @@ SK_GL_TrackHDC (HDC hDC)
 // (which must not contain C++ objects in order to host __try/__except).
 static void SK_GL_ViruleSKF1_LogFn (const wchar_t* fmt, ...)
 {
+  wchar_t buf [512] = { };
+  va_list ap;
+  va_start (ap, fmt);
+  _vsnwprintf_s (buf, _TRUNCATE, fmt, ap);
+  va_end (ap);
+
+  // Always-on: write to the dedicated injected-process crash-surviving log.
+  // This is especially important for sidecar_fault: entries that must survive
+  // hard crashes and process termination.
+  SidecarK_InjectLog (L"[minimal] %ls", buf);
+
+  // Gated: also write to the legacy diagnostics log when enabled.
   if (! SidecarK_DiagnosticsEnabled ())
     return;
   wchar_t path [MAX_PATH] = { };
@@ -5217,10 +5238,7 @@ static void SK_GL_ViruleSKF1_LogFn (const wchar_t* fmt, ...)
             st.wYear, st.wMonth, st.wDay,
             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
             (unsigned long)GetCurrentProcessId ());
-  va_list args;
-  va_start (args, fmt);
-  vfwprintf (f, fmt, args);
-  va_end (args);
+  fwprintf (f, L"%ls", buf);
   fwprintf (f, L"\n");
   fclose (f);
 }
@@ -5594,6 +5612,8 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
     InterlockedExchange (&s_skf1_compositor_fully_warm, 0);
     const HGLRC hglrc_old = s_fs_owner_hglrc;
     s_fs_owner_hglrc = hglrc_now;
+    SidecarK_InjectLog (L"[SKF1-WARM] HGLRC changed (%p->%p) — native GL resources reset",
+                        (void *)hglrc_old, (void *)hglrc_now);
     _SidecarLog_GL (L"[SKF1-WARM] HGLRC changed (%p->%p) — native GL resources reset",
                     (void *)hglrc_old, (void *)hglrc_now);
   }
@@ -5647,6 +5667,9 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
               s_fs_ctrlMap        = hCtrl;
               s_fs_ctrlBase       = ctrlBase;
               s_fs_overlayEnabled = reinterpret_cast<volatile LONG *>(ctrlBase + 0x08);
+              SidecarK_InjectLog (L"ctrl_plane: open ok pid=%lu region_bytes=%zu overlay_enabled=%d",
+                                  (unsigned long)pidNow, (size_t)ctrlRegionSize,
+                                  (int)(*s_fs_overlayEnabled));
             }
             else
             {
@@ -5670,15 +5693,34 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
   if (! s_fs_overlay_enabled)
     s_fs_has_frame = false;
 
-  // PART 4 — first render hook with OBS compat mode active
-  if (frame_num == 1 && SidecarK_DiagnosticsEnabled ())
+  // Log overlay-enable state transitions (0→1 or 1→0) unconditionally.
   {
-    _SidecarLog_GL (L"render_hook: enter api=OpenGL frame=1 thread=%lu obs_detected=%d obs_safe=%d",
-                    (unsigned long)GetCurrentThreadId (),
-                    obsInfo.detected ? 1 : 0,
-                    (obsInfo.detected && draw_stable) ? 1 : 0);
-    if (obsInfo.detected)
-      _SidecarLog_GL (L"sidecar_obs_detect: compat_mode=obs_game_capture_safe");
+    static volatile LONG s_prev_overlay = -1;
+    const LONG cur = s_fs_overlay_enabled ? 1L : 0L;
+    const LONG prev = InterlockedExchange (&s_prev_overlay, cur);
+    if (prev != cur)
+      SidecarK_InjectLog (L"overlay_state: enabled=%d warm=%d has_frame=%d frame=%ld",
+                          (int)cur, s_fs_warm, s_fs_has_frame ? 1 : 0, (long)frame_num);
+  }
+
+  // PART 4 — first render hook: unconditional injected-process log entry,
+  // plus gated write to the legacy diagnostics log.
+  if (frame_num == 1)
+  {
+    SidecarK_InjectLog (L"render_hook: enter api=OpenGL frame=1 thread=%lu obs_detected=%d obs_safe=%d ctrl_open=%d",
+                        (unsigned long)GetCurrentThreadId (),
+                        obsInfo.detected ? 1 : 0,
+                        (obsInfo.detected && draw_stable) ? 1 : 0,
+                        s_fs_overlayEnabled != nullptr ? 1 : 0);
+    if (SidecarK_DiagnosticsEnabled ())
+    {
+      _SidecarLog_GL (L"render_hook: enter api=OpenGL frame=1 thread=%lu obs_detected=%d obs_safe=%d",
+                      (unsigned long)GetCurrentThreadId (),
+                      obsInfo.detected ? 1 : 0,
+                      (obsInfo.detected && draw_stable) ? 1 : 0);
+      if (obsInfo.detected)
+        _SidecarLog_GL (L"sidecar_obs_detect: compat_mode=obs_game_capture_safe");
+    }
   }
 
   // Helper lambda: parse the SKF1 header.  Requires s_fs_base != nullptr.
@@ -5742,6 +5784,14 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
         s_fs_map_bytes = 0;
       }
     }
+  }
+
+  // Log first successful SKF1 map open (one-shot).
+  {
+    static volatile LONG s_skf1_map_logged = 0;
+    if (s_fs_base != nullptr && InterlockedCompareExchange (&s_skf1_map_logged, 1, 0) == 0)
+      SidecarK_InjectLog (L"skf1_map: open ok map_bytes=%zu map_name=%ls",
+                          (size_t)s_fs_map_bytes, map_name);
   }
 
   // -- Stability observation (warm==0 only) -----------------------------------
@@ -5841,6 +5891,8 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
       if (pa_tex_ok)
       {
         s_fs_warm = 1;
+        SidecarK_InjectLog (L"[SKF1-WARM] phase 0a->1: tex storage ready (%ux%u)",
+                            pa_width, pa_height);
         _SidecarLog_GL (L"[SKF1-WARM] phase 0a->1: tex storage ready (%ux%u)",
                         pa_width, pa_height);
       }
@@ -5970,6 +6022,7 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
         {
           s_fs_uTex = glGetUniformLocation (s_fs_prog, "uTex");
           s_fs_warm = 4;
+          SidecarK_InjectLog (L"[SKF1-WARM] phase 0b-link->4: shader ready");
           _SidecarLog_GL (L"[SKF1-WARM] phase 0b-link->4: shader ready");
         }
       }
@@ -6037,6 +6090,7 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
         glBindBuffer (GL_ARRAY_BUFFER,         (GLuint)pc_sv_arr);
         glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, (GLuint)pc_sv_elem);
         s_fs_warm = 5;
+        SidecarK_InjectLog (L"[SKF1-WARM] phase 0c->5: geometry ready");
         _SidecarLog_GL (L"[SKF1-WARM] phase 0c->5: geometry ready");
       }
     }
@@ -6106,6 +6160,7 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
               glPixelStorei   (GL_UNPACK_ALIGNMENT,  pl_sv_unpack);
               glPixelStorei   (GL_UNPACK_ROW_LENGTH, pl_sv_rowlen);
 
+              SidecarK_InjectLog (L"[SKF1-WARM] phase 1->6: first frame uploaded (ctr=%u)", c1);
               _SidecarLog_GL (L"[SKF1-WARM] phase 1->6: first frame uploaded (ctr=%u)", c1);
 
               if (! s_fs_imgui_prewarmed)
@@ -6255,9 +6310,15 @@ do_overlay_draw:
           _SidecarLog_GL (L"gl_state: error_before=0x%X",   (unsigned)dbg_err);
       }
 
-      // PART 12 — wrap blit in SEH crash boundary
-      SK_GL_ViruleSKF1_DoBlit_SEH (s_fs_prog, s_fs_tex, s_fs_uTex, s_fs_vao,
-                                   (GLsizei)wnd_w, (GLsizei)wnd_h, log_this_frame);
+      // PART 12 — wrap blit in SEH crash boundary; log entry/exit unconditionally
+      // so that we know whether the crash happened inside or after the blit.
+      SidecarK_InjectLog (L"blit: enter tex=%u prog=%u vao=%u wnd=%ux%u frame=%ld",
+                          s_fs_tex, s_fs_prog, s_fs_vao,
+                          (unsigned)wnd_w, (unsigned)wnd_h, (long)frame_num);
+      const bool blit_ok =
+        SK_GL_ViruleSKF1_DoBlit_SEH (s_fs_prog, s_fs_tex, s_fs_uTex, s_fs_vao,
+                                     (GLsizei)wnd_w, (GLsizei)wnd_h, log_this_frame);
+      SidecarK_InjectLog (L"blit: leave ok=%d frame=%ld", blit_ok ? 1 : 0, (long)frame_num);
     }
   }
 
