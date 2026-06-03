@@ -134,6 +134,9 @@ int
 WINAPI
 ShowCursor_Detour (BOOL bShow)
 {
+  if (! SKC_IsInputCaptureEnabled ())
+    return ShowCursor_Original (bShow);
+
   if (! config.input.ui.allow_show_cursor)
     return ShowCursor_Original (bShow);
 
@@ -1014,6 +1017,9 @@ SetCursor_Detour (
 {
   SK_LOG_FIRST_CALL
 
+  if (! SKC_IsInputCaptureEnabled ())
+    return SetCursor_Original (hCursor);
+
   if (! config.input.ui.allow_set_cursor)
   {
     return
@@ -1192,6 +1198,11 @@ GetCursorPos_Detour (LPPOINT lpPoint)
     return TRUE;
   }
 
+  // Overlay closed: pass through exactly; track position for overlay-ON transition.
+  BOOL bRet = SK_GetCursorPos (lpPoint);
+  if (bRet) s_GameSetCursorPos = *lpPoint;
+  return bRet;
+
   //
   // Allow games running as a background window with Continue Rendering enabled
   //   to see the real cursor position as long as there is no window on top of it...
@@ -1369,6 +1380,9 @@ SetCursorPos_Detour (_In_ int x, _In_ int y)
   // pin/lock the cursor to a position.
   if (SKC_IsInputCaptureEnabled ())
     return TRUE;
+
+  // Overlay closed: pass through exactly.
+  return SK_SetCursorPos (x, y);
 
   // Don't let the game continue moving the cursor while
   //   Alt+Tabbed out

@@ -174,7 +174,7 @@ SK_Proxy_MouseProc   (
     }
 
     bool bCaptureMouse =
-      SK_ImGui_WantMouseCapture ();
+      SKC_IsInputCaptureEnabled () && SK_ImGui_WantMouseCapture ();
 
     // The performance of doing this on every mouse message hasn't been tested,
     //   I'd really prefer not to let this go out into the wild before it only
@@ -332,7 +332,7 @@ SK_Proxy_LLMouseProc   (
       }
     }
 
-    if (SK_ImGui_WantMouseCapture ())
+    if (SKC_IsInputCaptureEnabled () && SK_ImGui_WantMouseCapture ())
     {
       SK_WinHook_Backend->markHidden (sk_input_dev_type::Mouse);
 
@@ -411,7 +411,7 @@ SK_Proxy_KeyboardProc (
     }
 
     bool hide =
-      SK_ImGui_WantKeyboardCapture ();
+      SKC_IsInputCaptureEnabled () && SK_ImGui_WantKeyboardCapture ();
 
     if (hide)
     {
@@ -539,7 +539,7 @@ SK_Proxy_LLKeyboardProc (
     }
 
     bool hide =
-      SK_ImGui_WantKeyboardCapture ();
+      SKC_IsInputCaptureEnabled () && SK_ImGui_WantKeyboardCapture ();
 
     if (hide)
     {

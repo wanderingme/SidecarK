@@ -1876,6 +1876,9 @@ ClipCursor_Detour (const RECT *lpRect)
   if (SKC_IsInputCaptureEnabledCached ())
     return SK_ClipCursor (nullptr);
 
+  // Overlay closed: pass through exactly so the game's cursor confinement is unaffected.
+  return ClipCursor_Original (lpRect);
+
   SK_LOGi4 (L"ClipCursor (...) - Frame=%d", sk::narrow_cast <int> (SK_GetFramesDrawn ()));
 
   RECT _rect = { };

@@ -335,6 +335,12 @@ keybd_event_Detour (
 {
   SK_LOG_FIRST_CALL
 
+  if (! SKC_IsInputCaptureEnabled ())
+  {
+    keybd_event_Original (bVk, bScan, dwFlags, dwExtraInfo);
+    return;
+  }
+
   // TODO: Process this the right way...
   if (SK_ImGui_WantKeyboardCapture ())
   {
@@ -429,6 +435,13 @@ SK_GetSharedKeyState_Impl (int vKey, GetAsyncKeyState_pfn pfnGetFunc)
 {
   if (pfnGetFunc == nullptr)
     return 0;
+
+  // Overlay closed: pass through exactly.
+  if (! SKC_IsInputCaptureEnabled ())
+    return pfnGetFunc (vKey);
+
+  // Overlay open: block all key state from reaching the game.
+  return 0;
 
   if (SKC_IsInputCaptureEnabled ())
     return 0;
@@ -571,6 +584,10 @@ GetKeyboardState_Detour (PBYTE lpKeyState)
 {
   SK_LOG_FIRST_CALL
 
+  if (! SKC_IsInputCaptureEnabled ())
+    return SK_GetKeyboardState (lpKeyState);
+
+  // Overlay open: zero all key state so the game cannot read input.
   if (SKC_IsInputCaptureEnabled ())
   {
     if (lpKeyState) RtlZeroMemory (lpKeyState, 256);

@@ -749,6 +749,9 @@ GetRawInputBuffer_Detour (_Out_opt_ PRAWINPUT pData,
     return 0;
   }
 
+  // Overlay closed: pass through exactly.
+  return GetRawInputBuffer_Original (pData, pcbSize, cbSizeHeader);
+
   // Game wants to know size to allocate, let it pass-through
   if (pData == nullptr)
   {
@@ -955,6 +958,9 @@ GetRawInputData_Detour (_In_      HRAWINPUT hRawInput,
     if (pcbSize) *pcbSize = 0;
     return 0;
   }
+
+  // Overlay closed: pass through exactly.
+  return SK_GetRawInputData (hRawInput, uiCommand, pData, pcbSize, cbSizeHeader);
 
   auto GetRawInputDataImpl = [&](void) ->
   UINT
