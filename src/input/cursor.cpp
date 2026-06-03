@@ -1259,7 +1259,7 @@ GetCursorPos_Detour (LPPOINT lpPoint)
   }
 
 
-  BOOL bRet =
+  bRet =
     SK_GetCursorPos (lpPoint);
 
   if (bRet)
