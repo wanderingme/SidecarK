@@ -27,6 +27,7 @@ SK_INCLUDE_START_CPP (COM_UTIL)
 #define _WIN32_DCOM
 #include <Wbemidl.h>
 #include <objbase.h>
+#include <shlwapi.h>
 #include <cstdlib>
 #include <atlcomcli.h>
 #include <comdef.h>
