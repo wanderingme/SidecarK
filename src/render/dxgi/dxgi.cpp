@@ -156,6 +156,14 @@ CreateSwapChain_pfn               CreateSwapChain_Original               = nullp
 
 PresentSwapChain_pfn              Present_Original                       = nullptr;
 Present1SwapChain1_pfn            Present1_Original                      = nullptr;
+
+// SidecarK/Virule minimal DXGI fast-path flag.
+// Set once in SK_HookDXGI when Local\SidecarK_Control_<pid>/SKC1 is detected.
+// When non-zero, PresentCallback/Present1Callback bypass full SpecialK DXGI
+// dispatch and route directly through the minimal SKF1 helper.
+// Access via InterlockedCompareExchange only (matches GL pattern).
+static volatile LONG g_sk_dxgi_virule_minimal = 0;
+
 SetFullscreenState_pfn            SetFullscreenState_Original            = nullptr;
 GetFullscreenState_pfn            GetFullscreenState_Original            = nullptr;
 ResizeBuffers_pfn                 ResizeBuffers_Original                 = nullptr;
@@ -3681,6 +3689,14 @@ HRESULT
                                       UINT                     Flags,
                                 const DXGI_PRESENT_PARAMETERS *pPresentParameters)
 {
+  // Minimal SidecarK/Virule-managed fast path: bypass full SpecialK DXGI
+  // dispatch entirely.  Present1_Original is the MinHook trampoline and is
+  // never null here because g_sk_dxgi_virule_minimal is only set after hooks
+  // are enabled.
+  if (InterlockedCompareExchange (&g_sk_dxgi_virule_minimal, 0, 0) != 0 &&
+      Present1_Original != nullptr)
+    return SK_DXGI_ViruleSKF1_Present1 (This, SyncInterval, Flags, pPresentParameters, Present1_Original);
+
   // Almost never used by anything, so log it if it happens.
   SK_LOG_ONCE (L"Present1 ({Hooked SwapChain})");
 
@@ -3743,6 +3759,919 @@ SK_DXGI_DispatchPresent (IDXGISwapChain        *This,
   return ret;
 }
 
+// ============================================================================
+// Minimal SidecarK/Virule-managed DXGI Present helper.
+//
+// Called instead of SK_DXGI_DispatchPresent when g_sk_dxgi_virule_minimal != 0.
+// Checks the SidecarK control plane and SKF1 overlay frame state, performs the
+// minimum necessary D3D11 composite if an overlay frame is ready, then calls
+// the original Present function pointer directly.
+//
+// Never calls SK_DXGI_DispatchPresent, SK_DXGI_PresentBase, SK_BeginBufferSwap,
+// SK_EndBufferSwap, the frame limiter, ImGui/OSD setup, render-backend machinery,
+// or any other full SpecialK render-path function.
+//
+// pfnPresent must be the MinHook trampoline to the real IDXGISwapChain::Present.
+// It is never null when called from PresentCallback because g_sk_dxgi_virule_minimal
+// is only set after the hook has been successfully installed.
+//
+// Fail-open: on any resource failure, calls pfnPresent(This, SyncInterval, Flags)
+// and returns without crashing.
+//
+// Thread-safety: all function-scope statics are accessed only on the single
+// render thread that calls Present; no locking is required.
+// ============================================================================
+static HRESULT STDMETHODCALLTYPE
+SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
+                              UINT                 SyncInterval,
+                              UINT                 Flags,
+                              PresentSwapChain_pfn pfnPresent )
+{
+  static constexpr uint32_t c_skf1_max_dim = 16384u;
+
+  // Control-plane (SidecarK_Control_<pid>) state
+  static HANDLE              s_ctrlMap         = nullptr;
+  static uint8_t*            s_ctrlBase        = nullptr;
+  static volatile LONG*      s_overlayEnabled  = nullptr;
+  static DWORD               s_ctrlPid         = 0;
+  static ULONGLONG           s_ctrlLastAttempt = 0;
+
+  // SKF1 frame shared-memory state
+  static wchar_t   s_mapName [128] = { };
+  static HANDLE    s_hMap          = nullptr;
+  static uint8_t*  s_base          = nullptr;
+  static SIZE_T    s_mapBytes      = 0;
+  static uint32_t  s_w             = 0;
+  static uint32_t  s_h             = 0;
+  static uint32_t  s_stride        = 0;
+  static uint32_t  s_fmt           = 0;
+  static uint32_t  s_dataOff       = 0;
+  static LONG      s_lastCounter   = 0;
+  static bool      s_hasFrame      = false;
+  static bool      s_sawZeroCtr    = false;
+
+  // D3D11 overlay resources (one staging texture per device/format/size)
+  static ID3D11Texture2D* s_tex    = nullptr;
+  static DXGI_FORMAT      s_texFmt = DXGI_FORMAT_UNKNOWN;
+  static UINT             s_texW   = 0;
+  static UINT             s_texH   = 0;
+
+  // Pixel conversion and snapshot scratch buffers (reused across frames)
+  static std::vector<uint8_t> s_snapshot;
+  static std::vector<uint8_t> s_converted;
+
+  // Diagnostics helper (matches _SidecarLog_GL pattern in opengl.cpp)
+  auto _Log = [](const wchar_t* fmt, ...)
+  {
+    if (! SidecarK_DiagnosticsEnabled ())
+      return;
+    wchar_t path [MAX_PATH] = { };
+    DWORD cch = GetTempPathW (MAX_PATH, path);
+    if (cch == 0 || cch >= MAX_PATH)
+      return;
+    wcscat_s (path, L"SidecarK_Overlay.log");
+    FILE* f = nullptr;
+    _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+    if (f == nullptr)
+      return;
+    SYSTEMTIME st = { };
+    GetLocalTime (&st);
+    fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu [dxgi-minimal] ",
+              st.wYear, st.wMonth, st.wDay,
+              st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+              (unsigned long)GetCurrentProcessId ());
+    va_list args;
+    va_start (args, fmt);
+    vfwprintf (f, fmt, args);
+    va_end (args);
+    fwprintf (f, L"\n");
+    fclose (f);
+  };
+
+  // First-entry diagnostic (logged once)
+  static bool s_loggedFirst = false;
+  if (! s_loggedFirst)
+  {
+    s_loggedFirst = true;
+    _Log (L"first minimal DXGI Present entered SyncInterval=%u Flags=0x%X sc=%p pfn=%p",
+          SyncInterval, Flags, This, (void *)pfnPresent);
+  }
+
+  // Null-safety guard for original Present
+  if (pfnPresent == nullptr)
+    return E_POINTER;
+
+  // DXGI_PRESENT_TEST or DO_NOT_SEQUENCE: skip overlay work, call original directly.
+  if ( (Flags & DXGI_PRESENT_TEST           ) ||
+       (Flags & DXGI_PRESENT_DO_NOT_SEQUENCE) )
+  {
+    return pfnPresent (This, SyncInterval, Flags);
+  }
+
+  // -- Control plane: lazy open/maintain SidecarK_Control_<pid> ---------------
+  const DWORD pidNow = GetCurrentProcessId ();
+
+  // Clean up stale control-plane handles on a (theoretical) PID change
+  if (s_ctrlPid != 0 && s_ctrlPid != pidNow)
+  {
+    if (s_ctrlBase != nullptr) { UnmapViewOfFile (s_ctrlBase); s_ctrlBase = nullptr; }
+    if (s_ctrlMap  != nullptr) { CloseHandle     (s_ctrlMap);  s_ctrlMap  = nullptr; }
+    s_overlayEnabled  = nullptr;
+    s_ctrlPid         = 0;
+    s_ctrlLastAttempt = 0;
+  }
+
+  if (s_overlayEnabled == nullptr)
+  {
+    const ULONGLONG now = GetTickCount64 ();
+    if (now - s_ctrlLastAttempt >= 1000ull)
+    {
+      s_ctrlLastAttempt = now;
+      wchar_t ctrl_name [64] = { };
+      wsprintfW (ctrl_name, L"Local\\SidecarK_Control_%lu", (unsigned long)pidNow);
+      HANDLE hMap = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
+      if (hMap != nullptr)
+      {
+        uint8_t* base = (uint8_t *)MapViewOfFile (hMap, FILE_MAP_READ, 0, 0, 0);
+        if (base != nullptr)
+        {
+          char sig [4] = { };
+          memcpy (sig, base, sizeof (sig));
+          const uint32_t ver = *(const uint32_t *)(base + 0x04);
+          if (memcmp (sig, "SKC1", 4) == 0 && ver == 1u)
+          {
+            s_ctrlMap        = hMap;
+            s_ctrlBase       = base;
+            s_ctrlPid        = pidNow;
+            s_overlayEnabled = reinterpret_cast<volatile LONG *>(base + 0x08);
+            _Log (L"ctrl map opened overlay_initial=%ld", (long)*s_overlayEnabled);
+          }
+          else
+          {
+            UnmapViewOfFile (base);
+            CloseHandle (hMap);
+          }
+        }
+        else
+        {
+          CloseHandle (hMap);
+        }
+      }
+    }
+  }
+
+  // Check overlay_enabled: fail-closed (nullptr means off)
+  const bool overlay_enabled =
+    (s_overlayEnabled != nullptr) &&
+    (*s_overlayEnabled != 0);
+
+  if (! overlay_enabled)
+  {
+    static bool s_loggedOff = false;
+    if (! s_loggedOff)
+    {
+      s_loggedOff = true;
+      _Log (L"overlay disabled -> direct original Present");
+    }
+    return pfnPresent (This, SyncInterval, Flags);
+  }
+
+  // -- SKF1 frame mapping: lazy open/maintain SidecarK_Frame_v1_<pid> ----------
+  if (s_mapName [0] == L'\0')
+    wsprintfW (s_mapName, L"Local\\SidecarK_Frame_v1_%lu", (unsigned long)pidNow);
+
+  if (s_hMap == nullptr || s_base == nullptr)
+  {
+    // Release any partial state
+    if (s_base != nullptr) { UnmapViewOfFile (s_base); s_base = nullptr; s_mapBytes = 0; }
+    if (s_hMap != nullptr) { CloseHandle     (s_hMap); s_hMap = nullptr; }
+
+    HANDLE hMap = OpenFileMappingW (FILE_MAP_READ, FALSE, s_mapName);
+    if (hMap == nullptr)
+      return pfnPresent (This, SyncInterval, Flags);
+
+    uint8_t* base = (uint8_t *)MapViewOfFile (hMap, FILE_MAP_READ, 0, 0, 0);
+    if (base == nullptr)
+    {
+      CloseHandle (hMap);
+      return pfnPresent (This, SyncInterval, Flags);
+    }
+
+    MEMORY_BASIC_INFORMATION mbi = { };
+    const SIZE_T mapBytes =
+      VirtualQuery (base, &mbi, sizeof (mbi)) ? mbi.RegionSize : 0;
+
+    // Validate SKF1 header
+    const uint32_t magic    = *(const uint32_t *)(base + 0x00);
+    const uint32_t version  = *(const uint32_t *)(base + 0x04);
+    const uint32_t hdrBytes = *(const uint32_t *)(base + 0x08);
+    const uint32_t dataOff  = *(const uint32_t *)(base + 0x0C);
+    const uint32_t pixFmt   = *(const uint32_t *)(base + 0x10);
+    const uint32_t w        = *(const uint32_t *)(base + 0x14);
+    const uint32_t h        = *(const uint32_t *)(base + 0x18);
+    const uint32_t stride   = *(const uint32_t *)(base + 0x1C);
+
+    const bool magic_ok  = (magic == 0x31464B53u); // 'SKF1'
+    const bool ver_ok    = (version == 1u);
+    const bool hdr_ok    = (hdrBytes == 0x20u);
+    const bool off_ok    = (dataOff == 0x24u);
+    const bool fmt_ok    = (pixFmt == 1u);
+    const bool dims_ok   = (w > 0u && h > 0u && w <= c_skf1_max_dim && h <= c_skf1_max_dim);
+    const bool stride_ok = (stride == w * 4u);
+    const uint64_t pixelEnd = (uint64_t)dataOff + (uint64_t)stride * (uint64_t)h;
+    const bool size_ok = (pixelEnd > 0 &&
+                          pixelEnd <= 64ull * 1024ull * 1024ull &&
+                          (mapBytes == 0 || pixelEnd <= (uint64_t)mapBytes));
+
+    if (! (magic_ok && ver_ok && hdr_ok && off_ok && fmt_ok && dims_ok && stride_ok && size_ok))
+    {
+      _Log (L"invalid SKF1 header magic_ok=%d ver_ok=%d hdr_ok=%d fmt_ok=%d dims_ok=%d -> direct Present",
+            (int)magic_ok, (int)ver_ok, (int)hdr_ok, (int)fmt_ok, (int)dims_ok);
+      UnmapViewOfFile (base);
+      CloseHandle (hMap);
+      return pfnPresent (This, SyncInterval, Flags);
+    }
+
+    s_hMap     = hMap;
+    s_base     = base;
+    s_mapBytes = mapBytes;
+    s_w        = w;
+    s_h        = h;
+    s_stride   = stride;
+    s_fmt      = pixFmt;
+    s_dataOff  = dataOff;
+    _Log (L"SKF1 map opened %ux%u stride=%u data_off=0x%X map_bytes=%llu",
+          w, h, stride, dataOff, (unsigned long long)mapBytes);
+  }
+
+  // Re-read live dims every frame (detect producer resize / sentinel-to-real transition)
+  if (s_base != nullptr)
+  {
+    const uint32_t lw = *(const uint32_t *)(s_base + 0x14);
+    const uint32_t lh = *(const uint32_t *)(s_base + 0x18);
+    const uint32_t ls = *(const uint32_t *)(s_base + 0x1C);
+    if ((lw != s_w || lh != s_h || ls != s_stride) &&
+        lw > 0u && lh > 0u && lw <= c_skf1_max_dim && lh <= c_skf1_max_dim &&
+        ls == lw * 4u)
+    {
+      const uint64_t pe = (uint64_t)s_dataOff + (uint64_t)ls * (uint64_t)lh;
+      const bool ok = (pe <= 64ull * 1024ull * 1024ull) &&
+                      (s_mapBytes == 0 || pe <= (uint64_t)s_mapBytes);
+      if (ok)
+      {
+        _Log (L"overlay dims changed %ux%u -> %ux%u stride=%u", s_w, s_h, lw, lh, ls);
+        s_w = lw; s_h = lh; s_stride = ls;
+        if (s_tex != nullptr)
+        {
+          s_tex->Release ();
+          s_tex    = nullptr;
+          s_texFmt = DXGI_FORMAT_UNKNOWN;
+          s_texW   = 0;
+          s_texH   = 0;
+        }
+        s_hasFrame    = false;
+        s_lastCounter = 0;
+        s_sawZeroCtr  = false;
+      }
+    }
+  }
+
+  // Sentinel / zero-dim guard: 1×1 or degenerate dims are producer sentinel frames
+  if (s_w <= 1u || s_h <= 1u)
+  {
+    static bool s_loggedSentinel = false;
+    if (! s_loggedSentinel)
+    {
+      s_loggedSentinel = true;
+      _Log (L"invalid/no SKF1 frame (sentinel dims %ux%u) -> direct Present", s_w, s_h);
+    }
+    return pfnPresent (This, SyncInterval, Flags);
+  }
+
+  // frame_counter == 0 guard (read before copy; c1 == 0 means producer not started)
+  const uint64_t       counterOff = (uint64_t)s_dataOff - 4ull;
+  volatile const LONG* counterPtr = (volatile const LONG *)(s_base + (size_t)counterOff);
+  const LONG           c1         = *counterPtr;
+
+  if (c1 == 0)
+  {
+    static bool s_loggedZero = false;
+    if (! s_loggedZero)
+    {
+      s_loggedZero = true;
+      _Log (L"invalid/no SKF1 frame (frame_counter==0) -> direct Present");
+    }
+    return pfnPresent (This, SyncInterval, Flags);
+  }
+
+  // -- Minimal D3D11 composite -------------------------------------------------
+  // All failure branches call pfnPresent directly and return without crashing.
+
+  ID3D11Device*        dev = nullptr;
+  ID3D11DeviceContext* ctx = nullptr;
+
+  HRESULT hrDev = This->GetDevice (__uuidof (ID3D11Device), (void **)&dev);
+  if (FAILED (hrDev) || dev == nullptr)
+  {
+    if (dev != nullptr) dev->Release ();
+    return pfnPresent (This, SyncInterval, Flags);
+  }
+
+  dev->GetImmediateContext (&ctx);
+  if (ctx == nullptr)
+  {
+    dev->Release ();
+    return pfnPresent (This, SyncInterval, Flags);
+  }
+
+  ID3D11Texture2D* bb = nullptr;
+  HRESULT hrBuf = This->GetBuffer (0, __uuidof (ID3D11Texture2D), (void **)&bb);
+  if (FAILED (hrBuf) || bb == nullptr)
+  {
+    if (bb  != nullptr) bb->Release ();
+    ctx->Release ();
+    dev->Release ();
+    return pfnPresent (This, SyncInterval, Flags);
+  }
+
+  D3D11_TEXTURE2D_DESC bbDesc = { };
+  bb->GetDesc (&bbDesc);
+
+  const UINT copyW = (s_w > 0u) ? std::min ((UINT)bbDesc.Width,  s_w) : 0u;
+  const UINT copyH = (s_h > 0u) ? std::min ((UINT)bbDesc.Height, s_h) : 0u;
+
+  // Require a minimum composite region
+  if (copyW < 64u || copyH < 64u)
+  {
+    bb->Release ();
+    ctx->Release ();
+    dev->Release ();
+    return pfnPresent (This, SyncInterval, Flags);
+  }
+
+  // Only supported backbuffer formats (BGRA, RGBA, R10G10B10A2)
+  if (bbDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+      bbDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+      bbDesc.Format != DXGI_FORMAT_R10G10B10A2_UNORM)
+  {
+    bb->Release ();
+    ctx->Release ();
+    dev->Release ();
+    return pfnPresent (This, SyncInterval, Flags);
+  }
+
+  // Create / recreate staging texture when device, format, or size has changed
+  if (s_tex == nullptr || s_texFmt != bbDesc.Format ||
+      s_texW != copyW  || s_texH   != copyH)
+  {
+    if (s_tex != nullptr)
+    {
+      s_tex->Release ();
+      s_tex    = nullptr;
+      s_texFmt = DXGI_FORMAT_UNKNOWN;
+      s_texW   = 0;
+      s_texH   = 0;
+    }
+
+    D3D11_TEXTURE2D_DESC tdesc    = { };
+    tdesc.Width                   = copyW;
+    tdesc.Height                  = copyH;
+    tdesc.MipLevels               = 1;
+    tdesc.ArraySize               = 1;
+    tdesc.Format                  = bbDesc.Format;
+    tdesc.SampleDesc.Count        = 1;
+    tdesc.SampleDesc.Quality      = 0;
+    tdesc.Usage                   = D3D11_USAGE_DEFAULT;
+    tdesc.BindFlags               = D3D11_BIND_SHADER_RESOURCE;
+    tdesc.CPUAccessFlags          = 0;
+    tdesc.MiscFlags               = 0;
+
+    HRESULT hrTex = dev->CreateTexture2D (&tdesc, nullptr, &s_tex);
+    if (FAILED (hrTex) || s_tex == nullptr)
+    {
+      _Log (L"HRESULT hr=0x%08X creating overlay texture %ux%u fmt=%u -> direct Present",
+            (unsigned)hrTex, copyW, copyH, (unsigned)bbDesc.Format);
+      if (s_tex != nullptr) { s_tex->Release (); s_tex = nullptr; }
+      bb->Release ();
+      ctx->Release ();
+      dev->Release ();
+      return pfnPresent (This, SyncInterval, Flags);
+    }
+
+    s_texFmt = bbDesc.Format;
+    s_texW   = copyW;
+    s_texH   = copyH;
+
+    static bool s_loggedTexOk = false;
+    if (! s_loggedTexOk)
+    {
+      s_loggedTexOk = true;
+      _Log (L"first valid composite attempt: tex=%p %ux%u fmt=%u",
+            (void *)s_tex, copyW, copyH, (unsigned)bbDesc.Format);
+    }
+  }
+
+  // Stable-read: snapshot frame data between two counter reads
+  const uint8_t* srcBase       = s_base + (size_t)s_dataOff;
+  const size_t   snapshotBytes = (size_t)s_stride * (size_t)copyH;
+
+  if (s_snapshot.size () != snapshotBytes)
+    s_snapshot.resize (snapshotBytes);
+
+  memcpy (s_snapshot.data (), srcBase, snapshotBytes);
+
+  const LONG c2     = *counterPtr;
+  const bool stable = (c1 == c2);
+  const bool valid  = (c1 != 0);
+
+  if (! valid)
+    s_sawZeroCtr = true;
+
+  const bool counterChanged   = (c1 != s_lastCounter);
+  const bool counterRegressed = (s_hasFrame && c1 < s_lastCounter);
+  const bool restartOk        = (counterRegressed && s_sawZeroCtr);
+  const bool monotonicOk      = (! counterRegressed || restartOk || ! s_hasFrame);
+
+  // Upload only when stable, valid, and counter is monotonic (or restart-after-zero)
+  if (stable && valid && monotonicOk && (counterChanged || ! s_hasFrame))
+  {
+    srcBase = s_snapshot.data ();
+
+    if (bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM)
+    {
+      // Direct upload: SKF1 source is BGRA, backbuffer is BGRA — no conversion needed
+      ctx->UpdateSubresource (s_tex, 0, nullptr, srcBase, s_stride, 0);
+    }
+    else
+    {
+      // Pixel-format conversion into s_converted, then upload
+      const size_t rowBytes = (size_t)copyW * 4u;
+      const size_t needed   = rowBytes * (size_t)copyH;
+      if (s_converted.size () != needed)
+        s_converted.resize (needed);
+
+      if (bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
+      {
+        for (UINT y = 0; y < copyH; ++y)
+        {
+          const uint8_t* srcRow = srcBase + (size_t)y * (size_t)s_stride;
+          uint8_t*       dstRow = s_converted.data () + y * rowBytes;
+          for (UINT x = 0; x < copyW; ++x)
+          {
+            dstRow [x * 4 + 0] = srcRow [x * 4 + 2]; // R <- B
+            dstRow [x * 4 + 1] = srcRow [x * 4 + 1]; // G
+            dstRow [x * 4 + 2] = srcRow [x * 4 + 0]; // B <- R
+            dstRow [x * 4 + 3] = srcRow [x * 4 + 3]; // A
+          }
+        }
+      }
+      else // DXGI_FORMAT_R10G10B10A2_UNORM
+      {
+        for (UINT y = 0; y < copyH; ++y)
+        {
+          const uint8_t* srcRow = srcBase + (size_t)y * (size_t)s_stride;
+          uint32_t*      dstRow = (uint32_t *)(s_converted.data () + y * rowBytes);
+          for (UINT x = 0; x < copyW; ++x)
+          {
+            const uint32_t b8  = srcRow [x * 4 + 0];
+            const uint32_t g8  = srcRow [x * 4 + 1];
+            const uint32_t r8  = srcRow [x * 4 + 2];
+            const uint32_t a8  = srcRow [x * 4 + 3];
+            dstRow [x] =  ((r8 * 1023u + 127u) / 255u)
+                       | (((g8 * 1023u + 127u) / 255u) << 10u)
+                       | (((b8 * 1023u + 127u) / 255u) << 20u)
+                       | (((a8 *    3u + 127u) / 255u) << 30u);
+          }
+        }
+      }
+      ctx->UpdateSubresource (s_tex, 0, nullptr,
+                              s_converted.data (), (UINT)rowBytes, 0);
+    }
+
+    s_lastCounter = c1;
+    s_hasFrame    = true;
+    s_sawZeroCtr  = false;
+  }
+  else if (! stable)
+  {
+    // Counter changed during copy (tearing) — skip upload, reuse last-good frame
+  }
+  else if (! valid)
+  {
+    // Zero counter — skip upload until producer starts
+    bb->Release ();
+    ctx->Release ();
+    dev->Release ();
+    return pfnPresent (This, SyncInterval, Flags);
+  }
+
+  // Blit the overlay texture onto the backbuffer using CopySubresourceRegion.
+  // No alpha-blend in the minimal path: it keeps the code free of SpecialK
+  // helpers and shader setup.
+  if (s_hasFrame && s_tex != nullptr && s_texFmt == bbDesc.Format)
+  {
+    D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
+    ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);
+  }
+
+  bb->Release ();
+  ctx->Release ();
+  dev->Release ();
+
+  return pfnPresent (This, SyncInterval, Flags);
+}
+
+// Present1 variant of the minimal SidecarK/Virule DXGI fast path.
+//
+// Handles the SidecarK control-plane check and SKF1 frame validation, performs
+// minimal D3D11 composite work if a valid frame exists, then calls the original
+// Present1 function pointer directly.
+//
+// Never calls SK_DXGI_DispatchPresent, SK_DXGI_DispatchPresent1, or any other
+// full SpecialK render-path function.  All composite state (control map, SKF1
+// map, staging texture) is independently maintained to avoid cross-thread
+// aliasing with the Present path.
+//
+// Note: Present1 is "almost never used" per the existing code comment.
+static HRESULT STDMETHODCALLTYPE
+SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
+                               UINT                          SyncInterval,
+                               UINT                          Flags,
+                        const  DXGI_PRESENT_PARAMETERS      *pPresentParameters,
+                               Present1SwapChain1_pfn        pfnPresent1 )
+{
+  static constexpr uint32_t c_skf1_max_dim = 16384u;
+
+  // Control-plane state (independent from the Present path)
+  static HANDLE              s_ctrlMap         = nullptr;
+  static uint8_t*            s_ctrlBase        = nullptr;
+  static volatile LONG*      s_overlayEnabled  = nullptr;
+  static DWORD               s_ctrlPid         = 0;
+  static ULONGLONG           s_ctrlLastAttempt = 0;
+
+  // SKF1 frame shared-memory state
+  static wchar_t   s_mapName [128] = { };
+  static HANDLE    s_hMap          = nullptr;
+  static uint8_t*  s_base          = nullptr;
+  static SIZE_T    s_mapBytes      = 0;
+  static uint32_t  s_w             = 0;
+  static uint32_t  s_h             = 0;
+  static uint32_t  s_stride        = 0;
+  static uint32_t  s_fmt           = 0;
+  static uint32_t  s_dataOff       = 0;
+  static LONG      s_lastCounter   = 0;
+  static bool      s_hasFrame      = false;
+  static bool      s_sawZeroCtr    = false;
+
+  // D3D11 overlay resources
+  static ID3D11Texture2D* s_tex    = nullptr;
+  static DXGI_FORMAT      s_texFmt = DXGI_FORMAT_UNKNOWN;
+  static UINT             s_texW   = 0;
+  static UINT             s_texH   = 0;
+
+  static std::vector<uint8_t> s_snapshot;
+  static std::vector<uint8_t> s_converted;
+
+  auto _Log = [](const wchar_t* fmt, ...)
+  {
+    if (! SidecarK_DiagnosticsEnabled ())
+      return;
+    wchar_t path [MAX_PATH] = { };
+    DWORD cch = GetTempPathW (MAX_PATH, path);
+    if (cch == 0 || cch >= MAX_PATH)
+      return;
+    wcscat_s (path, L"SidecarK_Overlay.log");
+    FILE* f = nullptr;
+    _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+    if (f == nullptr)
+      return;
+    SYSTEMTIME st = { };
+    GetLocalTime (&st);
+    fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu [dxgi-minimal-p1] ",
+              st.wYear, st.wMonth, st.wDay,
+              st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+              (unsigned long)GetCurrentProcessId ());
+    va_list args;
+    va_start (args, fmt);
+    vfwprintf (f, fmt, args);
+    va_end (args);
+    fwprintf (f, L"\n");
+    fclose (f);
+  };
+
+  static bool s_loggedFirst = false;
+  if (! s_loggedFirst)
+  {
+    s_loggedFirst = true;
+    _Log (L"first minimal DXGI Present1 entered SyncInterval=%u Flags=0x%X sc=%p pfn=%p",
+          SyncInterval, Flags, This, (void *)pfnPresent1);
+  }
+
+  if (pfnPresent1 == nullptr)
+    return E_POINTER;
+
+  // DXGI_PRESENT_TEST or DO_NOT_SEQUENCE: skip overlay, direct Present1
+  if ( (Flags & DXGI_PRESENT_TEST           ) ||
+       (Flags & DXGI_PRESENT_DO_NOT_SEQUENCE) )
+  {
+    return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+  }
+
+  // -- Control plane -----------------------------------------------------------
+  const DWORD pidNow = GetCurrentProcessId ();
+
+  if (s_ctrlPid != 0 && s_ctrlPid != pidNow)
+  {
+    if (s_ctrlBase != nullptr) { UnmapViewOfFile (s_ctrlBase); s_ctrlBase = nullptr; }
+    if (s_ctrlMap  != nullptr) { CloseHandle     (s_ctrlMap);  s_ctrlMap  = nullptr; }
+    s_overlayEnabled  = nullptr;
+    s_ctrlPid         = 0;
+    s_ctrlLastAttempt = 0;
+  }
+
+  if (s_overlayEnabled == nullptr)
+  {
+    const ULONGLONG now = GetTickCount64 ();
+    if (now - s_ctrlLastAttempt >= 1000ull)
+    {
+      s_ctrlLastAttempt = now;
+      wchar_t ctrl_name [64] = { };
+      wsprintfW (ctrl_name, L"Local\\SidecarK_Control_%lu", (unsigned long)pidNow);
+      HANDLE hMap = OpenFileMappingW (FILE_MAP_READ, FALSE, ctrl_name);
+      if (hMap != nullptr)
+      {
+        uint8_t* base = (uint8_t *)MapViewOfFile (hMap, FILE_MAP_READ, 0, 0, 0);
+        if (base != nullptr)
+        {
+          char sig [4] = { };
+          memcpy (sig, base, sizeof (sig));
+          const uint32_t ver = *(const uint32_t *)(base + 0x04);
+          if (memcmp (sig, "SKC1", 4) == 0 && ver == 1u)
+          {
+            s_ctrlMap        = hMap;
+            s_ctrlBase       = base;
+            s_ctrlPid        = pidNow;
+            s_overlayEnabled = reinterpret_cast<volatile LONG *>(base + 0x08);
+            _Log (L"ctrl map opened overlay_initial=%ld", (long)*s_overlayEnabled);
+          }
+          else
+          {
+            UnmapViewOfFile (base);
+            CloseHandle (hMap);
+          }
+        }
+        else
+        {
+          CloseHandle (hMap);
+        }
+      }
+    }
+  }
+
+  const bool overlay_enabled =
+    (s_overlayEnabled != nullptr) &&
+    (*s_overlayEnabled != 0);
+
+  if (! overlay_enabled)
+  {
+    static bool s_loggedOff = false;
+    if (! s_loggedOff)
+    {
+      s_loggedOff = true;
+      _Log (L"overlay disabled -> direct original Present1");
+    }
+    return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+  }
+
+  // -- SKF1 frame mapping ------------------------------------------------------
+  if (s_mapName [0] == L'\0')
+    wsprintfW (s_mapName, L"Local\\SidecarK_Frame_v1_%lu", (unsigned long)pidNow);
+
+  if (s_hMap == nullptr || s_base == nullptr)
+  {
+    if (s_base != nullptr) { UnmapViewOfFile (s_base); s_base = nullptr; s_mapBytes = 0; }
+    if (s_hMap != nullptr) { CloseHandle     (s_hMap); s_hMap = nullptr; }
+
+    HANDLE hMap = OpenFileMappingW (FILE_MAP_READ, FALSE, s_mapName);
+    if (hMap == nullptr)
+      return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+
+    uint8_t* base = (uint8_t *)MapViewOfFile (hMap, FILE_MAP_READ, 0, 0, 0);
+    if (base == nullptr)
+    {
+      CloseHandle (hMap);
+      return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+    }
+
+    MEMORY_BASIC_INFORMATION mbi = { };
+    const SIZE_T mapBytes =
+      VirtualQuery (base, &mbi, sizeof (mbi)) ? mbi.RegionSize : 0;
+
+    const uint32_t magic    = *(const uint32_t *)(base + 0x00);
+    const uint32_t version  = *(const uint32_t *)(base + 0x04);
+    const uint32_t hdrBytes = *(const uint32_t *)(base + 0x08);
+    const uint32_t dataOff  = *(const uint32_t *)(base + 0x0C);
+    const uint32_t pixFmt   = *(const uint32_t *)(base + 0x10);
+    const uint32_t w        = *(const uint32_t *)(base + 0x14);
+    const uint32_t h        = *(const uint32_t *)(base + 0x18);
+    const uint32_t stride   = *(const uint32_t *)(base + 0x1C);
+
+    const bool magic_ok  = (magic == 0x31464B53u);
+    const bool ver_ok    = (version == 1u);
+    const bool hdr_ok    = (hdrBytes == 0x20u);
+    const bool off_ok    = (dataOff == 0x24u);
+    const bool fmt_ok    = (pixFmt == 1u);
+    const bool dims_ok   = (w > 0u && h > 0u && w <= c_skf1_max_dim && h <= c_skf1_max_dim);
+    const bool stride_ok = (stride == w * 4u);
+    const uint64_t pixelEnd = (uint64_t)dataOff + (uint64_t)stride * (uint64_t)h;
+    const bool size_ok = (pixelEnd > 0 &&
+                          pixelEnd <= 64ull * 1024ull * 1024ull &&
+                          (mapBytes == 0 || pixelEnd <= (uint64_t)mapBytes));
+
+    if (! (magic_ok && ver_ok && hdr_ok && off_ok && fmt_ok && dims_ok && stride_ok && size_ok))
+    {
+      _Log (L"invalid SKF1 header -> direct Present1");
+      UnmapViewOfFile (base);
+      CloseHandle (hMap);
+      return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+    }
+
+    s_hMap = hMap; s_base = base; s_mapBytes = mapBytes;
+    s_w = w; s_h = h; s_stride = stride; s_fmt = pixFmt; s_dataOff = dataOff;
+  }
+
+  // Live-dim update
+  if (s_base != nullptr)
+  {
+    const uint32_t lw = *(const uint32_t *)(s_base + 0x14);
+    const uint32_t lh = *(const uint32_t *)(s_base + 0x18);
+    const uint32_t ls = *(const uint32_t *)(s_base + 0x1C);
+    if ((lw != s_w || lh != s_h || ls != s_stride) &&
+        lw > 0u && lh > 0u && lw <= c_skf1_max_dim && lh <= c_skf1_max_dim && ls == lw * 4u)
+    {
+      const uint64_t pe = (uint64_t)s_dataOff + (uint64_t)ls * (uint64_t)lh;
+      if (pe <= 64ull * 1024ull * 1024ull && (s_mapBytes == 0 || pe <= (uint64_t)s_mapBytes))
+      {
+        s_w = lw; s_h = lh; s_stride = ls;
+        if (s_tex != nullptr) { s_tex->Release (); s_tex = nullptr; s_texFmt = DXGI_FORMAT_UNKNOWN; s_texW = 0; s_texH = 0; }
+        s_hasFrame = false; s_lastCounter = 0; s_sawZeroCtr = false;
+      }
+    }
+  }
+
+  if (s_w <= 1u || s_h <= 1u)
+    return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+
+  const uint64_t       counterOff = (uint64_t)s_dataOff - 4ull;
+  volatile const LONG* counterPtr = (volatile const LONG *)(s_base + (size_t)counterOff);
+  const LONG           c1         = *counterPtr;
+
+  if (c1 == 0)
+  {
+    static bool s_loggedZero = false;
+    if (! s_loggedZero)
+    {
+      s_loggedZero = true;
+      _Log (L"invalid/no SKF1 frame (frame_counter==0) -> direct Present1");
+    }
+    return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+  }
+
+  // -- Minimal D3D11 composite (same logic as SK_DXGI_ViruleSKF1_Present) ------
+  ID3D11Device*        dev = nullptr;
+  ID3D11DeviceContext* ctx = nullptr;
+
+  IDXGISwapChain* sc_base = static_cast<IDXGISwapChain *>(This);
+  if (FAILED (sc_base->GetDevice (__uuidof (ID3D11Device), (void **)&dev)) || dev == nullptr)
+  {
+    if (dev != nullptr) dev->Release ();
+    return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+  }
+
+  dev->GetImmediateContext (&ctx);
+  if (ctx == nullptr)
+  {
+    dev->Release ();
+    return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+  }
+
+  ID3D11Texture2D* bb = nullptr;
+  if (FAILED (sc_base->GetBuffer (0, __uuidof (ID3D11Texture2D), (void **)&bb)) || bb == nullptr)
+  {
+    if (bb != nullptr) bb->Release ();
+    ctx->Release (); dev->Release ();
+    return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+  }
+
+  D3D11_TEXTURE2D_DESC bbDesc = { };
+  bb->GetDesc (&bbDesc);
+
+  const UINT copyW = (s_w > 0u) ? std::min ((UINT)bbDesc.Width,  s_w) : 0u;
+  const UINT copyH = (s_h > 0u) ? std::min ((UINT)bbDesc.Height, s_h) : 0u;
+
+  if (copyW < 64u || copyH < 64u ||
+      (bbDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+       bbDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+       bbDesc.Format != DXGI_FORMAT_R10G10B10A2_UNORM))
+  {
+    bb->Release (); ctx->Release (); dev->Release ();
+    return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+  }
+
+  if (s_tex == nullptr || s_texFmt != bbDesc.Format || s_texW != copyW || s_texH != copyH)
+  {
+    if (s_tex != nullptr) { s_tex->Release (); s_tex = nullptr; s_texFmt = DXGI_FORMAT_UNKNOWN; s_texW = 0; s_texH = 0; }
+    D3D11_TEXTURE2D_DESC tdesc = { };
+    tdesc.Width = copyW; tdesc.Height = copyH; tdesc.MipLevels = 1; tdesc.ArraySize = 1;
+    tdesc.Format = bbDesc.Format; tdesc.SampleDesc.Count = 1;
+    tdesc.Usage = D3D11_USAGE_DEFAULT; tdesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    HRESULT hrTex = dev->CreateTexture2D (&tdesc, nullptr, &s_tex);
+    if (FAILED (hrTex) || s_tex == nullptr)
+    {
+      _Log (L"HRESULT hr=0x%08X creating overlay texture %ux%u -> direct Present1", (unsigned)hrTex, copyW, copyH);
+      if (s_tex != nullptr) { s_tex->Release (); s_tex = nullptr; }
+      bb->Release (); ctx->Release (); dev->Release ();
+      return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+    }
+    s_texFmt = bbDesc.Format; s_texW = copyW; s_texH = copyH;
+    static bool s_loggedTexOk = false;
+    if (! s_loggedTexOk) { s_loggedTexOk = true; _Log (L"first valid composite attempt (Present1): %ux%u fmt=%u", copyW, copyH, (unsigned)bbDesc.Format); }
+  }
+
+  const uint8_t* srcBase       = s_base + (size_t)s_dataOff;
+  const size_t   snapshotBytes = (size_t)s_stride * (size_t)copyH;
+  if (s_snapshot.size () != snapshotBytes) s_snapshot.resize (snapshotBytes);
+  memcpy (s_snapshot.data (), srcBase, snapshotBytes);
+
+  const LONG c2     = *counterPtr;
+  const bool stable = (c1 == c2);
+  const bool valid  = (c1 != 0);
+  if (! valid) s_sawZeroCtr = true;
+
+  const bool counterChanged   = (c1 != s_lastCounter);
+  const bool counterRegressed = (s_hasFrame && c1 < s_lastCounter);
+  const bool restartOk        = (counterRegressed && s_sawZeroCtr);
+  const bool monotonicOk      = (! counterRegressed || restartOk || ! s_hasFrame);
+
+  if (stable && valid && monotonicOk && (counterChanged || ! s_hasFrame))
+  {
+    srcBase = s_snapshot.data ();
+    if (bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM)
+    {
+      ctx->UpdateSubresource (s_tex, 0, nullptr, srcBase, s_stride, 0);
+    }
+    else
+    {
+      const size_t rowBytes = (size_t)copyW * 4u;
+      const size_t needed   = rowBytes * (size_t)copyH;
+      if (s_converted.size () != needed) s_converted.resize (needed);
+      if (bbDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
+      {
+        for (UINT y = 0; y < copyH; ++y)
+        {
+          const uint8_t* sr = srcBase + (size_t)y * (size_t)s_stride;
+          uint8_t*       dr = s_converted.data () + y * rowBytes;
+          for (UINT x = 0; x < copyW; ++x)
+          {
+            dr[x*4+0] = sr[x*4+2]; dr[x*4+1] = sr[x*4+1];
+            dr[x*4+2] = sr[x*4+0]; dr[x*4+3] = sr[x*4+3];
+          }
+        }
+      }
+      else // R10G10B10A2
+      {
+        for (UINT y = 0; y < copyH; ++y)
+        {
+          const uint8_t* sr = srcBase + (size_t)y * (size_t)s_stride;
+          uint32_t*      dr = (uint32_t *)(s_converted.data () + y * rowBytes);
+          for (UINT x = 0; x < copyW; ++x)
+          {
+            const uint32_t b8 = sr[x*4+0], g8 = sr[x*4+1], r8 = sr[x*4+2], a8 = sr[x*4+3];
+            dr[x] =  ((r8*1023u+127u)/255u) | (((g8*1023u+127u)/255u)<<10u)
+                  | (((b8*1023u+127u)/255u)<<20u) | (((a8*3u+127u)/255u)<<30u);
+          }
+        }
+      }
+      ctx->UpdateSubresource (s_tex, 0, nullptr, s_converted.data (), (UINT)rowBytes, 0);
+    }
+    s_lastCounter = c1; s_hasFrame = true; s_sawZeroCtr = false;
+  }
+  else if (! valid)
+  {
+    bb->Release (); ctx->Release (); dev->Release ();
+    return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+  }
+
+  if (s_hasFrame && s_tex != nullptr && s_texFmt == bbDesc.Format)
+  {
+    D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
+    ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);
+  }
+
+  bb->Release (); ctx->Release (); dev->Release ();
+  return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
+}
+
 
 __declspec (noinline)
 HRESULT
@@ -3750,6 +4679,14 @@ STDMETHODCALLTYPE PresentCallback ( IDXGISwapChain *This,
                                     UINT            SyncInterval,
                                     UINT            Flags )
 {
+  // Minimal SidecarK/Virule-managed fast path: bypass full SpecialK DXGI
+  // dispatch entirely.  Present_Original is the MinHook trampoline set by
+  // SK_DXGI_HookPresentBase and is never null here because
+  // g_sk_dxgi_virule_minimal is only set after that hook is enabled.
+  if (InterlockedCompareExchange (&g_sk_dxgi_virule_minimal, 0, 0) != 0 &&
+      Present_Original != nullptr)
+    return SK_DXGI_ViruleSKF1_Present (This, SyncInterval, Flags, Present_Original);
+
   static bool _sk_dxgi_present_detour_hit = false;
   if (! std::exchange (_sk_dxgi_present_detour_hit, true))
   {
@@ -8841,6 +9778,40 @@ SK_HookDXGI (void)
 
   if (! InterlockedCompareExchangeAcquire (&hooked, TRUE, FALSE))
   {
+    // One-shot SidecarK/Virule-managed probe: open Local\SidecarK_Control_<pid>
+    // and validate the SKC1 signature.  If confirmed, set g_sk_dxgi_virule_minimal
+    // so that PresentCallback / Present1Callback bypass the full SpecialK DXGI
+    // dispatch path.  Identical pattern to the GL probe in SK_HookGL.
+    {
+      static bool s_probe_done = false;
+      if (! s_probe_done)
+      {
+        s_probe_done = true;
+        const DWORD probe_pid = GetCurrentProcessId ();
+        wchar_t probe_name [64] = { };
+        wsprintfW (probe_name, L"Local\\SidecarK_Control_%lu", (unsigned long)probe_pid);
+        HANDLE hProbe = OpenFileMappingW (FILE_MAP_READ, FALSE, probe_name);
+        if (hProbe != nullptr)
+        {
+          uint8_t* pProbe = (uint8_t *)MapViewOfFile (hProbe, FILE_MAP_READ, 0, 0, 0);
+          if (pProbe != nullptr)
+          {
+            MEMORY_BASIC_INFORMATION mbi = { };
+            const SIZE_T probe_sz =
+              (VirtualQuery (pProbe, &mbi, sizeof (mbi)) != 0) ? mbi.RegionSize : 0;
+            const bool probe_ok =
+              probe_sz >= 12 &&
+              memcmp  (pProbe,        "SKC1", 4) == 0 &&
+              *(const uint32_t *)(pProbe + 0x04) == 1u;
+            UnmapViewOfFile (pProbe);
+            if (probe_ok)
+              InterlockedExchange (&g_sk_dxgi_virule_minimal, 1);
+          }
+          CloseHandle (hProbe);
+        }
+      }
+    }
+
     SK_PROFILE_FIRST_CALL
 
     // Serves as both D3D11 and DXGI
