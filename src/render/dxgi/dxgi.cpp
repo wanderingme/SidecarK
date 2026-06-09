@@ -3766,11 +3766,19 @@ SK_DXGI_DispatchPresent (IDXGISwapChain        *This,
 // Present1 fast paths.  These are file-scope so both helpers can use them
 // without duplication.
 // ============================================================================
-static constexpr uint32_t c_skf1_dxgi_max_dim = 16384u;
+static constexpr uint32_t  c_skf1_dxgi_max_dim     = 16384u;
+// 64 MB: generous upper bound for a single SKF1 overlay frame mapping
+static constexpr uint64_t  c_skf1_dxgi_max_map_bytes = c_skf1_dxgi_max_map_bytes;
+// Minimum composite region in each dimension.  Frames smaller than this are
+// treated as sentinels / uninitialized and skipped.
+static constexpr uint32_t  c_skf1_dxgi_min_dim     = 64u;
 
 // Minimal diagnostics helper — writes one line to SidecarK_Overlay.log when
 // diagnostics are enabled.  Gated behind SidecarK_DiagnosticsEnabled() so it
 // is effectively a no-op in normal use.
+// The log file is opened in append mode; entries may interleave under heavy
+// concurrent use, but this helper is only for debug/diagnostic builds and
+// the race is benign (no heap corruption).
 static void
 SK_DXGI_ViruleLog (const wchar_t *tag, const wchar_t *fmt, ...)
 {
@@ -3778,9 +3786,12 @@ SK_DXGI_ViruleLog (const wchar_t *tag, const wchar_t *fmt, ...)
     return;
   wchar_t path [MAX_PATH] = { };
   DWORD cch = GetTempPathW (MAX_PATH, path);
-  if (cch == 0 || cch >= MAX_PATH)
+  // Ensure there is room for the log filename after the temp path.
+  // "SidecarK_Overlay.log" is 20 characters; leave 1 for the NUL terminator.
+  static constexpr DWORD c_suffix_len = 21u; // len("SidecarK_Overlay.log") + NUL
+  if (cch == 0 || cch + c_suffix_len > MAX_PATH)
     return;
-  wcscat_s (path, L"SidecarK_Overlay.log");
+  wcscat_s (path, MAX_PATH, L"SidecarK_Overlay.log");
   FILE* f = nullptr;
   _wfopen_s (&f, path, L"a+, ccs=UTF-8");
   if (f == nullptr)
@@ -3797,6 +3808,29 @@ SK_DXGI_ViruleLog (const wchar_t *tag, const wchar_t *fmt, ...)
   va_end (args);
   fwprintf (f, L"\n");
   fclose (f);
+}
+
+// Convert a row of BGRA8 pixels to R10G10B10A2_UNORM packed DWORDs.
+// R10G10B10A2: bits [9:0]=R, [19:10]=G, [29:20]=B, [31:30]=A.
+// Each 8-bit channel is scaled to 10 bits (R,G,B) or 2 bits (A) with
+// rounding: scaled = (val * max_out + 127) / 255.
+static void
+SK_DXGI_BGRA8_To_R10G10B10A2Row (const uint8_t *__restrict src,
+                                  uint32_t      *__restrict dst,
+                                  uint32_t                  width)
+{
+  for (uint32_t x = 0; x < width; ++x)
+  {
+    const uint32_t b8 = src [x*4+0];
+    const uint32_t g8 = src [x*4+1];
+    const uint32_t r8 = src [x*4+2];
+    const uint32_t a8 = src [x*4+3];
+    // Scale 0-255 → 0-1023 (10-bit) for R, G, B; 0-255 → 0-3 (2-bit) for A.
+    dst [x] =  ((r8 * 1023u + 127u) / 255u)
+            | (((g8 * 1023u + 127u) / 255u) << 10u)
+            | (((b8 * 1023u + 127u) / 255u) << 20u)
+            | (((a8 *    3u + 127u) / 255u) << 30u);
+  }
 }
 
 // ============================================================================
@@ -3994,7 +4028,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
     const bool stride_ok = (stride == w * 4u);
     const uint64_t pixelEnd = (uint64_t)dataOff + (uint64_t)stride * (uint64_t)h;
     const bool size_ok = (pixelEnd > 0 &&
-                          pixelEnd <= 64ull * 1024ull * 1024ull &&
+                          pixelEnd <= c_skf1_dxgi_max_map_bytes &&
                           (mapBytes == 0 || pixelEnd <= (uint64_t)mapBytes));
 
     if (! (magic_ok && ver_ok && hdr_ok && off_ok && fmt_ok && dims_ok && stride_ok && size_ok))
@@ -4029,7 +4063,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
         ls == lw * 4u)
     {
       const uint64_t pe = (uint64_t)s_dataOff + (uint64_t)ls * (uint64_t)lh;
-      const bool ok = (pe <= 64ull * 1024ull * 1024ull) &&
+      const bool ok = (pe <= c_skf1_dxgi_max_map_bytes) &&
                       (s_mapBytes == 0 || pe <= (uint64_t)s_mapBytes);
       if (ok)
       {
@@ -4115,7 +4149,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
   const UINT copyH = (s_h > 0u) ? std::min ((UINT)bbDesc.Height, s_h) : 0u;
 
   // Require a minimum composite region
-  if (copyW < 64u || copyH < 64u)
+  if (copyW < c_skf1_dxgi_min_dim || copyH < c_skf1_dxgi_min_dim)
   {
     bb->Release ();
     ctx->Release ();
@@ -4245,17 +4279,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
         {
           const uint8_t* srcRow = srcBase + (size_t)y * (size_t)s_stride;
           uint32_t*      dstRow = (uint32_t *)(s_converted.data () + y * rowBytes);
-          for (UINT x = 0; x < copyW; ++x)
-          {
-            const uint32_t b8  = srcRow [x * 4 + 0];
-            const uint32_t g8  = srcRow [x * 4 + 1];
-            const uint32_t r8  = srcRow [x * 4 + 2];
-            const uint32_t a8  = srcRow [x * 4 + 3];
-            dstRow [x] =  ((r8 * 1023u + 127u) / 255u)
-                       | (((g8 * 1023u + 127u) / 255u) << 10u)
-                       | (((b8 * 1023u + 127u) / 255u) << 20u)
-                       | (((a8 *    3u + 127u) / 255u) << 30u);
-          }
+          SK_DXGI_BGRA8_To_R10G10B10A2Row (srcRow, dstRow, copyW);
         }
       }
       ctx->UpdateSubresource (s_tex, 0, nullptr,
@@ -4473,7 +4497,7 @@ SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
     const bool stride_ok = (stride == w * 4u);
     const uint64_t pixelEnd = (uint64_t)dataOff + (uint64_t)stride * (uint64_t)h;
     const bool size_ok = (pixelEnd > 0 &&
-                          pixelEnd <= 64ull * 1024ull * 1024ull &&
+                          pixelEnd <= c_skf1_dxgi_max_map_bytes &&
                           (mapBytes == 0 || pixelEnd <= (uint64_t)mapBytes));
 
     if (! (magic_ok && ver_ok && hdr_ok && off_ok && fmt_ok && dims_ok && stride_ok && size_ok))
@@ -4498,7 +4522,7 @@ SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
         lw > 0u && lh > 0u && lw <= c_skf1_dxgi_max_dim && lh <= c_skf1_dxgi_max_dim && ls == lw * 4u)
     {
       const uint64_t pe = (uint64_t)s_dataOff + (uint64_t)ls * (uint64_t)lh;
-      if (pe <= 64ull * 1024ull * 1024ull && (s_mapBytes == 0 || pe <= (uint64_t)s_mapBytes))
+      if (pe <= c_skf1_dxgi_max_map_bytes && (s_mapBytes == 0 || pe <= (uint64_t)s_mapBytes))
       {
         s_w = lw; s_h = lh; s_stride = ls;
         if (s_tex != nullptr) { s_tex->Release (); s_tex = nullptr; s_texFmt = DXGI_FORMAT_UNKNOWN; s_texW = 0; s_texH = 0; }
@@ -4557,7 +4581,7 @@ SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
   const UINT copyW = (s_w > 0u) ? std::min ((UINT)bbDesc.Width,  s_w) : 0u;
   const UINT copyH = (s_h > 0u) ? std::min ((UINT)bbDesc.Height, s_h) : 0u;
 
-  if (copyW < 64u || copyH < 64u ||
+  if (copyW < c_skf1_dxgi_min_dim || copyH < c_skf1_dxgi_min_dim ||
       (bbDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
        bbDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
        bbDesc.Format != DXGI_FORMAT_R10G10B10A2_UNORM))
@@ -4632,12 +4656,7 @@ SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
         {
           const uint8_t* sr = srcBase + (size_t)y * (size_t)s_stride;
           uint32_t*      dr = (uint32_t *)(s_converted.data () + y * rowBytes);
-          for (UINT x = 0; x < copyW; ++x)
-          {
-            const uint32_t b8 = sr[x*4+0], g8 = sr[x*4+1], r8 = sr[x*4+2], a8 = sr[x*4+3];
-            dr[x] =  ((r8*1023u+127u)/255u) | (((g8*1023u+127u)/255u)<<10u)
-                  | (((b8*1023u+127u)/255u)<<20u) | (((a8*3u+127u)/255u)<<30u);
-          }
+          SK_DXGI_BGRA8_To_R10G10B10A2Row (sr, dr, copyW);
         }
       }
       ctx->UpdateSubresource (s_tex, 0, nullptr, s_converted.data (), (UINT)rowBytes, 0);
