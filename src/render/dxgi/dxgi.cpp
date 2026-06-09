@@ -3768,7 +3768,7 @@ SK_DXGI_DispatchPresent (IDXGISwapChain        *This,
 // ============================================================================
 static constexpr uint32_t  c_skf1_dxgi_max_dim     = 16384u;
 // 64 MB: generous upper bound for a single SKF1 overlay frame mapping
-static constexpr uint64_t  c_skf1_dxgi_max_map_bytes = c_skf1_dxgi_max_map_bytes;
+static constexpr uint64_t  c_skf1_dxgi_max_map_bytes = 64ull * 1024ull * 1024ull;
 // Minimum composite region in each dimension.  Frames smaller than this are
 // treated as sentinels / uninitialized and skipped.
 static constexpr uint32_t  c_skf1_dxgi_min_dim     = 64u;
@@ -3793,7 +3793,7 @@ SK_DXGI_ViruleLog (const wchar_t *tag, const wchar_t *fmt, ...)
     return;
   wcscat_s (path, MAX_PATH, L"SidecarK_Overlay.log");
   FILE* f = nullptr;
-  _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+  _wfopen_s (&f, path, L"a+,ccs=UTF-8");
   if (f == nullptr)
     return;
   SYSTEMTIME st = { };
