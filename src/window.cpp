@@ -5941,12 +5941,15 @@ static constexpr uint16_t SKI1_Type_WinMsgMouse = 1;
 static constexpr uint16_t SKI1_Type_WinMsgKey   = 2;
 static constexpr uint16_t SKI1_Type_RawMouse    = 3;
 static constexpr uint16_t SKI1_Type_RawKey      = 4;
-static constexpr uint16_t SKI1_Type_Focus          = 5;
-// Type 6: absolute logical cursor position forwarded during input capture.
+static constexpr uint16_t SKI1_Type_Focus       = 5;
+// Type 7: absolute logical cursor position forwarded during input capture.
 // Carries the accumulated logical client-coordinate cursor together with the
 // raw delta that triggered the update (0 when the fallback WM_MOUSEMOVE delta
 // path fired) and any button/wheel data from the same raw-input event.
-static constexpr uint16_t SKI1_Type_LogicalMouseAbs = 6;
+// NOTE: type 6 is reserved for the SKI1R relay pipe (SKI1_Type_WinMsgMouseEx,
+// enriched mouse events published by SidecarKHost on SidecarK_InputRelay_{pid}).
+// Using 7 here avoids colliding with that relay-only type assignment.
+static constexpr uint16_t SKI1_Type_LogicalMouseAbs = 7;
 
 struct SKI1_WinMsgMouse
 {
@@ -6001,6 +6004,14 @@ struct SKI1_LogicalMouseAbs
   int32_t  wheelDelta;  // wheel delta; 0 if no wheel event
 };
 #pragma pack(pop)
+
+static_assert (sizeof (SKI1_Header)         == 12u, "SKI1_Header size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_WinMsgMouse)    == 24u, "SKI1_WinMsgMouse size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_WinMsgKey)      == 20u, "SKI1_WinMsgKey size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_RawMouse)       == 16u, "SKI1_RawMouse size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_RawKey)         == 16u, "SKI1_RawKey size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_Focus)          == 16u, "SKI1_Focus size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_LogicalMouseAbs)== 24u, "SKI1_LogicalMouseAbs size changed — update SidecarKHost");
 
 // Non-blocking overlapped pipe writer state
 static HANDLE    s_ski1_pipe    = INVALID_HANDLE_VALUE;
@@ -6097,7 +6108,11 @@ static bool SKI1_EnsurePipe ()
                              OPEN_EXISTING,
                              FILE_FLAG_OVERLAPPED, nullptr);
   if (s_ski1_pipe == INVALID_HANDLE_VALUE)
+  {
+    SKI1_DiagLog (L"SKI1_EnsurePipe: connect failed err=%lu pipe=%s",
+                  (unsigned long)GetLastError (), name);
     return false;
+  }
 
   s_ski1_write_pending = false;
   return true;
