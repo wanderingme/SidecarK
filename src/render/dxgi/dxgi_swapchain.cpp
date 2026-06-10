@@ -830,7 +830,7 @@ IWrapDXGISwapChain::PresentBase (void)
 // restores saved state.  Returns true on success, false on any failure (caller
 // must then skip the overlay entirely and call original Present).
 // ============================================================================
-static bool
+bool
 SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
                                   ID3D11DeviceContext* ctx,
                                   ID3D11Texture2D*     srcTex,
@@ -2602,11 +2602,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
             // (producer-side padding), so we use s_skf1.stride as the row pitch.
             const size_t snapshot_bytes12 = (size_t)s_skf1.stride * (size_t)copyH12;
             const bool attempting_upload = (counter_changed || !s_skf1.has_frame);
-            bool d3d12_has_upload_for_staging = false;
-            UINT d3d12_upload_row_pitch = 0;
-            (void)d3d12_has_upload_for_staging;
-            (void)d3d12_upload_row_pitch;
-
             if (valid12 && attempting_upload)
             {
               if (s_frame_snapshot12.size () != snapshot_bytes12)
@@ -2776,9 +2771,6 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
                     }
                   }
                   s_d3d12_upload_buffer->Unmap(0, nullptr);
-
-                  d3d12_has_upload_for_staging = true;
-                  d3d12_upload_row_pitch = uploadRowPitch;
 
                   s_skf1.last_counter = c1_12;
                   s_skf1.has_frame = true;

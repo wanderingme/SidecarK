@@ -4311,13 +4311,16 @@ SK_DXGI_SKF1_Present ( IDXGISwapChain      *This,
     return pfnPresent (This, SyncInterval, Flags);
   }
 
-  // Blit the overlay texture onto the backbuffer using CopySubresourceRegion.
-  // No alpha-blend in the minimal path: it keeps the code free of SpecialK
-  // helpers and shader setup.
+  // Alpha-composite the overlay onto the backbuffer using premultiplied alpha
+  // (SrcBlend=ONE, DestBlend=INV_SRC_ALPHA).  Transparent overlay pixels
+  // (A=0, RGB=0) do not overwrite the game with black.
+  // On failure, overlay is skipped and the game frame is presented unmodified.
   if (s_hasFrame && s_tex != nullptr && s_texFmt == bbDesc.Format)
   {
-    D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
-    ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);
+    if (!SKC_D3D11_AlphaCompositeOverlay (dev, ctx, s_tex, bb, copyW, copyH))
+    {
+      // Alpha composite failed: overlay skipped this frame.
+    }
   }
 
   bb->Release ();
@@ -4679,8 +4682,10 @@ SK_DXGI_SKF1_Present1 ( IDXGISwapChain1              *This,
 
   if (s_hasFrame && s_tex != nullptr && s_texFmt == bbDesc.Format)
   {
-    D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
-    ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);
+    if (!SKC_D3D11_AlphaCompositeOverlay (dev, ctx, s_tex, bb, copyW, copyH))
+    {
+      // Alpha composite failed: overlay skipped this frame.
+    }
   }
 
   bb->Release (); ctx->Release (); dev->Release ();
