@@ -157,12 +157,12 @@ CreateSwapChain_pfn               CreateSwapChain_Original               = nullp
 PresentSwapChain_pfn              Present_Original                       = nullptr;
 Present1SwapChain1_pfn            Present1_Original                      = nullptr;
 
-// SidecarK/Virule minimal DXGI fast-path flag.
+// SidecarK minimal DXGI fast-path flag.
 // Set once in SK_HookDXGI when Local\SidecarK_Control_<pid>/SKC1 is detected.
 // When non-zero, PresentCallback/Present1Callback bypass full SpecialK DXGI
 // dispatch and route directly through the minimal SKF1 helper.
 // Access via InterlockedCompareExchange only (matches GL pattern).
-static volatile LONG g_sk_dxgi_virule_minimal = 0;
+static volatile LONG g_sk_dxgi_sidecar_minimal = 0;
 
 SetFullscreenState_pfn            SetFullscreenState_Original            = nullptr;
 GetFullscreenState_pfn            GetFullscreenState_Original            = nullptr;
@@ -3683,21 +3683,29 @@ SK_DXGI_DispatchPresent1 (IDXGISwapChain1         *This,
                                                    pPresentParameters );
 }
 
+// Forward declaration — defined later in this file.
+static HRESULT STDMETHODCALLTYPE
+SK_DXGI_SKF1_Present1 ( IDXGISwapChain1              *This,
+                         UINT                          SyncInterval,
+                         UINT                          Flags,
+                   const DXGI_PRESENT_PARAMETERS      *pPresentParameters,
+                         Present1SwapChain1_pfn        pfnPresent1 );
+
 HRESULT
   STDMETHODCALLTYPE Present1Callback (IDXGISwapChain1         *This,
                                       UINT                     SyncInterval,
                                       UINT                     Flags,
                                 const DXGI_PRESENT_PARAMETERS *pPresentParameters)
 {
-  // Minimal SidecarK/Virule-managed fast path: bypass full SpecialK DXGI
+  // Minimal SidecarK-managed fast path: bypass full SpecialK DXGI
   // dispatch entirely.  Present1_Original is the MinHook trampoline and is
-  // never null here because g_sk_dxgi_virule_minimal is only set after hooks
+  // never null here because g_sk_dxgi_sidecar_minimal is only set after hooks
   // are enabled.
   // InterlockedCompareExchange(p, 0, 0) is the standard Windows atomic-read
   // idiom: it returns the current value without modifying it.
-  if (InterlockedCompareExchange (&g_sk_dxgi_virule_minimal, 0, 0) != 0 &&
+  if (InterlockedCompareExchange (&g_sk_dxgi_sidecar_minimal, 0, 0) != 0 &&
       Present1_Original != nullptr)
-    return SK_DXGI_ViruleSKF1_Present1 (This, SyncInterval, Flags, pPresentParameters, Present1_Original);
+    return SK_DXGI_SKF1_Present1 (This, SyncInterval, Flags, pPresentParameters, Present1_Original);
 
   // Almost never used by anything, so log it if it happens.
   SK_LOG_ONCE (L"Present1 ({Hooked SwapChain})");
@@ -3762,7 +3770,7 @@ SK_DXGI_DispatchPresent (IDXGISwapChain        *This,
 }
 
 // ============================================================================
-// Shared constants / helpers for the minimal SidecarK/Virule DXGI Present and
+// Shared constants / helpers for the minimal SidecarK DXGI Present and
 // Present1 fast paths.  These are file-scope so both helpers can use them
 // without duplication.
 // ============================================================================
@@ -3780,7 +3788,7 @@ static constexpr uint32_t  c_skf1_dxgi_min_dim     = 64u;
 // concurrent use, but this helper is only for debug/diagnostic builds and
 // the race is benign (no heap corruption).
 static void
-SK_DXGI_ViruleLog (const wchar_t *tag, const wchar_t *fmt, ...)
+SK_DXGI_SidecarLog (const wchar_t *tag, const wchar_t *fmt, ...)
 {
   if (! SidecarK_DiagnosticsEnabled ())
     return;
@@ -3834,9 +3842,9 @@ SK_DXGI_BGRA8_To_R10G10B10A2Row (const uint8_t *__restrict src,
 }
 
 // ============================================================================
-// Minimal SidecarK/Virule-managed DXGI Present helper.
+// Minimal SidecarK-managed DXGI Present helper.
 //
-// Called instead of SK_DXGI_DispatchPresent when g_sk_dxgi_virule_minimal != 0.
+// Called instead of SK_DXGI_DispatchPresent when g_sk_dxgi_sidecar_minimal != 0.
 // Checks the SidecarK control plane and SKF1 overlay frame state, performs the
 // minimum necessary D3D11 composite if an overlay frame is ready, then calls
 // the original Present function pointer directly.
@@ -3846,7 +3854,7 @@ SK_DXGI_BGRA8_To_R10G10B10A2Row (const uint8_t *__restrict src,
 // or any other full SpecialK render-path function.
 //
 // pfnPresent must be the MinHook trampoline to the real IDXGISwapChain::Present.
-// It is never null when called from PresentCallback because g_sk_dxgi_virule_minimal
+// It is never null when called from PresentCallback because g_sk_dxgi_sidecar_minimal
 // is only set after the hook has been successfully installed.
 //
 // Fail-open: on any resource failure, calls pfnPresent(This, SyncInterval, Flags)
@@ -3856,13 +3864,13 @@ SK_DXGI_BGRA8_To_R10G10B10A2Row (const uint8_t *__restrict src,
 // render thread that calls Present; no locking is required.
 // ============================================================================
 static HRESULT STDMETHODCALLTYPE
-SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
+SK_DXGI_SKF1_Present ( IDXGISwapChain      *This,
                               UINT                 SyncInterval,
                               UINT                 Flags,
                               PresentSwapChain_pfn pfnPresent )
 {
   // c_skf1_dxgi_max_dim and _Log are shared file-scope helpers above.
-  // Use SK_DXGI_ViruleLog for diagnostics and c_skf1_dxgi_max_dim for limits.
+  // Use SK_DXGI_SidecarLog for diagnostics and c_skf1_dxgi_max_dim for limits.
 
 
   static HANDLE              s_ctrlMap         = nullptr;
@@ -3900,7 +3908,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
   if (! s_loggedFirst)
   {
     s_loggedFirst = true;
-    SK_DXGI_ViruleLog (L"dxgi-minimal",
+    SK_DXGI_SidecarLog (L"dxgi-minimal",
       L"first minimal DXGI Present entered SyncInterval=%u Flags=0x%X sc=%p pfn=%p",
       SyncInterval, Flags, This, (void *)pfnPresent);
   }
@@ -3952,7 +3960,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
             s_ctrlBase       = base;
             s_ctrlPid        = pidNow;
             s_overlayEnabled = reinterpret_cast<volatile LONG *>(base + 0x08);
-            SK_DXGI_ViruleLog (L"dxgi-minimal", L"ctrl map opened overlay_initial=%ld", (long)*s_overlayEnabled);
+            SK_DXGI_SidecarLog (L"dxgi-minimal", L"ctrl map opened overlay_initial=%ld", (long)*s_overlayEnabled);
           }
           else
           {
@@ -3979,7 +3987,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
     if (! s_loggedOff)
     {
       s_loggedOff = true;
-      SK_DXGI_ViruleLog (L"dxgi-minimal", L"overlay disabled -> direct original Present");
+      SK_DXGI_SidecarLog (L"dxgi-minimal", L"overlay disabled -> direct original Present");
     }
     return pfnPresent (This, SyncInterval, Flags);
   }
@@ -4033,7 +4041,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
 
     if (! (magic_ok && ver_ok && hdr_ok && off_ok && fmt_ok && dims_ok && stride_ok && size_ok))
     {
-      SK_DXGI_ViruleLog (L"dxgi-minimal", L"invalid SKF1 header magic_ok=%d ver_ok=%d hdr_ok=%d fmt_ok=%d dims_ok=%d -> direct Present",
+      SK_DXGI_SidecarLog (L"dxgi-minimal", L"invalid SKF1 header magic_ok=%d ver_ok=%d hdr_ok=%d fmt_ok=%d dims_ok=%d -> direct Present",
             (int)magic_ok, (int)ver_ok, (int)hdr_ok, (int)fmt_ok, (int)dims_ok);
       UnmapViewOfFile (base);
       CloseHandle (hMap);
@@ -4048,7 +4056,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
     s_stride   = stride;
     s_fmt      = pixFmt;
     s_dataOff  = dataOff;
-    SK_DXGI_ViruleLog (L"dxgi-minimal", L"SKF1 map opened %ux%u stride=%u data_off=0x%X map_bytes=%llu",
+    SK_DXGI_SidecarLog (L"dxgi-minimal", L"SKF1 map opened %ux%u stride=%u data_off=0x%X map_bytes=%llu",
           w, h, stride, dataOff, (unsigned long long)mapBytes);
   }
 
@@ -4067,7 +4075,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
                       (s_mapBytes == 0 || pe <= (uint64_t)s_mapBytes);
       if (ok)
       {
-        SK_DXGI_ViruleLog (L"dxgi-minimal", L"overlay dims changed %ux%u -> %ux%u stride=%u", s_w, s_h, lw, lh, ls);
+        SK_DXGI_SidecarLog (L"dxgi-minimal", L"overlay dims changed %ux%u -> %ux%u stride=%u", s_w, s_h, lw, lh, ls);
         s_w = lw; s_h = lh; s_stride = ls;
         if (s_tex != nullptr)
         {
@@ -4091,7 +4099,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
     if (! s_loggedSentinel)
     {
       s_loggedSentinel = true;
-      SK_DXGI_ViruleLog (L"dxgi-minimal", L"invalid/no SKF1 frame (sentinel dims %ux%u) -> direct Present", s_w, s_h);
+      SK_DXGI_SidecarLog (L"dxgi-minimal", L"invalid/no SKF1 frame (sentinel dims %ux%u) -> direct Present", s_w, s_h);
     }
     return pfnPresent (This, SyncInterval, Flags);
   }
@@ -4107,7 +4115,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
     if (! s_loggedZero)
     {
       s_loggedZero = true;
-      SK_DXGI_ViruleLog (L"dxgi-minimal", L"invalid/no SKF1 frame (frame_counter==0) -> direct Present");
+      SK_DXGI_SidecarLog (L"dxgi-minimal", L"invalid/no SKF1 frame (frame_counter==0) -> direct Present");
     }
     return pfnPresent (This, SyncInterval, Flags);
   }
@@ -4197,7 +4205,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
     HRESULT hrTex = dev->CreateTexture2D (&tdesc, nullptr, &s_tex);
     if (FAILED (hrTex) || s_tex == nullptr)
     {
-      SK_DXGI_ViruleLog (L"dxgi-minimal", L"HRESULT hr=0x%08X creating overlay texture %ux%u fmt=%u -> direct Present",
+      SK_DXGI_SidecarLog (L"dxgi-minimal", L"HRESULT hr=0x%08X creating overlay texture %ux%u fmt=%u -> direct Present",
             (unsigned)hrTex, copyW, copyH, (unsigned)bbDesc.Format);
       if (s_tex != nullptr) { s_tex->Release (); s_tex = nullptr; }
       bb->Release ();
@@ -4214,7 +4222,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
     if (! s_loggedTexOk)
     {
       s_loggedTexOk = true;
-      SK_DXGI_ViruleLog (L"dxgi-minimal", L"first valid composite attempt: tex=%p %ux%u fmt=%u",
+      SK_DXGI_SidecarLog (L"dxgi-minimal", L"first valid composite attempt: tex=%p %ux%u fmt=%u",
             (void *)s_tex, copyW, copyH, (unsigned)bbDesc.Format);
     }
   }
@@ -4319,7 +4327,7 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
   return pfnPresent (This, SyncInterval, Flags);
 }
 
-// Present1 variant of the minimal SidecarK/Virule DXGI fast path.
+// Present1 variant of the minimal SidecarK DXGI fast path.
 //
 // Handles the SidecarK control-plane check and SKF1 frame validation, performs
 // minimal D3D11 composite work if a valid frame exists, then calls the original
@@ -4332,13 +4340,13 @@ SK_DXGI_ViruleSKF1_Present ( IDXGISwapChain      *This,
 //
 // Note: Present1 is "almost never used" per the existing code comment.
 static HRESULT STDMETHODCALLTYPE
-SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
+SK_DXGI_SKF1_Present1 ( IDXGISwapChain1              *This,
                                UINT                          SyncInterval,
                                UINT                          Flags,
                         const  DXGI_PRESENT_PARAMETERS      *pPresentParameters,
                                Present1SwapChain1_pfn        pfnPresent1 )
 {
-  // c_skf1_dxgi_max_dim and SK_DXGI_ViruleLog are shared file-scope helpers above.
+  // c_skf1_dxgi_max_dim and SK_DXGI_SidecarLog are shared file-scope helpers above.
 
   // Control-plane state (independent from the Present path)
   static HANDLE              s_ctrlMap         = nullptr;
@@ -4374,7 +4382,7 @@ SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
   if (! s_loggedFirst)
   {
     s_loggedFirst = true;
-    SK_DXGI_ViruleLog (L"dxgi-minimal-p1",
+    SK_DXGI_SidecarLog (L"dxgi-minimal-p1",
       L"first minimal DXGI Present1 entered SyncInterval=%u Flags=0x%X sc=%p pfn=%p",
       SyncInterval, Flags, This, (void *)pfnPresent1);
   }
@@ -4424,7 +4432,7 @@ SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
             s_ctrlBase       = base;
             s_ctrlPid        = pidNow;
             s_overlayEnabled = reinterpret_cast<volatile LONG *>(base + 0x08);
-            SK_DXGI_ViruleLog (L"dxgi-minimal-p1", L"ctrl map opened overlay_initial=%ld", (long)*s_overlayEnabled);
+            SK_DXGI_SidecarLog (L"dxgi-minimal-p1", L"ctrl map opened overlay_initial=%ld", (long)*s_overlayEnabled);
           }
           else
           {
@@ -4450,7 +4458,7 @@ SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
     if (! s_loggedOff)
     {
       s_loggedOff = true;
-      SK_DXGI_ViruleLog (L"dxgi-minimal-p1", L"overlay disabled -> direct original Present1");
+      SK_DXGI_SidecarLog (L"dxgi-minimal-p1", L"overlay disabled -> direct original Present1");
     }
     return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
   }
@@ -4502,7 +4510,7 @@ SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
 
     if (! (magic_ok && ver_ok && hdr_ok && off_ok && fmt_ok && dims_ok && stride_ok && size_ok))
     {
-      SK_DXGI_ViruleLog (L"dxgi-minimal-p1", L"invalid SKF1 header -> direct Present1");
+      SK_DXGI_SidecarLog (L"dxgi-minimal-p1", L"invalid SKF1 header -> direct Present1");
       UnmapViewOfFile (base);
       CloseHandle (hMap);
       return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
@@ -4544,12 +4552,12 @@ SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
     if (! s_loggedZero)
     {
       s_loggedZero = true;
-      SK_DXGI_ViruleLog (L"dxgi-minimal-p1", L"invalid/no SKF1 frame (frame_counter==0) -> direct Present1");
+      SK_DXGI_SidecarLog (L"dxgi-minimal-p1", L"invalid/no SKF1 frame (frame_counter==0) -> direct Present1");
     }
     return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
   }
 
-  // -- Minimal D3D11 composite (same logic as SK_DXGI_ViruleSKF1_Present) ------
+  // -- Minimal D3D11 composite (same logic as SK_DXGI_SKF1_Present) ------
   ID3D11Device*        dev = nullptr;
   ID3D11DeviceContext* ctx = nullptr;
 
@@ -4600,14 +4608,14 @@ SK_DXGI_ViruleSKF1_Present1 ( IDXGISwapChain1              *This,
     HRESULT hrTex = dev->CreateTexture2D (&tdesc, nullptr, &s_tex);
     if (FAILED (hrTex) || s_tex == nullptr)
     {
-      SK_DXGI_ViruleLog (L"dxgi-minimal-p1", L"HRESULT hr=0x%08X creating overlay texture %ux%u -> direct Present1", (unsigned)hrTex, copyW, copyH);
+      SK_DXGI_SidecarLog (L"dxgi-minimal-p1", L"HRESULT hr=0x%08X creating overlay texture %ux%u -> direct Present1", (unsigned)hrTex, copyW, copyH);
       if (s_tex != nullptr) { s_tex->Release (); s_tex = nullptr; }
       bb->Release (); ctx->Release (); dev->Release ();
       return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
     }
     s_texFmt = bbDesc.Format; s_texW = copyW; s_texH = copyH;
     static bool s_loggedTexOk = false;
-    if (! s_loggedTexOk) { s_loggedTexOk = true; SK_DXGI_ViruleLog (L"dxgi-minimal-p1", L"first valid composite attempt (Present1): %ux%u fmt=%u", copyW, copyH, (unsigned)bbDesc.Format); }
+    if (! s_loggedTexOk) { s_loggedTexOk = true; SK_DXGI_SidecarLog (L"dxgi-minimal-p1", L"first valid composite attempt (Present1): %ux%u fmt=%u", copyW, copyH, (unsigned)bbDesc.Format); }
   }
 
   const uint8_t* srcBase       = s_base + (size_t)s_dataOff;
@@ -4686,15 +4694,15 @@ STDMETHODCALLTYPE PresentCallback ( IDXGISwapChain *This,
                                     UINT            SyncInterval,
                                     UINT            Flags )
 {
-  // Minimal SidecarK/Virule-managed fast path: bypass full SpecialK DXGI
+  // Minimal SidecarK-managed fast path: bypass full SpecialK DXGI
   // dispatch entirely.  Present_Original is the MinHook trampoline set by
   // SK_DXGI_HookPresentBase and is never null here because
-  // g_sk_dxgi_virule_minimal is only set after that hook is enabled.
+  // g_sk_dxgi_sidecar_minimal is only set after that hook is enabled.
   // InterlockedCompareExchange(p, 0, 0) is the standard Windows atomic-read
   // idiom: it returns the current value without modifying it.
-  if (InterlockedCompareExchange (&g_sk_dxgi_virule_minimal, 0, 0) != 0 &&
+  if (InterlockedCompareExchange (&g_sk_dxgi_sidecar_minimal, 0, 0) != 0 &&
       Present_Original != nullptr)
-    return SK_DXGI_ViruleSKF1_Present (This, SyncInterval, Flags, Present_Original);
+    return SK_DXGI_SKF1_Present (This, SyncInterval, Flags, Present_Original);
 
   static bool _sk_dxgi_present_detour_hit = false;
   if (! std::exchange (_sk_dxgi_present_detour_hit, true))
@@ -9787,8 +9795,8 @@ SK_HookDXGI (void)
 
   if (! InterlockedCompareExchangeAcquire (&hooked, TRUE, FALSE))
   {
-    // One-shot SidecarK/Virule-managed probe: open Local\SidecarK_Control_<pid>
-    // and validate the SKC1 signature.  If confirmed, set g_sk_dxgi_virule_minimal
+    // One-shot SidecarK-managed probe: open Local\SidecarK_Control_<pid>
+    // and validate the SKC1 signature.  If confirmed, set g_sk_dxgi_sidecar_minimal
     // so that PresentCallback / Present1Callback bypass the full SpecialK DXGI
     // dispatch path.  Identical pattern to the GL probe in SK_HookGL.
     {
@@ -9814,7 +9822,7 @@ SK_HookDXGI (void)
               *(const uint32_t *)(pProbe + 0x04) == 1u;
             UnmapViewOfFile (pProbe);
             if (probe_ok)
-              InterlockedExchange (&g_sk_dxgi_virule_minimal, 1);
+              InterlockedExchange (&g_sk_dxgi_sidecar_minimal, 1);
           }
           CloseHandle (hProbe);
         }
