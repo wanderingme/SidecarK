@@ -6005,13 +6005,13 @@ struct SKI1_LogicalMouseAbs
 };
 #pragma pack(pop)
 
-static_assert (sizeof (SKI1_Header)         == 12u, "SKI1_Header size changed — update SidecarKHost");
-static_assert (sizeof (SKI1_WinMsgMouse)    == 24u, "SKI1_WinMsgMouse size changed — update SidecarKHost");
-static_assert (sizeof (SKI1_WinMsgKey)      == 20u, "SKI1_WinMsgKey size changed — update SidecarKHost");
-static_assert (sizeof (SKI1_RawMouse)       == 16u, "SKI1_RawMouse size changed — update SidecarKHost");
-static_assert (sizeof (SKI1_RawKey)         == 16u, "SKI1_RawKey size changed — update SidecarKHost");
-static_assert (sizeof (SKI1_Focus)          == 16u, "SKI1_Focus size changed — update SidecarKHost");
-static_assert (sizeof (SKI1_LogicalMouseAbs)== 24u, "SKI1_LogicalMouseAbs size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_Header)          == 12u, "SKI1_Header size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_WinMsgMouse)     == 24u, "SKI1_WinMsgMouse size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_WinMsgKey)       == 20u, "SKI1_WinMsgKey size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_RawMouse)        == 16u, "SKI1_RawMouse size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_RawKey)          == 16u, "SKI1_RawKey size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_Focus)           == 16u, "SKI1_Focus size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_LogicalMouseAbs) == 24u, "SKI1_LogicalMouseAbs size changed — update SidecarKHost");
 
 // Non-blocking overlapped pipe writer state
 static HANDLE    s_ski1_pipe    = INVALID_HANDLE_VALUE;
