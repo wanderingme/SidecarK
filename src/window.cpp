@@ -6029,7 +6029,7 @@ static void SKI1_DiagLog (const wchar_t* fmt, ...)
   wcscat_s (path, MAX_PATH, L"SidecarK_Overlay.log");
 
   FILE* f = nullptr;
-  _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+  _wfopen_s (&f, path, L"a+,ccs=UTF-8");
   if (f == nullptr)
     return;
 
@@ -6277,17 +6277,26 @@ static void SKI1_SendWinMsgMouse (UINT uMsg, WPARAM wParam, LPARAM lParam)
         // making the lParam absolute coordinates center-biased and unreliable.
         // Primary driver is the raw-delta path in SKI1_SendRawInput; fall back
         // to WM_MOUSEMOVE deltas (with a jump guard) only when no raw input has
-        // been observed in the last 200 ms — covering games that do not use the
-        // raw-input API at all.
+        // been observed recently — covering games that do not use the raw-input
+        // API at all.
+        //
+        // 200 ms: long enough to avoid suppressing the fallback path when there
+        // is only an occasional WM_INPUT gap; short enough that the cursor
+        // switches back promptly if raw input stops arriving (e.g. the game
+        // de-registers the raw-input device while the overlay is open).
+        static constexpr ULONGLONG kRawInputFallbackThresholdMs = 200u;
         const ULONGLONG nowMs = GetTickCount64 ();
-        if (nowMs - s_skc_last_raw_delta_ms >= 200u)
+        if (nowMs - s_skc_last_raw_delta_ms >= kRawInputFallbackThresholdMs)
         {
           if (s_skc_prev_wm_mousemove.x != INT_MIN)
           {
             const int ddx = p.x - s_skc_prev_wm_mousemove.x;
             const int ddy = p.y - s_skc_prev_wm_mousemove.y;
-            // Skip jumps larger than 150 px — these are almost certainly
-            // game-driven recenters, not real mouse movement.
+            // Skip jumps larger than kJumpGuard pixels — large single-frame
+            // deltas are almost certainly a game-driven SetCursorPos recenter
+            // (which typically snaps the cursor back to the window center),
+            // not real mouse movement.  Typical per-frame mouse deltas at even
+            // high sensitivity settings stay well below 100 px/frame.
             static constexpr int kJumpGuard = 150;
             if (ddx > -kJumpGuard && ddx < kJumpGuard &&
                 ddy > -kJumpGuard && ddy < kJumpGuard &&

@@ -838,7 +838,7 @@ SKC_SidecarLog (const wchar_t* fmt, ...)
   wcscat_s (path, L"SidecarK_Overlay.log");
 
   FILE* f = nullptr;
-  _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+  _wfopen_s (&f, path, L"a+,ccs=UTF-8");
   if (f == nullptr)
     return;
 
