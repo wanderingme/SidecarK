@@ -820,6 +820,46 @@ IWrapDXGISwapChain::PresentBase (void)
 }
 
 // ============================================================================
+// File-scope diagnostic logger used by SKC_D3D11_AlphaCompositeOverlay.
+// Mirrors the _SidecarLog lambda defined in Present() but is callable from
+// free functions that precede that lambda in translation-unit order.
+// ============================================================================
+static void
+SKC_SidecarLog (const wchar_t* fmt, ...)
+{
+  if (! SidecarK_DiagnosticsEnabled ())
+    return;
+
+  wchar_t path [MAX_PATH] = { };
+  DWORD cch = GetTempPathW (MAX_PATH, path);
+  if (cch == 0 || cch >= MAX_PATH)
+    return;
+
+  wcscat_s (path, L"SidecarK_Overlay.log");
+
+  FILE* f = nullptr;
+  _wfopen_s (&f, path, L"a+, ccs=UTF-8");
+  if (f == nullptr)
+    return;
+
+  SYSTEMTIME st = { };
+  GetLocalTime (&st);
+
+  fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu ",
+            st.wYear, st.wMonth, st.wDay,
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+            (unsigned long)GetCurrentProcessId ());
+
+  va_list args;
+  va_start (args, fmt);
+  vfwprintf (f, fmt, args);
+  va_end (args);
+
+  fwprintf (f, L"\n");
+  fclose (f);
+}
+
+// ============================================================================
 // Minimal premultiplied-alpha overlay compositor for D3D11.
 //   source : srcTex  — overlay BGRA/RGBA texture (D3D11_BIND_SHADER_RESOURCE)
 //   dest   : dstTex  — swapchain backbuffer
@@ -916,7 +956,7 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
       rawCtx->Release ();
       static std::atomic<bool> s_logged_vs_compile_error = false;
       if (!s_logged_vs_compile_error.exchange (true))
-        _SidecarLog (L"SKC overlay: VS compile failed hr=0x%08X", (unsigned)hr);
+        SKC_SidecarLog (L"SKC overlay: VS compile failed hr=0x%08X", (unsigned)hr);
       return false;
     }
 
@@ -932,7 +972,7 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
       rawCtx->Release ();
       static std::atomic<bool> s_logged_ps_compile_error = false;
       if (!s_logged_ps_compile_error.exchange (true))
-        _SidecarLog (L"SKC overlay: PS compile failed hr=0x%08X", (unsigned)hr);
+        SKC_SidecarLog (L"SKC overlay: PS compile failed hr=0x%08X", (unsigned)hr);
       return false;
     }
 
@@ -947,7 +987,7 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
       rawCtx->Release ();
       static std::atomic<bool> s_logged_vs_create_error = false;
       if (!s_logged_vs_create_error.exchange (true))
-        _SidecarLog (L"SKC overlay: CreateVertexShader failed hr=0x%08X", (unsigned)hr);
+        SKC_SidecarLog (L"SKC overlay: CreateVertexShader failed hr=0x%08X", (unsigned)hr);
       return false;
     }
 
@@ -961,7 +1001,7 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
       rawCtx->Release ();
       static std::atomic<bool> s_logged_ps_create_error = false;
       if (!s_logged_ps_create_error.exchange (true))
-        _SidecarLog (L"SKC overlay: CreatePixelShader failed hr=0x%08X", (unsigned)hr);
+        SKC_SidecarLog (L"SKC overlay: CreatePixelShader failed hr=0x%08X", (unsigned)hr);
       return false;
     }
 
@@ -985,7 +1025,7 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
       rawCtx->Release ();
       static std::atomic<bool> s_logged_blend_state_error = false;
       if (!s_logged_blend_state_error.exchange (true))
-        _SidecarLog (L"SKC overlay: CreateBlendState failed hr=0x%08X", (unsigned)hr);
+        SKC_SidecarLog (L"SKC overlay: CreateBlendState failed hr=0x%08X", (unsigned)hr);
       return false;
     }
 
@@ -1001,12 +1041,12 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
       rawCtx->Release ();
       static std::atomic<bool> s_logged_sampler_state_error = false;
       if (!s_logged_sampler_state_error.exchange (true))
-        _SidecarLog (L"SKC overlay: CreateSamplerState failed hr=0x%08X", (unsigned)hr);
+        SKC_SidecarLog (L"SKC overlay: CreateSamplerState failed hr=0x%08X", (unsigned)hr);
       return false;
     }
 
     s_cache.valid = true;
-    _SidecarLog (L"SKC overlay: D3D11 compositor ready (dev=%p)", dev);
+    SKC_SidecarLog (L"SKC overlay: D3D11 compositor ready (dev=%p)", dev);
   }
 
   // ---- Per-call SRV and RTV ----
@@ -1027,7 +1067,7 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
     rawCtx->Release ();
     static std::atomic<bool> s_logged_srv_create_error = false;
     if (!s_logged_srv_create_error.exchange (true))
-      _SidecarLog (L"SKC overlay: CreateSRV failed hr=0x%08X", (unsigned)hr);
+      SKC_SidecarLog (L"SKC overlay: CreateSRV failed hr=0x%08X", (unsigned)hr);
     return false;
   }
 
@@ -1047,7 +1087,7 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
     rawCtx->Release ();
     static std::atomic<bool> s_logged_rtv_create_error = false;
     if (!s_logged_rtv_create_error.exchange (true))
-      _SidecarLog (L"SKC overlay: CreateRTV failed hr=0x%08X fmt=%u", (unsigned)hr, (unsigned)dstDesc.Format);
+      SKC_SidecarLog (L"SKC overlay: CreateRTV failed hr=0x%08X fmt=%u", (unsigned)hr, (unsigned)dstDesc.Format);
     return false;
   }
 
