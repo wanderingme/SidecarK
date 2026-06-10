@@ -1869,12 +1869,22 @@ ClipCursor_Detour (const RECT *lpRect)
   SK_LOG_FIRST_CALL
 
   // While overlay is active, always unclip so the cursor can move freely.
-  // Use SK_ClipCursor (not ClipCursor_Original directly) so that the dedup
-  // cache in SK_ClipCursor tracks "null / unconfined" state.  This is required
-  // so that the ON→OFF transition restore in SKC_IsInputCaptureEnabledCached will
-  // find lastRect != game_window.cursor_clip and actually issue the OS call.
-  if (SKC_IsInputCaptureEnabledCached ())
+  // Check both cached (performance) and non-cached (immediate ON transition)
+  // so that a newly-opened overlay unclips the cursor on the first call
+  // rather than waiting up to 16 ms for the cache to refresh.
+  //
+  // Also track the game's intended clip rect so it can be restored correctly
+  // when the overlay closes (SKC_IsInputCaptureEnabledCached ON→OFF path).
+  if (SKC_IsInputCaptureEnabledCached () || SKC_IsInputCaptureEnabled ())
+  {
+    if (lpRect != nullptr)
+      game_window.cursor_clip = *lpRect;
+    else
+    {
+      game_window.cursor_clip = { LONG_MIN, LONG_MIN, LONG_MAX, LONG_MAX };
+    }
     return SK_ClipCursor (nullptr);
+  }
 
   // Overlay closed: pass through exactly so the game's cursor confinement is unaffected.
   return ClipCursor_Original (lpRect);
@@ -6087,6 +6097,33 @@ static void SKI1_SendFrame (uint16_t type, const void* payload, uint32_t payload
   SKI1_WriteBuffer (total);
 }
 
+// Logical overlay cursor position (screen coordinates) maintained while
+// input capture is active.  Initialized from the real OS cursor when capture
+// turns on; updated from WM_MOUSEMOVE client coordinates during capture;
+// clamped to the game client rectangle.  Prevents the overlay cursor from
+// snapping to the game's recentered position if the game synthesizes
+// WM_MOUSEMOVE messages aimed at the center of its window.
+static POINT s_skc_overlay_cursor = {};
+
+static void SKC_UpdateOverlayCursorFromClientPt (int cx, int cy)
+{
+  if (game_window.hWnd == nullptr)
+    return;
+
+  // Clamp to the game client area (actual.client is in client-local coords).
+  const RECT& cr = game_window.actual.client;
+  if (cr.right > cr.left && cr.bottom > cr.top)
+  {
+    cx = std::max ((int)cr.left,   std::min ((int)cr.right  - 1, cx));
+    cy = std::max ((int)cr.top,    std::min ((int)cr.bottom - 1, cy));
+  }
+
+  // Convert client → screen to store as screen coordinates.
+  POINT pt = { cx, cy };
+  ClientToScreen (game_window.hWnd, &pt);
+  s_skc_overlay_cursor = pt;
+}
+
 static void SKI1_SendWinMsgMouse (UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
   SKI1_WinMsgMouse p{};
@@ -6108,6 +6145,12 @@ static void SKI1_SendWinMsgMouse (UINT uMsg, WPARAM wParam, LPARAM lParam)
     p.x     = (int32_t)(int)(short)LOWORD (lParam);
     p.y     = (int32_t)(int)(short)HIWORD (lParam);
     p.wheel = 0;
+
+    // Keep the logical overlay cursor in sync with WM_MOUSEMOVE so it tracks
+    // real pointer movement (not the game's synthetic re-center events, which
+    // are filtered before reaching this function).
+    if (uMsg == WM_MOUSEMOVE)
+      SKC_UpdateOverlayCursorFromClientPt (p.x, p.y);
   }
 
   p.buttonFlags = (uint32_t)LOWORD (wParam);
@@ -6243,6 +6286,13 @@ static bool SKC_IsInputCaptureEnabledCached ()
       SK_ClipCursor ( SK_IsClipRectFinite (&game_window.cursor_clip)
                         ? &game_window.cursor_clip
                         : nullptr );
+    }
+    else if (!s_val && s_new)
+    {
+      // Overlay just turned ON: seed the logical cursor from the real OS position
+      // so the overlay cursor starts at the actual pointer location rather than
+      // whatever the game last set via SetCursorPos.
+      SK_GetCursorPos (&s_skc_overlay_cursor);
     }
     s_val = s_new;
   }
