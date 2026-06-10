@@ -1868,6 +1868,11 @@ ClipCursor_Detour (const RECT *lpRect)
 {
   SK_LOG_FIRST_CALL
 
+  // Sentinel value representing an unconstrained (infinite) clip rectangle,
+  // used in place of nullptr so the rect can be restored later without losing
+  // the "originally unclipped" intent.
+  static constexpr RECT RECT_UNCONSTRAINED = { LONG_MIN, LONG_MIN, LONG_MAX, LONG_MAX };
+
   // While overlay is active, always unclip so the cursor can move freely.
   // Check both cached (performance) and non-cached (immediate ON transition)
   // so that a newly-opened overlay unclips the cursor on the first call
@@ -1881,7 +1886,7 @@ ClipCursor_Detour (const RECT *lpRect)
       game_window.cursor_clip = *lpRect;
     else
     {
-      game_window.cursor_clip = { LONG_MIN, LONG_MIN, LONG_MAX, LONG_MAX };
+      game_window.cursor_clip = RECT_UNCONSTRAINED;
     }
     return SK_ClipCursor (nullptr);
   }

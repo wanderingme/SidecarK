@@ -3795,7 +3795,7 @@ SK_DXGI_SidecarLog (const wchar_t *tag, const wchar_t *fmt, ...)
   wchar_t path [MAX_PATH] = { };
   DWORD cch = GetTempPathW (MAX_PATH, path);
   // Ensure there is room for the log filename after the temp path.
-  // "SidecarK_Overlay.log" is 20 characters; leave 1 for the NUL terminator.
+  // "SidecarK_Overlay.log" is 21 characters including the NUL terminator.
   static constexpr DWORD c_suffix_len = 21u; // len("SidecarK_Overlay.log") + NUL
   if (cch == 0 || cch + c_suffix_len > MAX_PATH)
     return;

@@ -914,8 +914,8 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
     {
       if (vsBlob) vsBlob->Release ();
       rawCtx->Release ();
-      static std::atomic<bool> s_once = false;
-      if (!s_once.exchange (true))
+      static std::atomic<bool> s_logged_vs_compile_error = false;
+      if (!s_logged_vs_compile_error.exchange (true))
         _SidecarLog (L"SKC overlay: VS compile failed hr=0x%08X", (unsigned)hr);
       return false;
     }
@@ -930,8 +930,8 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
       vsBlob->Release ();
       if (psBlob) psBlob->Release ();
       rawCtx->Release ();
-      static std::atomic<bool> s_once = false;
-      if (!s_once.exchange (true))
+      static std::atomic<bool> s_logged_ps_compile_error = false;
+      if (!s_logged_ps_compile_error.exchange (true))
         _SidecarLog (L"SKC overlay: PS compile failed hr=0x%08X", (unsigned)hr);
       return false;
     }
@@ -945,8 +945,8 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
       psBlob->Release ();
       s_cache.Release ();
       rawCtx->Release ();
-      static std::atomic<bool> s_once = false;
-      if (!s_once.exchange (true))
+      static std::atomic<bool> s_logged_vs_create_error = false;
+      if (!s_logged_vs_create_error.exchange (true))
         _SidecarLog (L"SKC overlay: CreateVertexShader failed hr=0x%08X", (unsigned)hr);
       return false;
     }
@@ -959,8 +959,8 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
     {
       s_cache.Release ();
       rawCtx->Release ();
-      static std::atomic<bool> s_once = false;
-      if (!s_once.exchange (true))
+      static std::atomic<bool> s_logged_ps_create_error = false;
+      if (!s_logged_ps_create_error.exchange (true))
         _SidecarLog (L"SKC overlay: CreatePixelShader failed hr=0x%08X", (unsigned)hr);
       return false;
     }
@@ -983,8 +983,8 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
     {
       s_cache.Release ();
       rawCtx->Release ();
-      static std::atomic<bool> s_once = false;
-      if (!s_once.exchange (true))
+      static std::atomic<bool> s_logged_blend_state_error = false;
+      if (!s_logged_blend_state_error.exchange (true))
         _SidecarLog (L"SKC overlay: CreateBlendState failed hr=0x%08X", (unsigned)hr);
       return false;
     }
@@ -999,8 +999,8 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
     {
       s_cache.Release ();
       rawCtx->Release ();
-      static std::atomic<bool> s_once = false;
-      if (!s_once.exchange (true))
+      static std::atomic<bool> s_logged_sampler_state_error = false;
+      if (!s_logged_sampler_state_error.exchange (true))
         _SidecarLog (L"SKC overlay: CreateSamplerState failed hr=0x%08X", (unsigned)hr);
       return false;
     }
@@ -1025,8 +1025,8 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
   {
     if (srv) srv->Release ();
     rawCtx->Release ();
-    static std::atomic<bool> s_once = false;
-    if (!s_once.exchange (true))
+    static std::atomic<bool> s_logged_srv_create_error = false;
+    if (!s_logged_srv_create_error.exchange (true))
       _SidecarLog (L"SKC overlay: CreateSRV failed hr=0x%08X", (unsigned)hr);
     return false;
   }
@@ -1045,8 +1045,8 @@ SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
     if (rtv) rtv->Release ();
     srv->Release ();
     rawCtx->Release ();
-    static std::atomic<bool> s_once = false;
-    if (!s_once.exchange (true))
+    static std::atomic<bool> s_logged_rtv_create_error = false;
+    if (!s_logged_rtv_create_error.exchange (true))
       _SidecarLog (L"SKC overlay: CreateRTV failed hr=0x%08X fmt=%u", (unsigned)hr, (unsigned)dstDesc.Format);
     return false;
   }
