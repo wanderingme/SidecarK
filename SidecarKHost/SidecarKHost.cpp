@@ -1747,13 +1747,39 @@ struct SKI1_WinMsgKey   { uint32_t msg; uint32_t vk; uint32_t scancode; uint32_t
 struct SKI1_RawMouse    { int32_t dx; int32_t dy; uint32_t buttonFlags; int32_t wheelDelta; };
 struct SKI1_RawKey      { uint32_t vkey; uint32_t makeCode; uint32_t flags; uint32_t message; };
 struct SKI1_Focus       { uint32_t msg; uint32_t active; uint32_t reserved0; uint32_t reserved1; };
+// Type 7 (input pipe): absolute logical cursor position emitted by SidecarK.dll
+// during input capture.  Carries the accumulated logical client-coordinate
+// cursor, the raw delta that triggered the update, and any button/wheel data.
+struct SKI1_LogicalMouseAbs
+{
+  int32_t  x;           // logical cursor in game client coordinates
+  int32_t  y;
+  int32_t  dx;          // raw delta that triggered this update (0 for fallback)
+  int32_t  dy;
+  uint32_t buttonFlags; // held-button bits: 0=left, 1=right, 2=middle; 0 if position-only event
+  int32_t  wheelDelta;  // wheel delta; 0 if no wheel event
+};
 #pragma pack(pop)
+
+static_assert(sizeof(SKI1_Header)          == 12u, "SKI1_Header size changed — update window.cpp");
+static_assert(sizeof(SKI1_WinMsgMouse)     == 24u, "SKI1_WinMsgMouse size changed — update window.cpp");
+static_assert(sizeof(SKI1_WinMsgKey)       == 20u, "SKI1_WinMsgKey size changed — update window.cpp");
+static_assert(sizeof(SKI1_RawMouse)        == 16u, "SKI1_RawMouse size changed — update window.cpp");
+static_assert(sizeof(SKI1_RawKey)          == 16u, "SKI1_RawKey size changed — update window.cpp");
+static_assert(sizeof(SKI1_Focus)           == 16u, "SKI1_Focus size changed — update window.cpp");
+static_assert(sizeof(SKI1_LogicalMouseAbs) == 24u, "SKI1_LogicalMouseAbs size changed — update window.cpp");
 
 static constexpr uint16_t SKI1_Type_WinMsgMouse = 1;
 static constexpr uint16_t SKI1_Type_WinMsgKey   = 2;
 static constexpr uint16_t SKI1_Type_RawMouse    = 3;
 static constexpr uint16_t SKI1_Type_RawKey      = 4;
 static constexpr uint16_t SKI1_Type_Focus       = 5;
+// Type 7 (input pipe): absolute logical cursor position emitted by SidecarK.dll
+// during input capture. Carries the accumulated logical client-coordinate cursor,
+// the raw delta that triggered the update, and any button/wheel data.
+// NOTE: type 6 is reserved for the relay pipe only (SKI1_Type_WinMsgMouseEx,
+// SidecarKHost-generated enriched mouse frames on SidecarK_InputRelay_{pid}).
+static constexpr uint16_t SKI1_Type_LogicalMouseAbs = 7u;
 
 // ---------------------------------------------------------------------------
 // SKI1R relay protocol: SidecarKHost publishes enriched mouse events to
@@ -2167,6 +2193,18 @@ static void RunInputEventPipeServer(const std::wstring& pipeName,
               memcpy(&p, payload, sizeof(p));
               wprintf(L"SKI1 Focus   msg=0x%04X active=%u\n",
                       (unsigned)p.msg, (unsigned)p.active);
+              RelayPassThrough(hdr, payload);
+            }
+            break;
+
+          case SKI1_Type_LogicalMouseAbs:
+            if (hdr->size >= sizeof(SKI1_LogicalMouseAbs))
+            {
+              SKI1_LogicalMouseAbs p;
+              memcpy(&p, payload, sizeof(p));
+              wprintf(L"logical_abs: x=%d y=%d dx=%d dy=%d btns=0x%X wheel=%d\n",
+                      (int)p.x, (int)p.y, (int)p.dx, (int)p.dy,
+                      (unsigned)p.buttonFlags, (int)p.wheelDelta);
               RelayPassThrough(hdr, payload);
             }
             break;

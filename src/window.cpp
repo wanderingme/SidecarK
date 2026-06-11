@@ -1868,13 +1868,28 @@ ClipCursor_Detour (const RECT *lpRect)
 {
   SK_LOG_FIRST_CALL
 
+  // Sentinel value representing an unconstrained (infinite) clip rectangle,
+  // used in place of nullptr so the rect can be restored later without losing
+  // the "originally unclipped" intent.
+  static constexpr RECT RECT_UNCONSTRAINED = { LONG_MIN, LONG_MIN, LONG_MAX, LONG_MAX };
+
   // While overlay is active, always unclip so the cursor can move freely.
-  // Use SK_ClipCursor (not ClipCursor_Original directly) so that the dedup
-  // cache in SK_ClipCursor tracks "null / unconfined" state.  This is required
-  // so that the ON→OFF transition restore in SKC_IsInputCaptureEnabledCached will
-  // find lastRect != game_window.cursor_clip and actually issue the OS call.
-  if (SKC_IsInputCaptureEnabledCached ())
+  // Check both cached (performance) and non-cached (immediate ON transition)
+  // so that a newly-opened overlay unclips the cursor on the first call
+  // rather than waiting up to 16 ms for the cache to refresh.
+  //
+  // Also track the game's intended clip rect so it can be restored correctly
+  // when the overlay closes (SKC_IsInputCaptureEnabledCached ON→OFF path).
+  if (SKC_IsInputCaptureEnabledCached () || SKC_IsInputCaptureEnabled ())
+  {
+    if (lpRect != nullptr)
+      game_window.cursor_clip = *lpRect;
+    else
+    {
+      game_window.cursor_clip = RECT_UNCONSTRAINED;
+    }
     return SK_ClipCursor (nullptr);
+  }
 
   // Overlay closed: pass through exactly so the game's cursor confinement is unaffected.
   return ClipCursor_Original (lpRect);
@@ -5909,6 +5924,10 @@ SK_Win32_IgnoreSysCommand (HWND hWnd, WPARAM wParam, LPARAM lParam);
 // Overlay input capture helpers (SKI1 versioned protocol)
 // ---------------------------------------------------------------------------
 extern bool SKC_IsInputCaptureEnabled ();
+extern bool SidecarK_DiagnosticsEnabled ();
+// Cursor suppression helpers in cursor.cpp — called on capture ON/OFF transitions.
+extern void SKC_ForceHideCursorForCapture   ();
+extern void SKC_ShowCursorCompensateCapture ();
 
 #pragma pack(push, 1)
 // Frame header sent before every payload
@@ -5926,6 +5945,14 @@ static constexpr uint16_t SKI1_Type_WinMsgKey   = 2;
 static constexpr uint16_t SKI1_Type_RawMouse    = 3;
 static constexpr uint16_t SKI1_Type_RawKey      = 4;
 static constexpr uint16_t SKI1_Type_Focus       = 5;
+// Type 7: absolute logical cursor position forwarded during input capture.
+// Carries the accumulated logical client-coordinate cursor together with the
+// raw delta that triggered the update (0 when the fallback WM_MOUSEMOVE delta
+// path fired) and any button/wheel data from the same raw-input event.
+// NOTE: type 6 is reserved for the SKI1R relay pipe (SKI1_Type_WinMsgMouseEx,
+// enriched mouse events published by SidecarKHost on SidecarK_InputRelay_{pid}).
+// Using 7 here avoids colliding with that relay-only type assignment.
+static constexpr uint16_t SKI1_Type_LogicalMouseAbs = 7;
 
 struct SKI1_WinMsgMouse
 {
@@ -5969,7 +5996,25 @@ struct SKI1_Focus
   uint32_t reserved0;
   uint32_t reserved1;
 };
+
+struct SKI1_LogicalMouseAbs
+{
+  int32_t  x;           // logical cursor in game client coordinates
+  int32_t  y;
+  int32_t  dx;          // raw movement delta that triggered this update (0 for fallback/absolute)
+  int32_t  dy;
+  uint32_t buttonFlags; // current held-button state: bit 0=left, bit 1=right, bit 2=middle
+  int32_t  wheelDelta;  // signed wheel delta for this event; 0 if no wheel event
+};
 #pragma pack(pop)
+
+static_assert (sizeof (SKI1_Header)          == 12u, "SKI1_Header size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_WinMsgMouse)     == 24u, "SKI1_WinMsgMouse size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_WinMsgKey)       == 20u, "SKI1_WinMsgKey size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_RawMouse)        == 16u, "SKI1_RawMouse size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_RawKey)          == 16u, "SKI1_RawKey size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_Focus)           == 16u, "SKI1_Focus size changed — update SidecarKHost");
+static_assert (sizeof (SKI1_LogicalMouseAbs) == 24u, "SKI1_LogicalMouseAbs size changed — update SidecarKHost");
 
 // Non-blocking overlapped pipe writer state
 static HANDLE    s_ski1_pipe    = INVALID_HANDLE_VALUE;
@@ -5982,6 +6027,42 @@ static uint8_t    s_ski1_buf [sizeof (SKI1_Header) + 64];
 // Only the last-seen KEYUP per slot is retained; we keep one slot (last-wins).
 static bool     s_ski1_pending_keyup      = false;
 static uint8_t  s_ski1_pending_keyup_buf [sizeof (SKI1_Header) + sizeof (SKI1_WinMsgKey)];
+
+// Writes a timestamped line to %TEMP%\SidecarK_Overlay.log when diagnostics
+// are enabled.  Mirrors the _SidecarLog lambda used in the Present path.
+static void SKI1_DiagLog (const wchar_t* fmt, ...)
+{
+  if (!SidecarK_DiagnosticsEnabled ())
+    return;
+
+  wchar_t path [MAX_PATH] = {};
+  DWORD   cch = GetTempPathW (MAX_PATH, path);
+  if (cch == 0 || cch >= MAX_PATH)
+    return;
+
+  wcscat_s (path, MAX_PATH, L"SidecarK_Overlay.log");
+
+  FILE* f = nullptr;
+  _wfopen_s (&f, path, L"a+,ccs=UTF-8");
+  if (f == nullptr)
+    return;
+
+  SYSTEMTIME st = {};
+  GetLocalTime (&st);
+
+  fwprintf (f, L"%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu ",
+            st.wYear, st.wMonth, st.wDay,
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+            (unsigned long)GetCurrentProcessId ());
+
+  va_list args;
+  va_start (args, fmt);
+  vfwprintf (f, fmt, args);
+  va_end (args);
+
+  fwprintf (f, L"\n");
+  fclose (f);
+}
 
 static void SKI1_ResetPipe ()
 {
@@ -6030,7 +6111,11 @@ static bool SKI1_EnsurePipe ()
                              OPEN_EXISTING,
                              FILE_FLAG_OVERLAPPED, nullptr);
   if (s_ski1_pipe == INVALID_HANDLE_VALUE)
+  {
+    SKI1_DiagLog (L"SKI1_EnsurePipe: connect failed err=%lu pipe=%s",
+                  (unsigned long)GetLastError (), name);
     return false;
+  }
 
   s_ski1_write_pending = false;
   return true;
@@ -6087,6 +6172,153 @@ static void SKI1_SendFrame (uint16_t type, const void* payload, uint32_t payload
   SKI1_WriteBuffer (total);
 }
 
+// Logical overlay cursor position (screen coordinates) maintained while
+// input capture is active.  Initialized from the real OS cursor when capture
+// turns on; updated from raw mouse deltas during capture; clamped to the
+// game client rectangle.  Prevents the overlay cursor from snapping to the
+// game's recentered OS cursor position on locked-mouse games.
+static POINT s_skc_overlay_cursor = {};
+
+static void SKC_UpdateOverlayCursorFromClientPt (int cx, int cy)
+{
+  if (game_window.hWnd == nullptr)
+    return;
+
+  // Clamp to the game client area (actual.client is in client-local coords).
+  const RECT& cr = game_window.actual.client;
+  if (cr.right > cr.left && cr.bottom > cr.top)
+  {
+    cx = std::max ((int)cr.left,   std::min ((int)cr.right  - 1, cx));
+    cy = std::max ((int)cr.top,    std::min ((int)cr.bottom - 1, cy));
+  }
+
+  // Convert client → screen to store as screen coordinates.
+  POINT pt = { cx, cy };
+  ClientToScreen (game_window.hWnd, &pt);
+  s_skc_overlay_cursor = pt;
+}
+
+// GetTickCount64 timestamp of the last raw-delta-driven logical cursor update.
+// Zero means no raw delta has been applied in the current capture session.
+static ULONGLONG s_skc_last_raw_delta_ms      = 0;
+
+// Previous WM_MOUSEMOVE client-coordinate position for the delta-fallback path.
+static POINT     s_skc_prev_wm_mousemove       = {};
+static bool      s_skc_prev_wm_mousemove_valid = false;
+
+// One-shot log gate; reset when capture activates.
+static bool      s_skc_logged_first_raw_delta = false;
+
+// Current held-button state for the logical cursor during overlay capture.
+// Bits: 0=left button, 1=right button, 2=middle button.
+// Reset on capture ON and capture OFF to prevent stuck buttons across toggles.
+static uint32_t  s_skc_held_buttons           = 0;
+
+// Updates s_skc_held_buttons from RAWMOUSE.usButtonFlags transition bits.
+static void SKC_UpdateHeldButtonsFromRaw (USHORT usButtonFlags)
+{
+  if (usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)   s_skc_held_buttons |=  0x1u;
+  if (usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP)     s_skc_held_buttons &= ~0x1u;
+  if (usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN)  s_skc_held_buttons |=  0x2u;
+  if (usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP)    s_skc_held_buttons &= ~0x2u;
+  if (usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_DOWN) s_skc_held_buttons |=  0x4u;
+  if (usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_UP)   s_skc_held_buttons &= ~0x4u;
+}
+
+// Updates s_skc_held_buttons from Win32 WM_*BUTTON* messages.
+static void SKC_UpdateHeldButtonsFromWinMsg (UINT uMsg)
+{
+  switch (uMsg)
+  {
+    case WM_LBUTTONDOWN: s_skc_held_buttons |=  0x1u; break;
+    case WM_LBUTTONUP:   s_skc_held_buttons &= ~0x1u; break;
+    case WM_RBUTTONDOWN: s_skc_held_buttons |=  0x2u; break;
+    case WM_RBUTTONUP:   s_skc_held_buttons &= ~0x2u; break;
+    case WM_MBUTTONDOWN: s_skc_held_buttons |=  0x4u; break;
+    case WM_MBUTTONUP:   s_skc_held_buttons &= ~0x4u; break;
+    default: break;
+  }
+}
+
+// Builds and sends a SKI1_Type_LogicalMouseAbs (type-7) frame using the
+// current logical cursor position and held-button state.
+// dx/dy should be the movement delta that caused this update; pass 0 for
+// Win32-fallback or absolute-input events where no delta is available.
+static void SKC_SendLogicalMouseAbs (int32_t dx, int32_t dy, int32_t wheelDelta)
+{
+  SKI1_LogicalMouseAbs p{};
+  if (game_window.hWnd != nullptr)
+  {
+    POINT cl = s_skc_overlay_cursor;
+    ScreenToClient (game_window.hWnd, &cl);
+    p.x = (int32_t)cl.x;
+    p.y = (int32_t)cl.y;
+  }
+  p.dx          = dx;
+  p.dy          = dy;
+  p.buttonFlags = s_skc_held_buttons;
+  p.wheelDelta  = wheelDelta;
+  SKI1_SendFrame (SKI1_Type_LogicalMouseAbs, &p, (uint32_t)sizeof (p));
+}
+
+// Applies a raw relative mouse delta to the logical overlay cursor, clamping
+// the result to the game client bounds.
+static void SKC_ApplyRawDeltaToOverlayCursor (int dx, int dy)
+{
+  if (game_window.hWnd == nullptr)
+    return;
+
+  POINT cl = s_skc_overlay_cursor;
+  ScreenToClient (game_window.hWnd, &cl);
+  SKC_UpdateOverlayCursorFromClientPt (cl.x + dx, cl.y + dy);
+}
+
+// Seeds the logical cursor from the current OS position, clamped and validated
+// against the game client rect.  Falls back to the client-rect center when the
+// OS cursor is outside the window.  Resets all per-session tracking state.
+static void SKC_SeedOverlayCursorFromOS ()
+{
+  s_skc_last_raw_delta_ms       = 0;
+  s_skc_prev_wm_mousemove       = {};
+  s_skc_prev_wm_mousemove_valid = false;
+  s_skc_logged_first_raw_delta  = false;
+  s_skc_held_buttons            = 0;
+
+  if (game_window.hWnd == nullptr)
+    return;
+
+  POINT pt  = {};
+  bool  ok  = (SK_GetCursorPos (&pt) != FALSE);
+
+  if (ok)
+  {
+    POINT       cl = pt;
+    ScreenToClient (game_window.hWnd, &cl);
+    const RECT& cr = game_window.actual.client;
+    ok = (cr.right > cr.left && cr.bottom > cr.top &&
+          cl.x >= (int)cr.left && cl.x < (int)cr.right &&
+          cl.y >= (int)cr.top  && cl.y < (int)cr.bottom);
+    if (ok)
+    {
+      SKC_UpdateOverlayCursorFromClientPt (cl.x, cl.y);
+      SKI1_DiagLog (L"input capture ON: seeded logical cursor from OS pos client=(%d,%d)",
+                    cl.x, cl.y);
+      return;
+    }
+  }
+
+  // OS cursor is outside the window or unavailable — seed to client center.
+  const RECT& cr = game_window.actual.client;
+  if (cr.right > cr.left && cr.bottom > cr.top)
+  {
+    const int cx = ((int)cr.left + (int)cr.right)  / 2;
+    const int cy = ((int)cr.top  + (int)cr.bottom) / 2;
+    SKC_UpdateOverlayCursorFromClientPt (cx, cy);
+    SKI1_DiagLog (L"input capture ON: seeded logical cursor to client center (%d,%d)",
+                  cx, cy);
+  }
+}
+
 static void SKI1_SendWinMsgMouse (UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
   SKI1_WinMsgMouse p{};
@@ -6108,6 +6340,67 @@ static void SKI1_SendWinMsgMouse (UINT uMsg, WPARAM wParam, LPARAM lParam)
     p.x     = (int32_t)(int)(short)LOWORD (lParam);
     p.y     = (int32_t)(int)(short)HIWORD (lParam);
     p.wheel = 0;
+
+    if (uMsg == WM_MOUSEMOVE)
+    {
+      if (SKC_IsInputCaptureEnabledCached ())
+      {
+        // During input capture the game may recenter the OS cursor every frame,
+        // making the lParam absolute coordinates center-biased and unreliable.
+        // Primary driver is the raw-delta path in SKI1_SendRawInput; fall back
+        // to WM_MOUSEMOVE deltas (with a jump guard) only when no raw input has
+        // been observed recently — covering games that do not use the raw-input
+        // API at all.
+        //
+        // 200 ms: long enough to avoid suppressing the fallback path when there
+        // is only an occasional WM_INPUT gap; short enough that the cursor
+        // switches back promptly if raw input stops arriving (e.g. the game
+        // de-registers the raw-input device while the overlay is open).
+        static constexpr ULONGLONG kRawInputFallbackThresholdMs = 200u;
+        const ULONGLONG nowMs = GetTickCount64 ();
+        if (nowMs - s_skc_last_raw_delta_ms >= kRawInputFallbackThresholdMs)
+        {
+          if (s_skc_prev_wm_mousemove_valid)
+          {
+            const int ddx = p.x - s_skc_prev_wm_mousemove.x;
+            const int ddy = p.y - s_skc_prev_wm_mousemove.y;
+            // Skip jumps larger than kJumpGuard pixels — large single-frame
+            // deltas are almost certainly a game-driven SetCursorPos recenter
+            // (which typically snaps the cursor back to the window center),
+            // not real mouse movement.  Typical per-frame mouse deltas at even
+            // high sensitivity settings stay well below 100 px/frame.
+            // 150 ≈ 1.5× that upper bound, leaving headroom for burst frames
+            // without accepting obvious game-driven warps (often center-rect
+            // width/2 or height/2, which are typically several hundred pixels).
+            static constexpr int kJumpGuard = 150;
+            if (ddx > -kJumpGuard && ddx < kJumpGuard &&
+                ddy > -kJumpGuard && ddy < kJumpGuard &&
+                (ddx != 0 || ddy != 0))
+            {
+              SKC_ApplyRawDeltaToOverlayCursor (ddx, ddy);
+            }
+          }
+          s_skc_prev_wm_mousemove       = { p.x, p.y };
+          s_skc_prev_wm_mousemove_valid = true;
+        }
+
+        // Always forward the logical (non-center-biased) cursor position to
+        // the producer instead of the OS-reported absolute coordinates.
+        if (game_window.hWnd != nullptr)
+        {
+          POINT cl = s_skc_overlay_cursor;
+          ScreenToClient (game_window.hWnd, &cl);
+          p.x = (int32_t)cl.x;
+          p.y = (int32_t)cl.y;
+        }
+      }
+      else
+      {
+        // Capture inactive: keep the logical cursor current so activation
+        // seeds to an accurate position rather than a stale one.
+        SKC_UpdateOverlayCursorFromClientPt (p.x, p.y);
+      }
+    }
   }
 
   p.buttonFlags = (uint32_t)LOWORD (wParam);
@@ -6119,6 +6412,19 @@ static void SKI1_SendWinMsgMouse (UINT uMsg, WPARAM wParam, LPARAM lParam)
   if (GetKeyState (VK_MENU)    < 0) p.keyFlags |= 4;
 
   SKI1_SendFrame (SKI1_Type_WinMsgMouse, &p, (uint32_t)sizeof (p));
+
+  // While capture is active, also update held-button state and send a type-7
+  // packet for button and wheel events so the consumer always has authoritative
+  // logical cursor state from the Win32 message path.  WM_MOUSEMOVE is excluded
+  // because the raw-input path (SKI1_SendRawInput) handles type-7 for movement;
+  // the Win32 fallback path already updated the logical cursor above.
+  if (SKC_IsInputCaptureEnabledCached () && uMsg != WM_MOUSEMOVE)
+  {
+    SKC_UpdateHeldButtonsFromWinMsg (uMsg);
+    const int32_t wDelta = (uMsg == WM_MOUSEWHEEL || uMsg == WM_MOUSEHWHEEL)
+                             ? (int32_t)(short)HIWORD (wParam) : 0;
+    SKC_SendLogicalMouseAbs (0, 0, wDelta);
+  }
 }
 
 static void SKI1_SendWinMsgKey (UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -6177,12 +6483,51 @@ static void SKI1_SendRawInput (LPARAM lParam)
   if (ri->header.dwType == RIM_TYPEMOUSE)
   {
     const RAWMOUSE& m = ri->data.mouse;
+
+    const int32_t  dx         = (int32_t)m.lLastX;
+    const int32_t  dy         = (int32_t)m.lLastY;
+    const int32_t  wheelDelta = (m.usButtonFlags & (RI_MOUSE_WHEEL | RI_MOUSE_HWHEEL))
+                                  ? (int32_t)(short)m.usButtonData : 0;
+
+    if (SKC_IsInputCaptureEnabledCached ())
+    {
+      // Update held-button state from raw transition flags.
+      SKC_UpdateHeldButtonsFromRaw (m.usButtonFlags);
+
+      // While input capture is active, drive the logical cursor from raw
+      // relative deltas.  This is immune to the OS-cursor recentering that
+      // locked-mouse games perform every frame via SetCursorPos.
+      // Absolute-mode mice (MOUSE_MOVE_ABSOLUTE) do not supply relative deltas;
+      // skip the delta application to avoid treating absolute coordinates as
+      // movement offsets.
+      if ((m.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 && (dx != 0 || dy != 0))
+      {
+        if (!s_skc_logged_first_raw_delta)
+        {
+          s_skc_logged_first_raw_delta = true;
+          SKI1_DiagLog (
+            L"input capture: first raw-delta logical cursor update dx=%d dy=%d",
+            (int)dx, (int)dy);
+        }
+
+        SKC_ApplyRawDeltaToOverlayCursor (dx, dy);
+        s_skc_last_raw_delta_ms = GetTickCount64 ();
+      }
+
+      // Send type-7: pass the relative delta when available; 0 for absolute
+      // input where lLastX/lLastY are screen coordinates, not movement offsets.
+      const int32_t sendDx = (m.usFlags & MOUSE_MOVE_ABSOLUTE) ? 0 : dx;
+      const int32_t sendDy = (m.usFlags & MOUSE_MOVE_ABSOLUTE) ? 0 : dy;
+      SKC_SendLogicalMouseAbs (sendDx, sendDy, wheelDelta);
+      return;
+    }
+
+    // Capture inactive: forward the raw data to the producer as before.
     SKI1_RawMouse p{};
-    p.dx          = (int32_t)m.lLastX;
-    p.dy          = (int32_t)m.lLastY;
+    p.dx          = dx;
+    p.dy          = dy;
     p.buttonFlags = (uint32_t)m.usButtonFlags;
-    p.wheelDelta  = (m.usButtonFlags & (RI_MOUSE_WHEEL | RI_MOUSE_HWHEEL))
-                    ? (int32_t)(short)m.usButtonData : 0;
+    p.wheelDelta  = wheelDelta;
     SKI1_SendFrame (SKI1_Type_RawMouse, &p, (uint32_t)sizeof (p));
   }
   else if (ri->header.dwType == RIM_TYPEKEYBOARD)
@@ -6239,10 +6584,26 @@ static bool SKC_IsInputCaptureEnabledCached ()
     bool s_new = SKC_IsInputCaptureEnabled ();
     if (s_val && !s_new)
     {
-      // Overlay just turned OFF: restore the cursor clip the game had set.
+      // Overlay just turned OFF: restore the cursor clip the game had set,
+      // stop cursor suppression, and reset held-button state.
       SK_ClipCursor ( SK_IsClipRectFinite (&game_window.cursor_clip)
                         ? &game_window.cursor_clip
                         : nullptr );
+      SKI1_DiagLog (L"input capture OFF: cursor clip restored");
+      SKC_ShowCursorCompensateCapture ();
+      s_skc_held_buttons = 0;
+    }
+    else if (!s_val && s_new)
+    {
+      // Overlay just turned ON: seed the logical cursor from the current OS
+      // cursor position (clamped to the client rect; falls back to center).
+      // Also resets all per-session raw-delta tracking state and held-button
+      // state, unclips the cursor, and force-hides the hardware cursor so the
+      // game's OS cursor does not appear over the overlay.
+      SKC_SeedOverlayCursorFromOS ();  // also resets s_skc_held_buttons
+      SK_ClipCursor (nullptr);
+      SKC_ForceHideCursorForCapture ();
+      SKI1_DiagLog (L"input capture ON: cursor unclipped and force-hidden");
     }
     s_val = s_new;
   }
@@ -7261,6 +7622,16 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
       case WM_ACTIVATEAPP:
         SKI1_SendFocus (uMsg, wParam);
         return 0;
+
+      // --- Cursor: keep hardware cursor hidden while capture is active ---
+      case WM_SETCURSOR:
+        if (LOWORD (lParam) == HTCLIENT)
+        {
+          // Suppress any cursor shape restoration; hide the system cursor.
+          ::SetCursor (nullptr);
+          return TRUE;
+        }
+        break;
 
       default:
         break;

@@ -55,6 +55,48 @@ SK_InputUtil_IsHWCursorVisible (void)
 
 ShowCursor_pfn ShowCursor_Original = nullptr;
 
+// Counts ShowCursor(TRUE) calls that were suppressed during overlay capture.
+// Reset on capture ON; used by SKC_ShowCursorCompensateCapture() to restore
+// the system cursor count to the correct level after capture turns OFF.
+static int s_show_cursor_captured_depth = 0;
+
+// Called by SKC_IsInputCaptureEnabledCached on the capture ON transition.
+// Hides the hardware cursor immediately and resets the suppression depth
+// counter for the new capture session.
+void SKC_ForceHideCursorForCapture ()
+{
+  s_show_cursor_captured_depth = 0;
+  if (ShowCursor_Original == nullptr)
+    return;
+  // Ensure the OS display counter is negative (cursor hidden).
+  // Bounded to prevent excessive looping.  The Win32 per-thread display
+  // counter rarely strays more than a few units from 0, so 8 attempts is
+  // more than sufficient to drive it into the negative (hidden) range.
+  static constexpr int kMaxHideTries = 8;
+  for (int i = 0; i < kMaxHideTries; ++i)
+    if (ShowCursor_Original (FALSE) < 0) break;
+}
+
+// Called by SKC_IsInputCaptureEnabledCached on the capture OFF transition.
+// Compensates for every ShowCursor(TRUE) call that was suppressed during
+// capture so the caller's expected display count is correctly restored.
+void SKC_ShowCursorCompensateCapture ()
+{
+  if (ShowCursor_Original != nullptr && s_show_cursor_captured_depth > 0)
+  {
+    // Restore the suppressed TRUE calls.  64 is a generous safety ceiling:
+    // in normal usage the depth is at most a handful of calls.  A depth
+    // larger than 64 would indicate a pathological caller loop; capping
+    // avoids spinning forever while still recovering normal cursor state
+    // for any realistic scenario.
+    static constexpr int kMaxCompensate = 64;
+    const int n = std::min (s_show_cursor_captured_depth, kMaxCompensate);
+    for (int i = 0; i < n; ++i)
+      ShowCursor_Original (TRUE);
+  }
+  s_show_cursor_captured_depth = 0;
+}
+
 BOOL
 WINAPI
 SK_SendMsgShowCursor (BOOL bShow)
@@ -136,6 +178,18 @@ ShowCursor_Detour (BOOL bShow)
 {
   if (! SKC_IsInputCaptureEnabled ())
     return ShowCursor_Original (bShow);
+
+  // While overlay input capture is active the hardware cursor must remain
+  // hidden.  Convert ShowCursor(TRUE) to ShowCursor(FALSE) so every downstream
+  // path — including the allow_show_cursor=false pass-through and the imgui
+  // management loop — keeps the cursor hidden.  Track the suppressed depth so
+  // SKC_ShowCursorCompensateCapture() can restore the correct display count
+  // when capture turns OFF, preventing a stuck-hidden cursor afterwards.
+  if (bShow)
+  {
+    ++s_show_cursor_captured_depth;
+    bShow = FALSE;
+  }
 
   if (! config.input.ui.allow_show_cursor)
     return ShowCursor_Original (bShow);
@@ -1019,6 +1073,14 @@ SetCursor_Detour (
 
   if (! SKC_IsInputCaptureEnabled ())
     return SetCursor_Original (hCursor);
+
+  // While overlay input capture is active, do not allow a non-null cursor to
+  // make the hardware cursor visible.  Redirect to null (removes the cursor
+  // from the screen) and return the previous cursor handle as expected by the
+  // API contract.  Null itself is passed through so callers that explicitly
+  // hide the cursor (SetCursor(nullptr)) still work correctly.
+  if (hCursor != nullptr)
+    return SetCursor_Original (nullptr);
 
   if (! config.input.ui.allow_set_cursor)
   {

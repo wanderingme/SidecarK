@@ -29,6 +29,8 @@ extern volatile LONG SK_DXGI_LiveWrappedSwapChains;
 extern volatile LONG SK_DXGI_LiveWrappedSwapChain1s;
 
 interface ID3D11Device;
+interface ID3D11DeviceContext;
+interface ID3D11Texture2D;
 interface ID3D12Device;
 #include <atlbase.h>
 
@@ -503,6 +505,18 @@ extern ResizeTarget_pfn       ResizeTarget_Original;
 extern ResizeBuffers_pfn      ResizeBuffers_Original;
 
 uint64_t SK_DXGI_LastFrameSwapChainDestroyed (void);
+
+// Minimal premultiplied-alpha D3D11 overlay compositor.
+// source: srcTex (D3D11_BIND_SHADER_RESOURCE overlay texture)
+// dest:   dstTex (swapchain backbuffer)
+// overlayW/H: clamped composite region dimensions
+// Returns true on success; caller must skip overlay and call original Present on false.
+bool SKC_D3D11_AlphaCompositeOverlay (ID3D11Device*        dev,
+                                       ID3D11DeviceContext* ctx,
+                                       ID3D11Texture2D*     srcTex,
+                                       ID3D11Texture2D*     dstTex,
+                                       UINT                 overlayW,
+                                       UINT                 overlayH);
 
 
 #endif /* __SK__DXGI_SWAPCHAIN_H__ */
