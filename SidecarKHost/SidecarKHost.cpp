@@ -1756,7 +1756,7 @@ struct SKI1_LogicalMouseAbs
   int32_t  y;
   int32_t  dx;          // raw delta that triggered this update (0 for fallback)
   int32_t  dy;
-  uint32_t buttonFlags; // RI_MOUSE_* button flags; 0 if position-only event
+  uint32_t buttonFlags; // held-button bits: 0=left, 1=right, 2=middle; 0 if position-only event
   int32_t  wheelDelta;  // wheel delta; 0 if no wheel event
 };
 #pragma pack(pop)

@@ -6203,8 +6203,8 @@ static void SKC_UpdateOverlayCursorFromClientPt (int cx, int cy)
 static ULONGLONG s_skc_last_raw_delta_ms      = 0;
 
 // Previous WM_MOUSEMOVE client-coordinate position for the delta-fallback path.
-// Sentinel value INT_MIN means "not yet set in this capture session."
-static POINT     s_skc_prev_wm_mousemove      = { INT_MIN, INT_MIN };
+static POINT     s_skc_prev_wm_mousemove       = {};
+static bool      s_skc_prev_wm_mousemove_valid = false;
 
 // One-shot log gate; reset when capture activates.
 static bool      s_skc_logged_first_raw_delta = false;
@@ -6279,7 +6279,8 @@ static void SKC_ApplyRawDeltaToOverlayCursor (int dx, int dy)
 static void SKC_SeedOverlayCursorFromOS ()
 {
   s_skc_last_raw_delta_ms       = 0;
-  s_skc_prev_wm_mousemove       = { INT_MIN, INT_MIN };
+  s_skc_prev_wm_mousemove       = {};
+  s_skc_prev_wm_mousemove_valid = false;
   s_skc_logged_first_raw_delta  = false;
   s_skc_held_buttons            = 0;
 
@@ -6359,7 +6360,7 @@ static void SKI1_SendWinMsgMouse (UINT uMsg, WPARAM wParam, LPARAM lParam)
         const ULONGLONG nowMs = GetTickCount64 ();
         if (nowMs - s_skc_last_raw_delta_ms >= kRawInputFallbackThresholdMs)
         {
-          if (s_skc_prev_wm_mousemove.x != INT_MIN)
+          if (s_skc_prev_wm_mousemove_valid)
           {
             const int ddx = p.x - s_skc_prev_wm_mousemove.x;
             const int ddy = p.y - s_skc_prev_wm_mousemove.y;
@@ -6368,6 +6369,9 @@ static void SKI1_SendWinMsgMouse (UINT uMsg, WPARAM wParam, LPARAM lParam)
             // (which typically snaps the cursor back to the window center),
             // not real mouse movement.  Typical per-frame mouse deltas at even
             // high sensitivity settings stay well below 100 px/frame.
+            // 150 ≈ 1.5× that upper bound, leaving headroom for burst frames
+            // without accepting obvious game-driven warps (often center-rect
+            // width/2 or height/2, which are typically several hundred pixels).
             static constexpr int kJumpGuard = 150;
             if (ddx > -kJumpGuard && ddx < kJumpGuard &&
                 ddy > -kJumpGuard && ddy < kJumpGuard &&
@@ -6376,7 +6380,8 @@ static void SKI1_SendWinMsgMouse (UINT uMsg, WPARAM wParam, LPARAM lParam)
               SKC_ApplyRawDeltaToOverlayCursor (ddx, ddy);
             }
           }
-          s_skc_prev_wm_mousemove = { p.x, p.y };
+          s_skc_prev_wm_mousemove       = { p.x, p.y };
+          s_skc_prev_wm_mousemove_valid = true;
         }
 
         // Always forward the logical (non-center-biased) cursor position to

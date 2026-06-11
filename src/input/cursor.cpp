@@ -69,7 +69,9 @@ void SKC_ForceHideCursorForCapture ()
   if (ShowCursor_Original == nullptr)
     return;
   // Ensure the OS display counter is negative (cursor hidden).
-  // Bounded to prevent excessive looping.
+  // Bounded to prevent excessive looping.  The Win32 per-thread display
+  // counter rarely strays more than a few units from 0, so 8 attempts is
+  // more than sufficient to drive it into the negative (hidden) range.
   static constexpr int kMaxHideTries = 8;
   for (int i = 0; i < kMaxHideTries; ++i)
     if (ShowCursor_Original (FALSE) < 0) break;
@@ -82,6 +84,11 @@ void SKC_ShowCursorCompensateCapture ()
 {
   if (ShowCursor_Original != nullptr && s_show_cursor_captured_depth > 0)
   {
+    // Restore the suppressed TRUE calls.  64 is a generous safety ceiling:
+    // in normal usage the depth is at most a handful of calls.  A depth
+    // larger than 64 would indicate a pathological caller loop; capping
+    // avoids spinning forever while still recovering normal cursor state
+    // for any realistic scenario.
     static constexpr int kMaxCompensate = 64;
     const int n = std::min (s_show_cursor_captured_depth, kMaxCompensate);
     for (int i = 0; i < n; ++i)
