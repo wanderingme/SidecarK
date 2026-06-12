@@ -13,7 +13,7 @@
 
 static constexpr bool kEnableLegacySKOF_DebugOnly = false;
 // User-editable: set true to enable SidecarK diagnostics token creation.
-static constexpr bool kEnableSidecarKDiagnosticsToken = true;
+static constexpr bool kEnableSidecarKDiagnosticsToken = false;
 // User-editable: set true to log every WM_MOUSEMOVE event received on the
 // input pipe.  Off by default because WM_MOUSEMOVE is high-frequency and
 // spams the console during any mouse movement while the overlay is active.
