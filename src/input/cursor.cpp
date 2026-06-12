@@ -1724,3 +1724,70 @@ SK_Input_PreHookCursor (void)
     }
   });
 }
+
+// Minimal-path cursor installer (SidecarK/Virule minimal GL fast path).
+//
+// The minimal GL fast path bypasses the full SpecialK boot, and even when the
+// boot does run, the cursor detours are installed through SpecialK's queued-hook
+// machinery (SK_CreateDLLHook2 in SK_Input_PreHookCursor, applied by a later
+// global SK_ApplyQueuedHooks flush).  In the SidecarK/OpenGL path that flush is
+// unreliable, so GetCursorPos / SetCursorPos can be created-but-never-enabled.
+// Engines old enough to read mouse-look by recentering the cursor each frame
+// (GetCursorPos delta + SetCursorPos warp; e.g. EFPSE) then leak movement to the
+// game while the interactive overlay is up — clicks are still caught by the
+// directly-installed WndProc hook, but cursor-warp movement is not.
+//
+// This installs ONLY the two cursor-position detours (and their Win8.1 Physical
+// aliases) using the immediate per-target hook path: SK_CreateDLLHook with
+// ppFuncAddr == nullptr creates and enables each hook on its own target via
+// SK_EnableHook — no queue, no global flush, no config gating.  It deliberately
+// omits SetCursor / ShowCursor (visibility only — not a movement-leak channel).
+//
+// The detours self-gate on SKC_IsInputCaptureEnabled(): with the overlay closed
+// they pass through exactly (and keep tracking s_GameSetCursorPos); with the
+// interactive overlay up GetCursorPos returns the frozen s_GameSetCursorPos and
+// SetCursorPos is swallowed, so a recenter loop reads a constant zero delta.
+//
+// Safe to call from the GL render thread (same context that installs the minimal
+// swap hooks via direct MinHook).  Caller must invoke exactly once.
+void
+SK_Input_HookCursor_Minimal (void)
+{
+  SK_Input_DiagLog ("SK_Input_HookCursor_Minimal: entered");
+
+  SK_Input_DiagCreateDLLHook ("cursor", L"user32",
+                               "GetCursorPos",
+                                GetCursorPos_Detour,
+           static_cast_p2p <void> (&GetCursorPos_Original) );
+
+  SK_Input_DiagCreateDLLHook ("cursor", L"user32",
+                               "SetCursorPos",
+                                SetCursorPos_Detour,
+           static_cast_p2p <void> (&SetCursorPos_Original) );
+
+  // Win 8.1 and newer alias these to the logical variants; only hook them
+  // separately when they resolve to distinct addresses.
+  if (SK_GetProcAddress (L"user32", "GetPhysicalCursorPos") !=
+      SK_GetProcAddress (L"user32", "GetCursorPos"))
+  {
+    SK_Input_DiagCreateDLLHook ("cursor", L"user32",
+                                 "GetPhysicalCursorPos",
+                                  GetPhysicalCursorPos_Detour,
+             static_cast_p2p <void> (&GetPhysicalCursorPos_Original) );
+  }
+  else
+    SK_Input_DiagLog ("install[cursor] GetPhysicalCursorPos: aliased to GetCursorPos (skipped)");
+
+  if (SK_GetProcAddress (L"user32", "SetPhysicalCursorPos") !=
+      SK_GetProcAddress (L"user32", "SetCursorPos"))
+  {
+    SK_Input_DiagCreateDLLHook ("cursor", L"user32",
+                                 "SetPhysicalCursorPos",
+                                  SetPhysicalCursorPos_Detour,
+             static_cast_p2p <void> (&SetPhysicalCursorPos_Original) );
+  }
+  else
+    SK_Input_DiagLog ("install[cursor] SetPhysicalCursorPos: aliased to SetCursorPos (skipped)");
+
+  SK_Input_DiagLog ("SK_Input_HookCursor_Minimal: done");
+}

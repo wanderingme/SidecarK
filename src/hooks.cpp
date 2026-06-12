@@ -1526,14 +1526,35 @@ struct {
   } ApplyQueuedHooks;
 } SKinHookCtx;
 
+// Serializes every apply-queued state transition (enable/disable) and the
+// queued-hook flush itself, so a concurrent enable/disable on another thread can
+// no longer no-op an in-flight apply.  Without this the init-thread flush in
+// SK_InitFinishCallback (core.cpp) raced the SidecarK graphics-detection thread's
+// opportunistic flush: the detection thread's SK_DisableApplyQueuedHooks() could
+// land between the init thread's SK_EnableApplyQueuedHooks() and
+// SK_ApplyQueuedHooks(), turning the apply into a silent no-op and leaving input
+// (and other) hooks queued but never enabled -> intermittent capture loss.
+// An SRWLOCK is used so there is no static-init ordering dependency on the rest
+// of the hook engine (SRWLOCK_INIT is a zero-initializer; no constructor runs).
+static SRWLOCK SK_ApplyQueued_SRW = SRWLOCK_INIT;
+
+struct SK_ApplyQueued_ScopedLock {
+   SK_ApplyQueued_ScopedLock (void) noexcept { AcquireSRWLockExclusive (&SK_ApplyQueued_SRW); }
+  ~SK_ApplyQueued_ScopedLock (void) noexcept { ReleaseSRWLockExclusive (&SK_ApplyQueued_SRW); }
+};
+
 bool SK_CanQueuedHooksBeApplied (void)
 {
+  SK_ApplyQueued_ScopedLock lock;
+
   return SKinHookCtx.ApplyQueuedHooks.enabled;
 }
 
 // For completeness; nothing uses this
 bool SK_DisableApplyQueuedHooks (void)
 {
+  SK_ApplyQueued_ScopedLock lock;
+
   bool bBefore =
     SKinHookCtx.ApplyQueuedHooks.enabled;
 
@@ -1544,6 +1565,8 @@ bool SK_DisableApplyQueuedHooks (void)
 
 bool SK_EnableApplyQueuedHooks (void)
 {
+  SK_ApplyQueued_ScopedLock lock;
+
   bool bBefore =
     SKinHookCtx.ApplyQueuedHooks.enabled;
 
@@ -1556,15 +1579,11 @@ bool SK_EnableApplyQueuedHooks (void)
 
 volatile DWORD SK_MinHook_HooksQueuedButNotApplied = 0;
 
-MH_STATUS
-__stdcall
-SK_ApplyQueuedHooks (void)
+// Core flush.  Caller MUST hold SK_ApplyQueued_SRW and has already decided a
+// flush should happen (does not consult ApplyQueuedHooks.enabled).
+static MH_STATUS
+SK_ApplyQueuedHooks_NoLock (void)
 {
-  if (! SKinHookCtx.ApplyQueuedHooks.enabled)
-  {
-    return MH_OK;
-  }
-
   if (   ReadAcquire (&__SK_DLL_Ending  ) ||
       (! ReadAcquire (&__SK_DLL_Attached))  )
   {
@@ -1618,6 +1637,47 @@ SK_ApplyQueuedHooks (void)
     InterlockedExchangeSubtract (
     &SK_MinHook_HooksEnqueued,  enqueued);
   }
+
+  return status;
+}
+
+MH_STATUS
+__stdcall
+SK_ApplyQueuedHooks (void)
+{
+  SK_ApplyQueued_ScopedLock lock;
+
+  if (! SKinHookCtx.ApplyQueuedHooks.enabled)
+  {
+    return MH_OK;
+  }
+
+  return SK_ApplyQueuedHooks_NoLock ();
+}
+
+// Atomic enable + flush (+ optional restore), all under SK_ApplyQueued_SRW so no
+// other thread can flip ApplyQueuedHooks.enabled between the enable and the
+// apply.  keep_enabled=true leaves apply-queued permanently on (the init-thread
+// "initialization finished" flush); keep_enabled=false restores the prior state
+// after flushing (the SidecarK detection thread's opportunistic one-shot flush).
+// This replaces the previous non-atomic Enable();Apply() and
+// Enable();Apply();Disable() call sequences that could race each other.
+MH_STATUS
+__stdcall
+SK_FlushQueuedHooks (bool keep_enabled)
+{
+  SK_ApplyQueued_ScopedLock lock;
+
+  const bool prev =
+    SKinHookCtx.ApplyQueuedHooks.enabled;
+
+  SKinHookCtx.ApplyQueuedHooks.enabled = true;
+
+  const MH_STATUS status =
+    SK_ApplyQueuedHooks_NoLock ();
+
+  if ((! keep_enabled) && (! prev))
+    SKinHookCtx.ApplyQueuedHooks.enabled = false;
 
   return status;
 }

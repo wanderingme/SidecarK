@@ -5841,6 +5841,115 @@ float g_fDPIScale = 1.0f;
 static HHOOK hHookKeyboard = 0;
 static HHOOK hHookMouse    = 0;
 
+// ===========================================================================
+//  Minimal-path window-message filter (SidecarK/Virule minimal GL fast path).
+//
+//  The full SpecialK Get/PeekMessage detours (queued via
+//  __SKX_WinHook_InstallInputHooks) never go live in the minimal path, so a game
+//  that reads mouse position from the message stream (e.g. EFPSE's menu software
+//  cursor, which reads WM_MOUSEMOVE) leaks movement while the overlay is up.
+//
+//  These minimal detours are PURE PASS-THROUGH when capture is off — no SK/ImGui
+//  message handling at all, so they are safe for every game — and only rewrite
+//  WM_MOUSE* / WM_INPUT to WM_NULL when SKC_IsInputCaptureEnabled() is true.
+//  Installed via direct MinHook (self-gating), independent of the queue.  They
+//  use their own *_Original trampolines so they never collide with the full
+//  detours above (which are not installed in the minimal path).
+// ===========================================================================
+extern bool SKC_IsInputCaptureEnabled ();
+
+static GetMessage_pfn  SK_Minimal_GetMessageW_Original  = nullptr;
+static GetMessage_pfn  SK_Minimal_GetMessageA_Original  = nullptr;
+static PeekMessage_pfn SK_Minimal_PeekMessageW_Original = nullptr;
+static PeekMessage_pfn SK_Minimal_PeekMessageA_Original = nullptr;
+
+static __forceinline void
+SK_Minimal_NullMouseMsg (LPMSG lpMsg)
+{
+  if (lpMsg == nullptr)
+    return;
+
+  const UINT m = lpMsg->message;
+
+  // WM_MOUSEFIRST..WM_MOUSELAST covers WM_MOUSEMOVE + all button/wheel msgs.
+  // WM_INPUT carries Raw Input.  Rewrite to WM_NULL (a no-op the game ignores).
+  if ( (m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) || m == WM_INPUT )
+    lpMsg->message = WM_NULL;
+}
+
+static BOOL WINAPI
+SK_Minimal_GetMessageW_Detour (LPMSG lpMsg, HWND hWnd, UINT wMin, UINT wMax)
+{
+  const BOOL bRet =
+    SK_Minimal_GetMessageW_Original (lpMsg, hWnd, wMin, wMax);
+
+  // bRet > 0 means a message other than WM_QUIT; never touch WM_QUIT (0) or -1.
+  if (bRet > 0 && SKC_IsInputCaptureEnabled ())
+    SK_Minimal_NullMouseMsg (lpMsg);
+
+  return bRet;
+}
+
+static BOOL WINAPI
+SK_Minimal_GetMessageA_Detour (LPMSG lpMsg, HWND hWnd, UINT wMin, UINT wMax)
+{
+  const BOOL bRet =
+    SK_Minimal_GetMessageA_Original (lpMsg, hWnd, wMin, wMax);
+
+  if (bRet > 0 && SKC_IsInputCaptureEnabled ())
+    SK_Minimal_NullMouseMsg (lpMsg);
+
+  return bRet;
+}
+
+static BOOL WINAPI
+SK_Minimal_PeekMessageW_Detour (LPMSG lpMsg, HWND hWnd, UINT wMin, UINT wMax, UINT wRemove)
+{
+  const BOOL bRet =
+    SK_Minimal_PeekMessageW_Original (lpMsg, hWnd, wMin, wMax, wRemove);
+
+  if (bRet && SKC_IsInputCaptureEnabled ())
+    SK_Minimal_NullMouseMsg (lpMsg);
+
+  return bRet;
+}
+
+static BOOL WINAPI
+SK_Minimal_PeekMessageA_Detour (LPMSG lpMsg, HWND hWnd, UINT wMin, UINT wMax, UINT wRemove)
+{
+  const BOOL bRet =
+    SK_Minimal_PeekMessageA_Original (lpMsg, hWnd, wMin, wMax, wRemove);
+
+  if (bRet && SKC_IsInputCaptureEnabled ())
+    SK_Minimal_NullMouseMsg (lpMsg);
+
+  return bRet;
+}
+
+void
+SK_Input_HookWinMsg_Minimal (void)
+{
+  SK_Input_DiagLog ("SK_Input_HookWinMsg_Minimal: entered");
+
+  SK_Input_DiagCreateDLLHook ("winmsg", L"user32", "GetMessageW",
+                               SK_Minimal_GetMessageW_Detour,
+            static_cast_p2p <void> (&SK_Minimal_GetMessageW_Original) );
+
+  SK_Input_DiagCreateDLLHook ("winmsg", L"user32", "GetMessageA",
+                               SK_Minimal_GetMessageA_Detour,
+            static_cast_p2p <void> (&SK_Minimal_GetMessageA_Original) );
+
+  SK_Input_DiagCreateDLLHook ("winmsg", L"user32", "PeekMessageW",
+                               SK_Minimal_PeekMessageW_Detour,
+            static_cast_p2p <void> (&SK_Minimal_PeekMessageW_Original) );
+
+  SK_Input_DiagCreateDLLHook ("winmsg", L"user32", "PeekMessageA",
+                               SK_Minimal_PeekMessageA_Detour,
+            static_cast_p2p <void> (&SK_Minimal_PeekMessageA_Original) );
+
+  SK_Input_DiagLog ("SK_Input_HookWinMsg_Minimal: done");
+}
+
 bool
 __SKX_WinHook_InstallInputHooks (HWND hWnd)
 {

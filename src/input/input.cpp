@@ -532,6 +532,136 @@ SetThreadExecutionState_Detour (EXECUTION_STATE esFlags)
     SetThreadExecutionState_Original (esFlags);
 }
 
+// ===========================================================================
+//  Minimal-path input-hook diagnostics (instrumentation only — no hook logic).
+//  Writes to %TEMP%\sk_input_hook_<pid>.txt, gated by SidecarK diagnostics, so a
+//  passing run and a failing run can be diffed to see which detours went live.
+// ===========================================================================
+extern bool SidecarK_DiagnosticsEnabled ();
+extern bool SK_CanQueuedHooksBeApplied  (void);
+
+void
+SK_Input_DiagLog (const char* fmt, ...)
+{
+  if (! SidecarK_DiagnosticsEnabled ())
+    return;
+
+  wchar_t wszTempPath [MAX_PATH] = { };
+  DWORD   cch =
+    GetTempPathW (MAX_PATH, wszTempPath);
+  if (cch == 0 || cch >= MAX_PATH)
+    return;
+
+  wchar_t wszFilePath [MAX_PATH] = { };
+  wsprintfW ( wszFilePath, L"%ssk_input_hook_%lu.txt",
+              wszTempPath, (unsigned long)GetCurrentProcessId () );
+
+  char    szBody [1024] = { };
+  va_list args;
+  va_start (args, fmt);
+  _vsnprintf_s (szBody, _TRUNCATE, fmt, args);
+  va_end   (args);
+
+  SYSTEMTIME st = { };
+  GetLocalTime (&st);
+
+  char      szLine [1280] = { };
+  const int len =
+    _snprintf_s ( szLine, _TRUNCATE,
+                  "%02u:%02u:%02u.%03u pid=%lu tid=%lu %s\r\n",
+                  st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                  (unsigned long)GetCurrentProcessId  (),
+                  (unsigned long)GetCurrentThreadId   (),
+                  szBody );
+  if (len <= 0)
+    return;
+
+  HANDLE hFile =
+    CreateFileW ( wszFilePath, FILE_APPEND_DATA,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                  nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr );
+
+  if (hFile != INVALID_HANDLE_VALUE)
+  {
+    DWORD cbWritten = 0;
+    SetFilePointer (hFile, 0, nullptr, FILE_END);
+    WriteFile      (hFile, szLine, (DWORD)len, &cbWritten, nullptr);
+    CloseHandle    (hFile);
+  }
+}
+
+// Reads the first instruction byte of a hooked export and reports whether it
+// looks patched (MinHook writes a relative/indirect JMP), so we can verify a
+// detour is actually ENABLED without calling MH_EnableHook (which would alter
+// state and mask a failing run).
+static bool
+SK_Input_Diag_IsExportPatched (void* addr, BYTE* out_b0)
+{
+  if (addr == nullptr) { if (out_b0) *out_b0 = 0; return false; }
+  const BYTE b0 = *reinterpret_cast <const BYTE *> (addr);
+  if (out_b0) *out_b0 = b0;
+  // 0xE9 = JMP rel32, 0xEB = JMP rel8, 0xFF = JMP r/m32 (indirect).
+  return (b0 == 0xE9 || b0 == 0xEB || b0 == 0xFF);
+}
+
+void
+SK_Input_DiagCreateDLLHook ( const char* chan, const wchar_t* mod,
+                             const char* proc, void* detour,
+                             void** ppOriginal )
+{
+  // Unchanged install path — SK_CreateDLLHook exactly as before.
+  const MH_STATUS cs =
+    SK_CreateDLLHook (mod, proc, detour, ppOriginal);
+
+  void* addr = reinterpret_cast <void *> (SK_GetProcAddress (mod, proc));
+  BYTE  b0   = 0;
+  const bool patched =
+    SK_Input_Diag_IsExportPatched (addr, &b0);
+
+  SK_Input_DiagLog (
+    "install[%s] %S!%hs create=%hs addr=%p b0=0x%02X patched=%d orig=%p",
+    chan, mod, proc, MH_StatusToString (cs), addr, (unsigned)b0,
+    patched ? 1 : 0, ppOriginal ? *ppOriginal : nullptr );
+}
+
+void
+SK_Input_DiagSnapshotMovementDetours (const char* when)
+{
+  if (! SidecarK_DiagnosticsEnabled ())
+    return;
+
+  auto _State = [](const char* chan, const char* proc)
+  {
+    void* addr = reinterpret_cast <void *> (SK_GetProcAddress (L"user32", proc));
+    BYTE  b0   = 0;
+    const bool patched =
+      SK_Input_Diag_IsExportPatched (addr, &b0);
+    SK_Input_DiagLog ( "  state[%s] user32!%hs addr=%p b0=0x%02X live=%d",
+                       chan, proc, addr, (unsigned)b0, patched ? 1 : 0 );
+  };
+
+  SK_Input_DiagLog ("==== movement-detour snapshot (%s) ====", when);
+  _State ("cursor",   "GetCursorPos");
+  _State ("cursor",   "SetCursorPos");
+  _State ("cursor",   "GetPhysicalCursorPos");
+  _State ("cursor",   "SetPhysicalCursorPos");
+  _State ("rawinput", "GetRawInputData");
+  _State ("rawinput", "GetRawInputBuffer");
+  _State ("winmsg",   "GetMessageW");
+  _State ("winmsg",   "GetMessageA");
+  _State ("winmsg",   "PeekMessageW");
+  _State ("winmsg",   "PeekMessageA");
+
+  const bool di8_loaded = (SK_GetModuleHandle (L"dinput8.dll") != nullptr);
+  SK_Input_DiagLog ( "  state[di8] dinput8_loaded=%d device_hooks_live=%d (vtable)",
+                     di8_loaded ? 1 : 0,
+                     SK_DI8_AreDeviceHooksLive () ? 1 : 0 );
+
+  SK_Input_DiagLog ( "  state[apply-queued] enabled=%d hooks_queued_not_applied=%lu",
+                     SK_CanQueuedHooksBeApplied () ? 1 : 0,
+                     (unsigned long)ReadULongAcquire (&SK_MinHook_HooksQueuedButNotApplied) );
+}
+
 // Parts of the Win32 API that are safe to hook from DLL Main
 void SK_Input_PreInit (void)
 {

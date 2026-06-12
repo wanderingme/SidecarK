@@ -21,7 +21,7 @@
 
   <!-- ↓↓↓  CHANGE THIS WORD  ↓↓↓ -->
   <PropertyGroup>
-    <SidecarK_DiagMode>off</SidecarK_DiagMode>
+    <SidecarK_DiagMode>on</SidecarK_DiagMode>
   </PropertyGroup>
   <!-- ↑↑↑  CHANGE THIS WORD  ↑↑↑ -->
 

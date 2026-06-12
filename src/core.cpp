@@ -1078,8 +1078,10 @@ SK_InitFinishCallback (void)
   // SEH to handle Wine Stub functions
   SK_SEH_InitFinishCallback ();
 
-  SK_EnableApplyQueuedHooks ();
-  SK_ApplyQueuedHooks       ();
+  // Atomic enable + flush (keep apply-queued permanently on).  Was a separate
+  // Enable();Apply() pair that could be no-op'd by the SidecarK detection
+  // thread's concurrent disable; SK_FlushQueuedHooks serializes the two.
+  SK_FlushQueuedHooks (true);
 
   dll_log->LogEx (false, L"------------------------------------------------"
                          L"-------------------------------------------\n" );
@@ -2703,11 +2705,11 @@ SK_StartupCore (const wchar_t* backend, void* callback)
         if (int32_t hooks_queued = (int32_t)ReadULongAcquire (&SK_MinHook_HooksQueuedButNotApplied);
                     hooks_queued > 0)
         {
-          bool bEnable = SK_EnableApplyQueuedHooks ();
-          {
-            SK_ApplyQueuedHooks ();
-          }
-          if (! bEnable) SK_DisableApplyQueuedHooks ();
+          // Atomic one-shot flush that restores the prior apply-queued state.
+          // Was Enable();Apply();Disable() — the trailing Disable() could land
+          // between the init thread's Enable() and Apply() and silently no-op
+          // its flush.  SK_FlushQueuedHooks serializes the whole sequence.
+          SK_FlushQueuedHooks (false);
         }
 
         return 0;

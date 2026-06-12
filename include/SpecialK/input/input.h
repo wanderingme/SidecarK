@@ -57,6 +57,13 @@ void SK_Input_HookDI8         (void);
 void SK_Input_HookHID         (void);
 void SK_Input_HookRawInput    (void);
 
+// SidecarK/Virule minimal GL fast path only.  Installs just the Raw Input
+// read detours (GetRawInputData / GetRawInputBuffer) using the immediate
+// per-target hook path, without the queued-hook machinery, config gating, or
+// input-subsystem init that the minimal path never runs.  See definition in
+// raw_input.cpp for the full rationale.
+void SK_Input_HookRawInput_Minimal (void);
+
 void SK_Input_HookXInput1_3   (void);
 void SK_Input_HookXInput1_4   (void);
 void SK_Input_HookXInput9_1_0 (void);
@@ -64,6 +71,49 @@ void SK_Input_HookScePad      (void);
 void SK_Input_HookWGI         (void);
 
 void SK_Input_PreHookCursor   (void);
+
+// SidecarK/Virule minimal GL fast path only.  Installs just the cursor
+// position detours (GetCursorPos / SetCursorPos and their Physical aliases)
+// using the immediate per-target hook path, so cursor-warp mouse-look is
+// frozen while the interactive overlay is up — without the queued-hook
+// machinery that is unreliable in the minimal path.  See definition in
+// cursor.cpp for the full rationale.
+void SK_Input_HookCursor_Minimal (void);
+
+// SidecarK/Virule minimal GL fast path only.  Direct-installs lightweight
+// Get/PeekMessage (W and A) detours that strip WM_MOUSE*/WM_INPUT from the
+// message stream while the interactive overlay is up (covers games that read
+// mouse position from window messages, e.g. menu software cursors).  PURE
+// pass-through when capture is off — no SK/ImGui message processing — so it is
+// safe for every game.  See definition in window.cpp.
+void SK_Input_HookWinMsg_Minimal (void);
+
+// SidecarK/Virule minimal GL fast path only.  Reliably installs the DirectInput8
+// device hooks (GetDeviceState/GetDeviceData) even when the game created its DI8
+// device before the factory hook went live: it creates a throwaway device to
+// obtain the shared device vtable and direct-hooks it.  See dinput8.cpp.
+void SK_Input_HookDI8_Minimal (void);
+
+// ---- Minimal-path input-hook diagnostics (instrumentation only) ------------
+// Appends to %TEMP%\sk_input_hook_<pid>.txt (same gating + location as the
+// sk_stage_* logs).  No-op unless SidecarK diagnostics are enabled.
+void      SK_Input_DiagLog                  (const char* fmt, ...);
+// Installs exactly as SK_CreateDLLHook (unchanged logic) and logs the create
+// MH_STATUS plus the target's resulting patched first byte (enable ground truth)
+// to the input-hook diagnostic file.  `chan` is a short channel label.  Returns
+// void (not MH_STATUS) so this header does not depend on MinHook.h being included
+// first — input.h is pulled in before MinHook in stdafx.
+void      SK_Input_DiagCreateDLLHook        (const char* chan, const wchar_t* mod,
+                                             const char* proc, void* detour,
+                                             void** ppOriginal);
+// Snapshots the live/patched state of every movement detour (cursor, raw input,
+// window message) plus DI8 hook presence and apply-queued state.  `when` labels
+// the moment (e.g. "post-install", "settled", "capture-on").
+void      SK_Input_DiagSnapshotMovementDetours (const char* when);
+// True if any DI8 device GetDeviceState/GetDeviceData trampoline is installed
+// (read-only accessor defined in dinput8.cpp).
+bool      SK_DI8_AreDeviceHooksLive          (void);
+
 void SK_Input_PreHookKeyboard (void);
 void SK_Input_PreHookWinHook  (void);
 void SK_Input_PreHookXInput   (void);

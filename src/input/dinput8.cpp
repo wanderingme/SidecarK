@@ -104,6 +104,18 @@ IDirectInputDevice8A_Poll_Original = nullptr;
 IDirectInputDevice8W_Poll_pfn
 IDirectInputDevice8W_Poll_Original = nullptr;
 
+// Read-only diagnostics accessor (instrumentation only): true if any DI8 device
+// GetDeviceState/GetDeviceData trampoline has been installed.  GetDeviceData_*
+// are file-static here, so this lives in the same TU rather than externing them.
+bool
+SK_DI8_AreDeviceHooksLive (void)
+{
+  return ( IDirectInputDevice8W_GetDeviceState_Original != nullptr ) ||
+         ( IDirectInputDevice8A_GetDeviceState_Original != nullptr ) ||
+         ( IDirectInputDevice8W_GetDeviceData_Original  != nullptr ) ||
+         ( IDirectInputDevice8A_GetDeviceData_Original  != nullptr );
+}
+
 HRESULT
 WINAPI
 IDirectInput8A_CreateDevice_Detour ( IDirectInput8A        *This,
@@ -1542,8 +1554,12 @@ IDirectInputDevice8W_GetDeviceData_Detour ( LPDIRECTINPUTDEVICE8W  This,
 {
   const bool isKbOrMouse = ( (LPDIRECTINPUTDEVICE8W)This == _dik8->pDev ||
                               (LPDIRECTINPUTDEVICE8W)This == _dim8->pDev );
+  // Minimal-path fallback: if SK never saw device creation (both pDev null, e.g.
+  // the device hooks were installed proactively via SK_Input_HookDI8_Minimal),
+  // conservatively suppress buffered input for any device while capture is on.
+  const bool unidentified = ( _dik8->pDev == nullptr && _dim8->pDev == nullptr );
 
-  if (isKbOrMouse && SKC_IsInputCaptureEnabled ())
+  if ((isKbOrMouse || unidentified) && SKC_IsInputCaptureEnabled ())
   {
     if (pdwInOut != nullptr)
       *pdwInOut = 0;
@@ -1564,8 +1580,10 @@ IDirectInputDevice8A_GetDeviceData_Detour ( LPDIRECTINPUTDEVICE8A  This,
 {
   const bool isKbOrMouse = ( (LPDIRECTINPUTDEVICE8W)This == _dik8->pDev ||
                               (LPDIRECTINPUTDEVICE8W)This == _dim8->pDev );
+  // Minimal-path fallback: see the W variant above.
+  const bool unidentified = ( _dik8->pDev == nullptr && _dim8->pDev == nullptr );
 
-  if (isKbOrMouse && SKC_IsInputCaptureEnabled ())
+  if ((isKbOrMouse || unidentified) && SKC_IsInputCaptureEnabled ())
   {
     if (pdwInOut != nullptr)
       *pdwInOut = 0;
@@ -2287,6 +2305,115 @@ SK_Input_HookDI8 (void)
     else
       SK_Thread_SpinUntilAtomicMin (&hooked, 2);
   }
+}
+
+
+// Minimal-path DirectInput8 device hook installer (SidecarK/Virule minimal GL
+// fast path).
+//
+// SK_Input_HookDI8 only hooks DirectInput8Create + the factory CreateDevice; the
+// per-device GetDeviceState/GetDeviceData vtable hooks are installed lazily from
+// inside IDirectInput8W_CreateDevice_Detour when the game creates a device.  If
+// the game created its DI8 device BEFORE that factory hook went live (common in
+// the minimal path — the diag log showed dinput8_loaded=1 but
+// device_hooks_live=0), SK never sees the device and its mouse-look input leaks
+// while the overlay is up.
+//
+// The IDirectInputDevice8 vtable is shared by ALL instances of the class, so we
+// create a throwaway device here purely to obtain that vtable and direct-hook
+// vftable[9] (GetDeviceState) and vftable[10] (GetDeviceData).  The patch then
+// applies to the game's already-created device too.  GetDeviceState is gated by
+// buffer size, so it works for any device; GetDeviceData is gated by device
+// identity, with a minimal-path fallback (see the detours) for when SK never
+// identified the kb/mouse devices.  Safe to call from the GL render thread.
+void
+SK_Input_HookDI8_Minimal (void)
+{
+  SK_Input_DiagLog ( "SK_Input_HookDI8_Minimal: entered (hook_dinput8=%d)",
+                     config.input.gamepad.hook_dinput8 ? 1 : 0 );
+
+  if (! config.input.gamepad.hook_dinput8)
+  {
+    SK_Input_DiagLog ("  di8: disabled by config, skipping");
+    return;
+  }
+
+  HMODULE hDI8 = SK_GetModuleHandle (L"dinput8.dll");
+  if (hDI8 == nullptr)
+  {
+    SK_Input_DiagLog ("  di8: dinput8.dll not loaded, skipping");
+    return;
+  }
+
+  if (SK_DI8_AreDeviceHooksLive ())
+  {
+    SK_Input_DiagLog ("  di8: device hooks already live, skipping");
+    return;
+  }
+
+  auto pCreate =
+    reinterpret_cast <DirectInput8Create_pfn> (
+      SK_GetProcAddress (hDI8, "DirectInput8Create") );
+  if (pCreate == nullptr)
+  {
+    SK_Input_DiagLog ("  di8: DirectInput8Create export not found");
+    return;
+  }
+
+  IDirectInput8W* pDI = nullptr;
+  HRESULT         hr  =
+    pCreate ( (HINSTANCE)SK_GetModuleHandle (nullptr), DIRECTINPUT_VERSION,
+              IID_IDirectInput8W, reinterpret_cast <void **> (&pDI), nullptr );
+  if (FAILED (hr) || pDI == nullptr)
+  {
+    SK_Input_DiagLog ("  di8: DirectInput8Create failed hr=0x%08X", (unsigned)hr);
+    return;
+  }
+
+  IDirectInputDevice8W* pDev = nullptr;
+  hr = pDI->CreateDevice (GUID_SysMouse, &pDev, nullptr);
+
+  if (SUCCEEDED (hr) && pDev != nullptr)
+  {
+    void** vftable =
+      *reinterpret_cast <void ***> (pDev);
+
+    auto _HookVtbl = [&](int idx, void* detour, void** ppOrig, const char* name)
+    {
+      if (*ppOrig != nullptr)
+      {
+        SK_Input_DiagLog ("  di8: vftable[%d] %hs already hooked (orig=%p)", idx, name, *ppOrig);
+        return;
+      }
+
+      const MH_STATUS cs = MH_CreateHook (vftable [idx], detour, ppOrig);
+            MH_STATUS es = MH_UNKNOWN;
+      if (cs == MH_OK)
+            es = MH_EnableHook (vftable [idx]);
+
+      SK_Input_DiagLog (
+        "  di8: hook vftable[%d] %hs create=%hs enable=%hs target=%p orig=%p",
+        idx, name, MH_StatusToString (cs), MH_StatusToString (es),
+        vftable [idx], *ppOrig );
+    };
+
+    _HookVtbl ( 9, reinterpret_cast <void *> (IDirectInputDevice8W_GetDeviceState_Detour),
+                   static_cast_p2p <void> (&IDirectInputDevice8W_GetDeviceState_Original),
+                   "GetDeviceState" );
+
+    _HookVtbl ( 10, reinterpret_cast <void *> (IDirectInputDevice8W_GetDeviceData_Detour),
+                    static_cast_p2p <void> (&IDirectInputDevice8W_GetDeviceData_Original),
+                    "GetDeviceData" );
+
+    pDev->Release ();
+  }
+  else
+    SK_Input_DiagLog ("  di8: CreateDevice(GUID_SysMouse) failed hr=0x%08X", (unsigned)hr);
+
+  pDI->Release ();
+
+  SK_Input_DiagLog ( "SK_Input_HookDI8_Minimal: done device_hooks_live=%d",
+                     SK_DI8_AreDeviceHooksLive () ? 1 : 0 );
 }
 
 

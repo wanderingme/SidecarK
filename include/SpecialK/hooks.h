@@ -285,6 +285,13 @@ SK_CreateVFTableHook2 ( const wchar_t  *pwszFuncName,
 
 MH_STATUS __stdcall SK_ApplyQueuedHooks (void);
 
+// Atomic enable + flush of the queued-hook set.  Performs enable -> apply (->
+// restore prior state when keep_enabled is false) under a single internal lock,
+// so a concurrent enable/disable on another thread cannot turn the apply into a
+// no-op.  Prefer this over a bare SK_EnableApplyQueuedHooks()+SK_ApplyQueuedHooks()
+// pair at any site that may run while another thread also flushes.
+MH_STATUS __stdcall SK_FlushQueuedHooks (bool keep_enabled);
+
 MH_STATUS __stdcall SK_EnableHook     (void *pTarget);
 MH_STATUS __stdcall SK_EnableHookEx   (void *pTarget, UINT idx);
 

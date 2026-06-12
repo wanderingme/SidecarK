@@ -5284,6 +5284,47 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
     ImGui_ImplGL3_Init ();
   }
 
+  // -- One-shot input detour install (minimal path only) ----------------------
+  // The minimal fast path bypasses SK_InitCore -> SK_Input_Init, and even when
+  // the full boot runs, the API-level input detours are installed through
+  // SpecialK's queued-hook machinery whose global apply-flush is unreliable in
+  // the SidecarK/OpenGL path.  Install the movement-blocking detours here, once,
+  // on the GL render thread (the same context that installs the minimal swap
+  // hooks) via the immediate per-target hook path.  Both detour sets self-gate on
+  // SKC_IsInputCaptureEnabled(), so they are inert while the overlay is not
+  // interactive.  Raw Input covers GetRawInputData/Buffer mouse-look; cursor
+  // covers GetCursorPos/SetCursorPos recenter-warp mouse-look (older engines).
+  static volatile LONG s_input_hook_done = 0;
+  static ULONGLONG     s_input_hook_tick = 0;
+  if (InterlockedCompareExchange (&s_input_hook_done, 1, 0) == 0)
+  {
+    extern void SK_Input_HookRawInput_Minimal          (void);
+    extern void SK_Input_HookCursor_Minimal            (void);
+    extern void SK_Input_HookWinMsg_Minimal            (void);
+    extern void SK_Input_HookDI8_Minimal               (void);
+    extern void SK_Input_DiagSnapshotMovementDetours   (const char* when);
+    SK_Input_HookRawInput_Minimal        ();
+    SK_Input_HookCursor_Minimal          ();
+    SK_Input_HookWinMsg_Minimal          ();
+    SK_Input_HookDI8_Minimal             ();
+    SK_Input_DiagSnapshotMovementDetours ("post-install");
+    s_input_hook_tick = GetTickCount64 ();
+  }
+
+  // -- Settle snapshot: re-log live detour state ~3s after install, once.  The
+  // queued-hook flush (and any race) has resolved by then, so this captures the
+  // run's final state for diffing a passing run vs a failing run.
+  {
+    static volatile LONG s_input_settle_done = 0;
+    if ( s_input_hook_tick != 0 &&
+         (GetTickCount64 () - s_input_hook_tick) >= 3000ull &&
+         InterlockedCompareExchange (&s_input_settle_done, 1, 0) == 0 )
+    {
+      extern void SK_Input_DiagSnapshotMovementDetours (const char* when);
+      SK_Input_DiagSnapshotMovementDetours ("settled+3s");
+    }
+  }
+
   // -- Window rect for viewport -----------------------------------------------
   HWND hWnd    = WindowFromDC  (hDC);
   RECT rcWnd   = { };
@@ -5390,6 +5431,27 @@ SK_GL_ViruleSKF1_SwapBuffers (HDC hDC, wglSwapBuffers_pfn pfnOriginal)
 
   if (! s_fs_overlay_enabled)
     s_fs_has_frame = false;
+
+  // -- Capture-on snapshot: log live detour state each time INPUT CAPTURE
+  // (control mode == Interactive == 1) first turns on, capped to a few
+  // transitions.  This captures the detour state at the exact moment the overlay
+  // must block input — the decisive diff between a working and a non-working run.
+  {
+    const LONG ctrl_mode =
+      (s_fs_overlayEnabled != nullptr) ? *s_fs_overlayEnabled : 0L;
+    const bool capture_now = (ctrl_mode == 1L);
+    static bool          s_prev_capture   = false;
+    static volatile LONG s_captureon_logs = 0;
+    if (capture_now && (! s_prev_capture))
+    {
+      if (InterlockedIncrement (&s_captureon_logs) <= 6)
+      {
+        extern void SK_Input_DiagSnapshotMovementDetours (const char* when);
+        SK_Input_DiagSnapshotMovementDetours ("capture-on");
+      }
+    }
+    s_prev_capture = capture_now;
+  }
 
   // -- Step 1: open / maintain the SKF1 shared-memory mapping ----------------
   if (s_fs_base == nullptr)

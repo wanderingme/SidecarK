@@ -1212,3 +1212,57 @@ SK_Input_HookRawInput (void)
   });
 #endif
 }
+
+// Minimal-path Raw Input installer (SidecarK/Virule minimal GL fast path).
+//
+// The minimal GL fast path (g_sk_gl_virule_minimal / SK_GL_ViruleSKF1_SwapBuffers)
+// deliberately bypasses SpecialK's full boot, so SK_InitCore -> SK_Input_Init and
+// BasicInit -> SK_Input_PreInit never run.  That leaves the API-level Raw Input
+// detours uninstalled: the minimal path's WndProc hook catches window-message
+// input (clicks via WM_LBUTTONDOWN), but games that read mouse-look through the
+// Raw Input API (e.g. EFPSE) see movement leak straight through to the game even
+// while the interactive overlay is up.  This installs just the two Raw Input read
+// detours so movement is gated exactly like clicks.
+//
+// Why this and not the existing paths (do not "simplify" back into them):
+//
+//   * SK_Input_Init() cannot be used — it runs SK_Render_InitializeSharedCVars()
+//     and cvar creation, which is unsafe on the GL render thread (crashed there).
+//
+//   * The queued-hook machinery cannot be used — SK_Input_HookRawInput() queues
+//     via SK_CreateDLLHook2 and relies on a later process-wide SK_ApplyQueuedHooks()
+//     flush.  In the minimal path the swap + WndProc hooks are installed with
+//     direct MinHook and are NOT part of that queue; toggling apply-queued and
+//     flushing the global queue at attach time disrupted those already-live hooks
+//     and broke the overlay software cursor and hotkeys.
+//
+//   * config.input.gamepad.hook_raw_input gating is skipped — config is not loaded
+//     in the minimal path, so the gate would read an uninitialized default.
+//
+// SK_CreateDLLHook (the immediate variant) with ppFuncAddr == nullptr creates and
+// enables each hook on its own target via SK_EnableHook — per-target, no global
+// flush.  The detours self-gate on SKC_IsInputCaptureEnabled(), which reads the
+// control plane independently, so they pass input through untouched whenever the
+// overlay is not interactive.  RegisterRawInputDevices is intentionally left
+// alone: the movement block needs only the read detours, and re-shaping the
+// game's registration after it has already registered carries needless risk.
+//
+// Safe to call from the GL render thread (the same context that installs the
+// minimal swap hooks via direct MinHook).  Caller must invoke exactly once.
+void
+SK_Input_HookRawInput_Minimal (void)
+{
+  SK_Input_DiagLog ("SK_Input_HookRawInput_Minimal: entered");
+
+  SK_Input_DiagCreateDLLHook ("rawinput", L"user32",
+                               "GetRawInputData",
+                                GetRawInputData_Detour,
+           static_cast_p2p <void> (&GetRawInputData_Original) );
+
+  SK_Input_DiagCreateDLLHook ("rawinput", L"user32",
+                               "GetRawInputBuffer",
+                                GetRawInputBuffer_Detour,
+           static_cast_p2p <void> (&GetRawInputBuffer_Original) );
+
+  SK_Input_DiagLog ("SK_Input_HookRawInput_Minimal: done");
+}
