@@ -474,8 +474,21 @@ struct sk_config_t
     bool        auto_inject           =  true;  // Control implicit steam_api.dll bootstrapping
     bool        disable_overlay       = false;  // Sets an Env. Var to prevent drawing
     bool        crapcom_mode          = false;  // Workaround for CAPCOM DRM
+#ifdef SK_SIDECAR_MINIMAL
+    // SidecarK builds: NEVER hook the game's SteamAPI. SK's embedded Steamworks
+    // otherwise detours the game's steam_api{64}.dll and, on manual-dispatch games
+    // (modern SDK default; Unity Steamworks.NET / Facepunch), deliberately
+    // TerminateProcess()es the game when SK's own steam_api_sk{64}.dll is absent
+    // (src/steam/steam_api.cpp:4126 SK_SteamAPI_TerminateIfManualDispatchIsActive...).
+    // Defaulting this true makes SK_HookSteamAPI() return before installing any
+    // detour, so that self-kill path is unreachable. This removes ONLY SK's
+    // interference; the game's own Steamworks (its achievements + its own Steam
+    // overlay, and the Steam client's GameOverlayRenderer) is untouched.
+    bool        disable_integration   =  true;  // SidecarK: disable SK's Steam integration
+#else
     bool        disable_integration   = false;  // Specifically disables Steam integration,
                                                 //   while allowing other stores...
+#endif
 
     struct screenshot_handler_s {
       bool      enable_hook           =  true;
@@ -518,7 +531,17 @@ struct sk_config_t
     bool        overlay_hides_sk_osd  =  true;
     bool        reuse_overlay_pause   =  false;// Use Steam's overlay pause mode for our own
                                                //   control panel
+#ifdef SK_SIDECAR_MINIMAL
+    // SidecarK: broad platform-silent (TEST 1). In addition to
+    // steam.disable_integration, this silences ALL platform integration paths
+    // (incl. ones that run before/outside SK_HookSteamAPI: load_library Galaxy
+    // init, platform detection, and the platform.silent-gated branches in the
+    // frame-0 / TestImports flow). Closest match to the prior remembered
+    // "silent Steam" working state. (Default below stays false for non-SidecarK.)
+    bool        silent                =  true;
+#else
     bool        silent                = false;
+#endif
     bool        steam_is_b0rked       = false; // Need to swallow some exceptions or Streamline may crash games
     int         equivalent_steam_app  = -1;    // For non-Steam games, the AppID of the same game on Steam.
     std::wstring
