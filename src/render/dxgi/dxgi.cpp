@@ -3842,6 +3842,344 @@ SK_DXGI_BGRA8_To_R10G10B10A2Row (const uint8_t *__restrict src,
 }
 
 // ============================================================================
+// Thread-safe premultiplied-alpha overlay compositor for the minimal DXGI path.
+//
+// Restores the premultiplied OVER blend historically implemented by
+// SKC_D3D11_AlphaCompositeOverlay (SrcBlend=ONE, DestBlend=INV_SRC_ALPHA,
+// SrcBlendAlpha=ONE, DestBlendAlpha=INV_SRC_ALPHA, fullscreen-triangle draw,
+// overlay SRV, backbuffer RTV), but made safe for multithreaded-renderer D3D11
+// games (Unity etc.) that previously died ~13 s when the old impl drew on the
+// UNWRAPPED immediate context with no synchronization:
+//
+//   * Draws on the GAME'S WRAPPED immediate context (the ctx passed in).  It does
+//     NOT QueryInterface IID_IUnwrappedD3D11DeviceContext, so SpecialK's own
+//     state tracking on that context is preserved.
+//   * The ENTIRE composite (RTV bind -> draw -> full state restore) is bracketed
+//     by ID3D11Multithread::Enter()/Leave(), so the D3D11 runtime's internal lock
+//     serializes it against the game's render-thread submissions.
+//   * SAFETY GATE: if ID3D11Multithread is unavailable, or protection will not
+//     stick (a SINGLETHREADED device, where it is a no-op), the function draws
+//     NOTHING and returns false; the caller then uses the passive
+//     CopySubresourceRegion copy.  We never draw on the game context unserialized.
+//   * A process-wide lock guards the shader/state cache and serializes concurrent
+//     composites (multiple swapchains / Present threads).
+//   * FULL pipeline state is saved before the draw and restored after.
+//
+// Returns true  : the alpha composite draw was performed (serialized).
+//         false : nothing drawn; caller must use the passive copy fallback.
+// ============================================================================
+static bool
+SKC_D3D11_AlphaCompositeOverlay ( ID3D11Device*        dev,
+                                  ID3D11DeviceContext* ctx,
+                                  ID3D11Texture2D*     srcTex,
+                                  ID3D11Texture2D*     dstTex,
+                                  UINT                 overlayW,
+                                  UINT                 overlayH )
+{
+  if (dev == nullptr || ctx == nullptr || srcTex == nullptr || dstTex == nullptr)
+    return false;
+
+  // -- Reentrancy guard: protects s_cache and serializes our own composites -----
+  static std::mutex            s_compositorMutex;
+  std::lock_guard <std::mutex> compositor_guard (s_compositorMutex);
+
+  // -- SAFETY GATE: require ID3D11Multithread serialization on the game context --
+  // QI on the WRAPPED context returns SpecialK's ID3D11Multithread wrapper, which
+  // forwards Enter/Leave/Get/SetMultithreadProtected to the real D3D11 runtime.
+  SK_ComPtr <ID3D11Multithread> pMT = nullptr;
+  if ( FAILED (ctx->QueryInterface (__uuidof (ID3D11Multithread),
+                                    (void **)&pMT.p)) || pMT.p == nullptr )
+  {
+    static bool s_loggedNoMT = false;
+    if (! s_loggedNoMT) { s_loggedNoMT = true;
+      SK_DXGI_SidecarLog (L"dxgi-mt",
+        L"ID3D11Multithread unavailable -> passive copy fallback"); }
+    return false;
+  }
+
+  if (! pMT->GetMultithreadProtected ())
+  {
+    pMT->SetMultithreadProtected (TRUE);
+    if (! pMT->GetMultithreadProtected ())
+    {
+      static bool s_loggedNoProt = false;
+      if (! s_loggedNoProt) { s_loggedNoProt = true;
+        SK_DXGI_SidecarLog (L"dxgi-mt",
+          L"MT protection will not stick (singlethreaded device) "
+          L"-> passive copy fallback"); }
+      return false;
+    }
+  }
+
+  // -- Per-device shader / pipeline-state cache (guarded by s_compositorMutex) ---
+  struct SKC_D3D11Cache
+  {
+    ID3D11Device*           dev   = nullptr;
+    ID3D11VertexShader*     vs    = nullptr;
+    ID3D11PixelShader*      ps    = nullptr;
+    ID3D11BlendState*       blend = nullptr;
+    ID3D11SamplerState*     samp  = nullptr;
+    ID3D11RasterizerState*  rs    = nullptr;
+    bool                    valid = false;
+
+    void Release ()
+    {
+      if (vs)    { vs->Release    (); vs    = nullptr; }
+      if (ps)    { ps->Release    (); ps    = nullptr; }
+      if (blend) { blend->Release (); blend = nullptr; }
+      if (samp)  { samp->Release  (); samp  = nullptr; }
+      if (rs)    { rs->Release    (); rs    = nullptr; }
+      dev   = nullptr;
+      valid = false;
+    }
+  };
+  static SKC_D3D11Cache s_cache;
+
+  if (s_cache.dev != dev || ! s_cache.valid)
+  {
+    s_cache.Release ();
+    s_cache.dev = dev;
+
+    // Fullscreen-triangle VS (SV_VertexID, no vertex buffer). D3D textures are
+    // top-down so no Y flip is applied.
+    static const char s_vs_hlsl [] =
+      "void main(uint id:SV_VertexID, out float4 pos:SV_POSITION,"
+      "          out float2 uv:TEXCOORD0){"
+      "  uv  = float2((id<<1u)&2u, id&2u);"
+      "  pos = float4(uv.x*2.0f-1.0f, 1.0f-uv.y*2.0f, 0.0f, 1.0f);"
+      "}";
+    // Passthrough PS: returns the premultiplied texel; the blend state applies
+    // ONE*src + INV_SRC_ALPHA*dst to composite over the game.
+    static const char s_ps_hlsl [] =
+      "Texture2D t0:register(t0); SamplerState s0:register(s0);"
+      "float4 main(float4 pos:SV_POSITION, float2 uv:TEXCOORD0):SV_TARGET{"
+      "  return t0.Sample(s0, uv);"
+      "}";
+
+    ID3DBlob* vsBlob = nullptr; ID3DBlob* psBlob = nullptr; ID3DBlob* errs = nullptr;
+
+    HRESULT hr = SK_D3D_Compile (s_vs_hlsl, strlen (s_vs_hlsl), "SKC_VS",
+                                 nullptr, nullptr, "main", "vs_4_0", 0, 0,
+                                 &vsBlob, &errs);
+    if (errs) { errs->Release (); errs = nullptr; }
+    if (FAILED (hr) || vsBlob == nullptr)
+    {
+      if (vsBlob) vsBlob->Release ();
+      static bool s_l = false; if (! s_l) { s_l = true;
+        SK_DXGI_SidecarLog (L"dxgi-mt", L"VS compile failed hr=0x%08X", (unsigned)hr); }
+      return false;
+    }
+
+    hr = SK_D3D_Compile (s_ps_hlsl, strlen (s_ps_hlsl), "SKC_PS",
+                         nullptr, nullptr, "main", "ps_4_0", 0, 0, &psBlob, &errs);
+    if (errs) { errs->Release (); errs = nullptr; }
+    if (FAILED (hr) || psBlob == nullptr)
+    {
+      vsBlob->Release (); if (psBlob) psBlob->Release ();
+      static bool s_l = false; if (! s_l) { s_l = true;
+        SK_DXGI_SidecarLog (L"dxgi-mt", L"PS compile failed hr=0x%08X", (unsigned)hr); }
+      return false;
+    }
+
+    hr = dev->CreateVertexShader (vsBlob->GetBufferPointer (),
+                                  vsBlob->GetBufferSize (), nullptr, &s_cache.vs);
+    vsBlob->Release ();
+    if (FAILED (hr) || s_cache.vs == nullptr)
+    { psBlob->Release (); s_cache.Release (); return false; }
+
+    hr = dev->CreatePixelShader (psBlob->GetBufferPointer (),
+                                 psBlob->GetBufferSize (), nullptr, &s_cache.ps);
+    psBlob->Release ();
+    if (FAILED (hr) || s_cache.ps == nullptr)
+    { s_cache.Release (); return false; }
+
+    // Premultiplied-alpha OVER blend.
+    D3D11_BLEND_DESC bd = { };
+    bd.RenderTarget [0].BlendEnable           = TRUE;
+    bd.RenderTarget [0].SrcBlend              = D3D11_BLEND_ONE;
+    bd.RenderTarget [0].DestBlend             = D3D11_BLEND_INV_SRC_ALPHA;
+    bd.RenderTarget [0].BlendOp               = D3D11_BLEND_OP_ADD;
+    bd.RenderTarget [0].SrcBlendAlpha         = D3D11_BLEND_ONE;
+    bd.RenderTarget [0].DestBlendAlpha        = D3D11_BLEND_INV_SRC_ALPHA;
+    bd.RenderTarget [0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
+    bd.RenderTarget [0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    hr = dev->CreateBlendState (&bd, &s_cache.blend);
+    if (FAILED (hr) || s_cache.blend == nullptr) { s_cache.Release (); return false; }
+
+    D3D11_SAMPLER_DESC sd = { };
+    sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    hr = dev->CreateSamplerState (&sd, &s_cache.samp);
+    if (FAILED (hr) || s_cache.samp == nullptr) { s_cache.Release (); return false; }
+
+    // Rasterizer: solid, no cull, scissor DISABLED so the overlay is never
+    // clipped by whatever scissor rect the game left bound.
+    D3D11_RASTERIZER_DESC rd = { };
+    rd.FillMode        = D3D11_FILL_SOLID;
+    rd.CullMode        = D3D11_CULL_NONE;
+    rd.DepthClipEnable = TRUE;
+    rd.ScissorEnable   = FALSE;
+    hr = dev->CreateRasterizerState (&rd, &s_cache.rs);
+    if (FAILED (hr) || s_cache.rs == nullptr) { s_cache.Release (); return false; }
+
+    s_cache.valid = true;
+    SK_DXGI_SidecarLog (L"dxgi-mt", L"D3D11 alpha compositor ready (dev=%p)", dev);
+  }
+
+  // -- Per-call SRV (overlay) + RTV (backbuffer) --------------------------------
+  D3D11_TEXTURE2D_DESC srcDesc = { };
+  srcTex->GetDesc (&srcDesc);
+  D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = { };
+  srvDesc.Format                    = srcDesc.Format;
+  srvDesc.ViewDimension             = D3D11_SRV_DIMENSION_TEXTURE2D;
+  srvDesc.Texture2D.MostDetailedMip = 0;
+  srvDesc.Texture2D.MipLevels       = 1;
+
+  SK_ComPtr <ID3D11ShaderResourceView> srv = nullptr;
+  if (FAILED (dev->CreateShaderResourceView (srcTex, &srvDesc, &srv.p)) || srv.p == nullptr)
+  {
+    static bool s_l = false; if (! s_l) { s_l = true;
+      SK_DXGI_SidecarLog (L"dxgi-mt", L"CreateSRV failed"); }
+    return false;
+  }
+
+  D3D11_TEXTURE2D_DESC dstDesc = { };
+  dstTex->GetDesc (&dstDesc);
+  D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = { };
+  rtvDesc.Format        = dstDesc.Format;
+  rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+
+  SK_ComPtr <ID3D11RenderTargetView> rtv = nullptr;
+  if (FAILED (dev->CreateRenderTargetView (dstTex, &rtvDesc, &rtv.p)) || rtv.p == nullptr)
+  {
+    static bool s_l = false; if (! s_l) { s_l = true;
+      SK_DXGI_SidecarLog (L"dxgi-mt", L"CreateRTV failed fmt=%u", (unsigned)dstDesc.Format); }
+    return false;
+  }
+
+  // -- FULL pipeline state save -------------------------------------------------
+  static constexpr UINT kMaxCI = 256u;
+  struct SavedState
+  {
+    UINT                      ScissorCount = 0, ViewportCount = 0;
+    D3D11_RECT                Scissors  [D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = { };
+    D3D11_VIEWPORT            Viewports [D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = { };
+    ID3D11RasterizerState*    RS        = nullptr;
+    ID3D11BlendState*         Blend     = nullptr;
+    FLOAT                     BlendFactor [4] = { };
+    UINT                      SampleMask = 0;
+    ID3D11DepthStencilState*  DSS        = nullptr;
+    UINT                      StencilRef = 0;
+    ID3D11RenderTargetView*   RTVs [D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = { };
+    ID3D11DepthStencilView*   DSV        = nullptr;
+    ID3D11ShaderResourceView* PSSRV0     = nullptr;
+    ID3D11SamplerState*       PSSamp0    = nullptr;
+    ID3D11VertexShader*       VS = nullptr; ID3D11ClassInstance* VSI [kMaxCI] = { }; UINT VSIc = kMaxCI;
+    ID3D11PixelShader*        PS = nullptr; ID3D11ClassInstance* PSI [kMaxCI] = { }; UINT PSIc = kMaxCI;
+    ID3D11GeometryShader*     GS = nullptr; ID3D11ClassInstance* GSI [kMaxCI] = { }; UINT GSIc = kMaxCI;
+    ID3D11HullShader*         HS = nullptr; ID3D11ClassInstance* HSI [kMaxCI] = { }; UINT HSIc = kMaxCI;
+    ID3D11DomainShader*       DS = nullptr; ID3D11ClassInstance* DSI [kMaxCI] = { }; UINT DSIc = kMaxCI;
+    ID3D11ComputeShader*      CS = nullptr; ID3D11ClassInstance* CSI [kMaxCI] = { }; UINT CSIc = kMaxCI;
+    D3D11_PRIMITIVE_TOPOLOGY  Topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ID3D11InputLayout*        IL  = nullptr;
+    ID3D11Buffer*             IB  = nullptr; DXGI_FORMAT IBFmt = DXGI_FORMAT_UNKNOWN; UINT IBOff = 0;
+    ID3D11Buffer*             VB0 = nullptr; UINT VB0Stride = 0, VB0Off = 0;
+  };
+  // Heap-allocated to keep this (large) save block off the Present-thread stack.
+  auto saved = std::make_unique <SavedState> ();
+  SavedState& s = *saved;
+
+  // -- Serialize the whole composite against the game's submissions -------------
+  pMT->Enter ();
+
+  s.ScissorCount = s.ViewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+  ctx->RSGetScissorRects      (&s.ScissorCount, s.Scissors);
+  ctx->RSGetViewports         (&s.ViewportCount, s.Viewports);
+  ctx->RSGetState             (&s.RS);
+  ctx->OMGetBlendState        (&s.Blend, s.BlendFactor, &s.SampleMask);
+  ctx->OMGetDepthStencilState (&s.DSS, &s.StencilRef);
+  ctx->OMGetRenderTargets     (D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, s.RTVs, &s.DSV);
+  ctx->PSGetShaderResources   (0, 1, &s.PSSRV0);
+  ctx->PSGetSamplers          (0, 1, &s.PSSamp0);
+  ctx->VSGetShader            (&s.VS, s.VSI, &s.VSIc);
+  ctx->PSGetShader            (&s.PS, s.PSI, &s.PSIc);
+  ctx->GSGetShader            (&s.GS, s.GSI, &s.GSIc);
+  ctx->HSGetShader            (&s.HS, s.HSI, &s.HSIc);
+  ctx->DSGetShader            (&s.DS, s.DSI, &s.DSIc);
+  ctx->CSGetShader            (&s.CS, s.CSI, &s.CSIc);
+  ctx->IAGetPrimitiveTopology (&s.Topology);
+  ctx->IAGetInputLayout       (&s.IL);
+  ctx->IAGetIndexBuffer       (&s.IB, &s.IBFmt, &s.IBOff);
+  ctx->IAGetVertexBuffers     (0, 1, &s.VB0, &s.VB0Stride, &s.VB0Off);
+
+  // -- Set overlay draw state ---------------------------------------------------
+  ctx->OMSetRenderTargets     (1, &rtv.p, nullptr);
+  const FLOAT kBlendFactor [4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+  ctx->OMSetBlendState        (s_cache.blend, kBlendFactor, 0xFFFFFFFFu);
+  ctx->OMSetDepthStencilState (nullptr, 0);
+  ctx->RSSetState             (s_cache.rs);
+  D3D11_VIEWPORT vp = { 0.0f, 0.0f, (FLOAT)overlayW, (FLOAT)overlayH, 0.0f, 1.0f };
+  ctx->RSSetViewports         (1, &vp);
+  ctx->VSSetShader            (s_cache.vs, nullptr, 0);
+  ctx->PSSetShader            (s_cache.ps, nullptr, 0);
+  ctx->GSSetShader            (nullptr, nullptr, 0);
+  ctx->HSSetShader            (nullptr, nullptr, 0);
+  ctx->DSSetShader            (nullptr, nullptr, 0);
+  ctx->CSSetShader            (nullptr, nullptr, 0);
+  ctx->IASetInputLayout       (nullptr);
+  ctx->IASetPrimitiveTopology (D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  ID3D11Buffer* nullVB = nullptr; UINT vbZero = 0;
+  ctx->IASetVertexBuffers     (0, 1, &nullVB, &vbZero, &vbZero);
+  ctx->IASetIndexBuffer       (nullptr, DXGI_FORMAT_UNKNOWN, 0);
+  ctx->PSSetSamplers          (0, 1, &s_cache.samp);
+  ctx->PSSetShaderResources   (0, 1, &srv.p);
+
+  ctx->Draw (3, 0);
+
+  // -- Restore FULL pipeline state ----------------------------------------------
+  ctx->OMSetRenderTargets     (D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, s.RTVs, s.DSV);
+  ctx->OMSetBlendState        (s.Blend, s.BlendFactor, s.SampleMask);
+  ctx->OMSetDepthStencilState (s.DSS, s.StencilRef);
+  ctx->RSSetState             (s.RS);
+  if (s.ViewportCount > 0) ctx->RSSetViewports    (s.ViewportCount, s.Viewports);
+  if (s.ScissorCount  > 0) ctx->RSSetScissorRects (s.ScissorCount,  s.Scissors);
+  ctx->VSSetShader            (s.VS, s.VSI, s.VSIc);
+  ctx->PSSetShader            (s.PS, s.PSI, s.PSIc);
+  ctx->GSSetShader            (s.GS, s.GSI, s.GSIc);
+  ctx->HSSetShader            (s.HS, s.HSI, s.HSIc);
+  ctx->DSSetShader            (s.DS, s.DSI, s.DSIc);
+  ctx->CSSetShader            (s.CS, s.CSI, s.CSIc);
+  ctx->IASetInputLayout       (s.IL);
+  ctx->IASetPrimitiveTopology (s.Topology);
+  ctx->IASetIndexBuffer       (s.IB, s.IBFmt, s.IBOff);
+  ctx->IASetVertexBuffers     (0, 1, &s.VB0, &s.VB0Stride, &s.VB0Off);
+  ctx->PSSetSamplers          (0, 1, &s.PSSamp0);
+  ctx->PSSetShaderResources   (0, 1, &s.PSSRV0);
+
+  pMT->Leave ();
+
+  // -- Release the COM references returned by the *Get* save calls --------------
+  for (auto* p : s.RTVs) { if (p) p->Release (); }
+  if (s.DSV)     s.DSV->Release ();
+  if (s.RS)      s.RS->Release ();
+  if (s.Blend)   s.Blend->Release ();
+  if (s.DSS)     s.DSS->Release ();
+  if (s.PSSRV0)  s.PSSRV0->Release ();
+  if (s.PSSamp0) s.PSSamp0->Release ();
+  if (s.VS)      s.VS->Release (); for (UINT i = 0; i < s.VSIc; ++i) if (s.VSI [i]) s.VSI [i]->Release ();
+  if (s.PS)      s.PS->Release (); for (UINT i = 0; i < s.PSIc; ++i) if (s.PSI [i]) s.PSI [i]->Release ();
+  if (s.GS)      s.GS->Release (); for (UINT i = 0; i < s.GSIc; ++i) if (s.GSI [i]) s.GSI [i]->Release ();
+  if (s.HS)      s.HS->Release (); for (UINT i = 0; i < s.HSIc; ++i) if (s.HSI [i]) s.HSI [i]->Release ();
+  if (s.DS)      s.DS->Release (); for (UINT i = 0; i < s.DSIc; ++i) if (s.DSI [i]) s.DSI [i]->Release ();
+  if (s.CS)      s.CS->Release (); for (UINT i = 0; i < s.CSIc; ++i) if (s.CSI [i]) s.CSI [i]->Release ();
+  if (s.IL)      s.IL->Release ();
+  if (s.IB)      s.IB->Release ();
+  if (s.VB0)     s.VB0->Release ();
+
+  return true;
+}
+
+// ============================================================================
 // Minimal SidecarK-managed DXGI Present helper.
 //
 // Called instead of SK_DXGI_DispatchPresent when g_sk_dxgi_sidecar_minimal != 0.
@@ -4311,13 +4649,18 @@ SK_DXGI_SKF1_Present ( IDXGISwapChain      *This,
     return pfnPresent (This, SyncInterval, Flags);
   }
 
-  // Blit the overlay texture onto the backbuffer using CopySubresourceRegion.
-  // No alpha-blend in the minimal path: it keeps the code free of SpecialK
-  // helpers and shader setup.
+  // Composite the overlay onto the backbuffer.  Preferred path is the
+  // thread-safe premultiplied-alpha blend (so transparent overlay pixels do not
+  // overwrite the game with black); it serializes itself via ID3D11Multithread.
+  // If serialization is unavailable (singlethreaded device, etc.) it draws
+  // nothing and returns false, and we fall back to the passive opaque copy.
   if (s_hasFrame && s_tex != nullptr && s_texFmt == bbDesc.Format)
   {
-    D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
-    ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);
+    if (! SKC_D3D11_AlphaCompositeOverlay (dev, ctx, s_tex, bb, copyW, copyH))
+    {
+      D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
+      ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);
+    }
   }
 
   bb->Release ();
@@ -4677,10 +5020,16 @@ SK_DXGI_SKF1_Present1 ( IDXGISwapChain1              *This,
     return pfnPresent1 (This, SyncInterval, Flags, pPresentParameters);
   }
 
+  // Thread-safe premultiplied-alpha composite (see SK_DXGI_SKF1_Present); falls
+  // back to the passive opaque copy when ID3D11Multithread serialization is
+  // unavailable.
   if (s_hasFrame && s_tex != nullptr && s_texFmt == bbDesc.Format)
   {
-    D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
-    ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);
+    if (! SKC_D3D11_AlphaCompositeOverlay (dev, ctx, s_tex, bb, copyW, copyH))
+    {
+      D3D11_BOX srcBox = { 0, 0, 0, copyW, copyH, 1 };
+      ctx->CopySubresourceRegion (bb, 0, 0, 0, 0, s_tex, 0, &srcBox);
+    }
   }
 
   bb->Release (); ctx->Release (); dev->Release ();
