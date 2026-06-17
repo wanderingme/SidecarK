@@ -436,6 +436,23 @@ SK_GetSharedKeyState_Impl (int vKey, GetAsyncKeyState_pfn pfnGetFunc)
   if (pfnGetFunc == nullptr)
     return 0;
 
+  // [decision-probe] polled key-state channel.  When the game polls VK_ESCAPE,
+  // record which API, the gate, and whether this detour body will block (the
+  // logic below returns 0 when capture is on).  Instrumentation only.
+  if (vKey == VK_ESCAPE)
+  {
+    const bool isAsync = (pfnGetFunc == GetAsyncKeyState_Original);
+    if (SK_Input_DecisionRL ("getkeystate", isAsync ? 1u : 2u))
+    {
+      extern uint32_t SKC_DiagOverlayModeValue (void);
+      const bool cap = SKC_IsInputCaptureEnabled ();
+      SK_Input_DecisionLog ("getkeystate",
+        "VK_ESCAPE via %hs cap=%d mode=%u -> blocked=%d",
+        isAsync ? "GetAsyncKeyState" : "GetKeyState",
+        cap ? 1 : 0, SKC_DiagOverlayModeValue (), cap ? 1 : 0);
+    }
+  }
+
   // Overlay closed: pass through exactly.
   if (! SKC_IsInputCaptureEnabled ())
     return pfnGetFunc (vKey);
@@ -795,6 +812,77 @@ SK_Input_PreHookKeyboard (void)
                                keybd_event_Detour,
       static_cast_p2p <void> (&keybd_event_Original) );
   });
+}
+
+
+// ---------------------------------------------------------------------------
+// Minimal-path polled-keyboard installer (SidecarK DXGI/Unity fast path).
+//
+// The DXGI managed present bypasses SK's full ImGui/input frame path, and the GL
+// minimal one-shot (opengl.cpp) never runs for a DXGI title — so the only thing
+// that would have installed GetAsyncKeyState/GetKeyState/GetKeyboardState was the
+// queued boot path (SK_Input_PreHookKeyboard via SK_CreateDLLHook2).  That path's
+// global apply-flush is documented-unreliable in this build (it CREATES the hook
+// but may never ENABLE it), so Unity reads Escape straight through and opens its
+// pause menu while the overlay is up.  This installs them the same immediate,
+// per-target way the Raw Input minimal installer uses: no queue, no config gate,
+// no input-subsystem init.  The detours (above) already self-gate on
+// SKC_IsInputCaptureEnabled() — interactive-only — so they pass through untouched
+// whenever the overlay is not interactive.
+//
+// CRITICAL — enable even when the queue beat us:  if the queued path already
+// CREATED the hook, its trampoline (*_Original) is already set.  We must NOT
+// treat that as "done" and skip — the real bug is "created but never enabled".
+// So: create only when absent (avoids SK_CreateDLLHook's remove+recreate path),
+// then ALWAYS enable the target.  MH_EnableHook on an already-enabled hook is a
+// harmless no-op (MH_ERROR_ENABLED).
+//
+// Safe to call from the render thread.  Caller must invoke exactly once.
+static void
+SK_Input_KbdMinimal_InstallOne ( const char* proc, void* detour,
+                                 void** ppOriginal )
+{
+  void* addr =
+    reinterpret_cast <void *> (SK_GetProcAddress (L"user32", proc));
+
+  MH_STATUS cs = MH_OK;
+
+  // Create+enable in one shot only when the queue hasn't already created it.
+  // (ppFuncAddr omitted -> SK_CreateDLLHook enables on MH_OK.)  When the queue
+  // already created it, *ppOriginal is non-null; skip the create (its
+  // ALREADY_CREATED branch would remove+recreate) and just enable below.
+  if (ppOriginal == nullptr || *ppOriginal == nullptr)
+    cs = SK_CreateDLLHook (L"user32", proc, detour, ppOriginal);
+
+  // Ground truth: enable the target regardless of how we got here.  NEVER skip
+  // enabling merely because the trampoline is already set.
+  MH_STATUS es = (addr != nullptr) ? SK_EnableHook (addr)
+                                   : MH_ERROR_MODULE_NOT_FOUND;
+
+  const BYTE b0   = (addr != nullptr) ? *reinterpret_cast <const BYTE *> (addr) : 0;
+  const bool live = (b0 == 0xE9 || b0 == 0xEB || b0 == 0xFF); // JMP rel32/rel8/indirect
+
+  SK_Input_DiagLog (
+    "install[keyboard] user32!%hs create=%d enable=%d addr=%p b0=0x%02X live=%d orig=%p",
+    proc, (int)cs, (int)es, addr, (unsigned)b0, live ? 1 : 0,
+    ppOriginal ? *ppOriginal : nullptr );
+}
+
+void
+SK_Input_HookKeyboard_Minimal (void)
+{
+  SK_Input_DiagLog ("SK_Input_HookKeyboard_Minimal: entered");
+
+  SK_Input_KbdMinimal_InstallOne ( "GetAsyncKeyState", GetAsyncKeyState_Detour,
+                          static_cast_p2p <void> (&GetAsyncKeyState_Original) );
+
+  SK_Input_KbdMinimal_InstallOne ( "GetKeyState", GetKeyState_Detour,
+                          static_cast_p2p <void> (&GetKeyState_Original) );
+
+  SK_Input_KbdMinimal_InstallOne ( "GetKeyboardState", GetKeyboardState_Detour,
+                          static_cast_p2p <void> (&GetKeyboardState_Original) );
+
+  SK_Input_DiagLog ("SK_Input_HookKeyboard_Minimal: done");
 }
 
 

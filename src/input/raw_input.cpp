@@ -953,6 +953,30 @@ GetRawInputData_Detour (_In_      HRAWINPUT hRawInput,
 {
   SK_LOG_FIRST_CALL
 
+  // [decision-probe] raw-input keyboard channel.  Classify the record; when it's
+  // a KEYBOARD record, log the gate and whether this detour will zero it.  The
+  // classify (an extra header read) is bounded to the first 15 keyboard records
+  // and only runs while diagnostics are enabled, so it never affects production.
+  {
+    extern bool     SidecarK_DiagnosticsEnabled (void);
+    extern uint32_t SKC_DiagOverlayModeValue     (void);
+    static volatile LONG s_ri_kbd_seen = 0;
+
+    if (SidecarK_DiagnosticsEnabled () && ReadAcquire (&s_ri_kbd_seen) < 15)
+    {
+      bool ri_mouse = false, ri_keyboard = false, ri_gamepad = false;
+      SK_Input_ClassifyRawInput (hRawInput, ri_mouse, ri_keyboard, ri_gamepad);
+
+      if (ri_keyboard && InterlockedIncrement (&s_ri_kbd_seen) <= 15)
+      {
+        const bool cap = SKC_IsInputCaptureEnabled ();
+        SK_Input_DecisionLog ("rawinput.kbd",
+          "keyboard raw record cmd=0x%X cap=%d mode=%u -> zeroed=%d",
+          uiCommand, cap ? 1 : 0, SKC_DiagOverlayModeValue (), cap ? 1 : 0);
+      }
+    }
+  }
+
   if (SKC_IsInputCaptureEnabled ())
   {
     if (pcbSize) *pcbSize = 0;

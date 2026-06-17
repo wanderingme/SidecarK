@@ -276,6 +276,30 @@ ShowCursor_Detour (BOOL bShow)
     ret;
 }
 
+// ---------------------------------------------------------------------------
+// SidecarK DXGI overlay OS-cursor control (Bug A: double cursor) — NEUTRALIZED.
+//
+// The prior mechanism drove the real (un-detoured) ShowCursor on the Interactive
+// edge from the PRESENT thread (plus set SK_ImGui_Cursor.force = Hidden).
+// Measurement showed it did NOT take — the OS cursor stayed visible — and it
+// fought the process-wide ShowCursor counter.  The real root cause was elsewhere:
+// in the minimal DXGI path nothing subclassed the Unity window, so SidecarK never
+// saw the window messages at all.
+//
+// Cursor visibility for the DXGI overlay now lives in the minimal DXGI WndProc's
+// WM_SETCURSOR handler (window.cpp: SetCursor(NULL) while Interactive), which
+// hides the client-area cursor WITHOUT touching the ShowCursor counter.
+//
+// This function is kept for ABI/declaration but is now a no-op, and the DXGI
+// present no longer calls it.
+// ---------------------------------------------------------------------------
+void
+SK_Cursor_SetSidecarOverlayHidden (bool /*hidden*/)
+{
+  // Intentionally empty.  See header — cursor hide is enforced in
+  // SK_Sidecar_MinimalWndProc (WM_SETCURSOR), not from the present thread.
+}
+
 SetCursor_pfn     SetCursor_Original     = nullptr;
 GetCursor_pfn     GetCursor_Original     = nullptr;
 GetCursorInfo_pfn GetCursorInfo_Original = nullptr;

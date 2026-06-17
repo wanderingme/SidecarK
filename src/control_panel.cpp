@@ -293,6 +293,18 @@ SKC_IsOverlayEnabled (void)
   return SKC_IsInputCaptureEnabled ();
 }
 
+// Diagnostic-only: the normalized overlay-mode value (0=Off, 1=Interactive,
+// 2=ToastOnly) that THIS thread's gate reads from the SKC control map right now.
+// Lets the decision probes compare the value the present thread vs the input/pump
+// thread sees, to detect any cross-thread disagreement.  No caching of its own —
+// it just surfaces SKC_GetOverlayMode()'s result as a plain integer so callers
+// need not include the enum.
+uint32_t
+SKC_DiagOverlayModeValue (void)
+{
+  return static_cast <uint32_t> (SKC_GetOverlayMode ());
+}
+
 
 #include <imgui/backends/imgui_d3d11.h>
 #include <imgui/backends/imgui_d3d12.h>

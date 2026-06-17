@@ -4968,6 +4968,25 @@ PeekMessageA_Detour (
       SK_EarlyDispatchMessage (&msg, true, true);
     }
 
+    // [decision-probe] message-pump channel: log a dequeued Escape/keydown or
+    // left-click and whether this detour will null it.  Instrumentation only.
+    if ( ( msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN ||
+           msg.message == WM_LBUTTONDOWN ) &&
+         SK_Input_DecisionRL ("peekmsg", msg.message) )
+    {
+      extern bool SKC_IsInputCaptureEnabled (void);
+      const bool cap_cached = SKC_IsInputCaptureEnabledCached ();
+      const bool cap        = SKC_IsInputCaptureEnabled       ();
+      const bool in_range   =
+        (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) ||
+        (msg.message >= WM_KEYFIRST   && msg.message <= WM_KEYLAST)   ||
+         msg.message == WM_INPUT;
+      SK_Input_DecisionLog ("peekmsg",
+        "msg=0x%04X vk/wp=0x%IX capCached=%d cap=%d -> willNull=%d (else passthru)",
+        msg.message, (size_t)msg.wParam, cap_cached ? 1 : 0, cap ? 1 : 0,
+        (cap_cached && in_range) ? 1 : 0);
+    }
+
     // When overlay is active, null out keyboard/mouse/raw-input in the MSG
     // before the game can read msg.message/lParam directly (covers both
     // PM_REMOVE and PM_NOREMOVE call patterns).
@@ -5088,6 +5107,25 @@ PeekMessageW_Detour (
                        PM_REMOVE )
     {
       SK_EarlyDispatchMessage (&msg, true, true);
+    }
+
+    // [decision-probe] message-pump channel: log a dequeued Escape/keydown or
+    // left-click and whether this detour will null it.  Instrumentation only.
+    if ( ( msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN ||
+           msg.message == WM_LBUTTONDOWN ) &&
+         SK_Input_DecisionRL ("peekmsg", msg.message) )
+    {
+      extern bool SKC_IsInputCaptureEnabled (void);
+      const bool cap_cached = SKC_IsInputCaptureEnabledCached ();
+      const bool cap        = SKC_IsInputCaptureEnabled       ();
+      const bool in_range   =
+        (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) ||
+        (msg.message >= WM_KEYFIRST   && msg.message <= WM_KEYLAST)   ||
+         msg.message == WM_INPUT;
+      SK_Input_DecisionLog ("peekmsg",
+        "msg=0x%04X vk/wp=0x%IX capCached=%d cap=%d -> willNull=%d (else passthru)",
+        msg.message, (size_t)msg.wParam, cap_cached ? 1 : 0, cap ? 1 : 0,
+        (cap_cached && in_range) ? 1 : 0);
     }
 
     // When overlay is active, null out keyboard/mouse/raw-input in the MSG
@@ -5950,6 +5988,120 @@ SK_Input_HookWinMsg_Minimal (void)
   SK_Input_DiagLog ("SK_Input_HookWinMsg_Minimal: done");
 }
 
+// ===========================================================================
+//  Minimal DXGI-path window-proc subclass (SidecarK/Unity).
+//
+//  Measured root cause: in the minimal DXGI present path SidecarK never
+//  subclasses the game's window proc (SK_DetourWindowProc / SK_InstallWindowHook
+//  belong to the full boot, which does not run here).  Unity routes Escape and
+//  mouse clicks as ordinary window messages to ITS OWN WndProc, which nothing
+//  intercepts — so the user32 API detours, although live, are the wrong channel.
+//
+//  This is a FRESH, dedicated subclass — deliberately NOT SK_DetourWindowProc,
+//  whose swallow is ImGui/full-boot gated.  It is strictly SKC-gated: it only
+//  swallows while SKC_IsInputCaptureEnabled() (Interactive ONLY).  For Off and
+//  ToastOnly it chains straight through to the game's proc, so the toast
+//  invariant (toast never captures input or hides the cursor) holds for free.
+//
+//  Unity registers a Unicode window class, so we use the W variants
+//  (SetWindowLongPtrW / CallWindowProcW) as specified.
+// ===========================================================================
+static WNDPROC s_sidecar_min_wndproc_prev = nullptr; // game's prior proc (chain target)
+static HWND    s_sidecar_min_wndproc_hwnd = nullptr; // HWND we subclassed
+
+static LRESULT CALLBACK
+SK_Sidecar_MinimalWndProc (HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+  // First-message liveness proof — next run's decision log shows we're in chain.
+  {
+    static volatile LONG s_live_logged = 0;
+    if (InterlockedCompareExchange (&s_live_logged, 1, 0) == 0)
+      SK_Input_DecisionLog ("minwndproc", "minimal wndproc live, hwnd=%p", (void *)hWnd);
+  }
+
+  const WNDPROC prev = s_sidecar_min_wndproc_prev;
+
+  extern bool SKC_IsInputCaptureEnabled (void);
+
+  if (SKC_IsInputCaptureEnabled ()) // Interactive ONLY
+  {
+    switch (uMsg)
+    {
+      // --- Keyboard: swallow so Unity never sees Escape et al. ---------------
+      case WM_KEYDOWN: case WM_SYSKEYDOWN:
+      case WM_KEYUP:   case WM_SYSKEYUP:
+      case WM_CHAR:    case WM_SYSCHAR:
+      {
+        if ( uMsg == WM_KEYDOWN && wParam == VK_ESCAPE &&
+             SK_Input_DecisionRL ("minwndproc.kbd", (unsigned)wParam) )
+          SK_Input_DecisionLog ("minwndproc.kbd", "VK_ESCAPE cap=1 -> swallowed=1");
+        return 0;
+      }
+
+      // --- Mouse + raw input: swallow ----------------------------------------
+      case WM_MOUSEMOVE:
+      case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+      case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+      case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+      case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
+      case WM_MOUSEWHEEL:  case WM_MOUSEHWHEEL:
+      case WM_INPUT:
+      {
+        if ( uMsg == WM_LBUTTONDOWN &&
+             SK_Input_DecisionRL ("minwndproc.mouse", uMsg) )
+          SK_Input_DecisionLog ("minwndproc.mouse", "WM_LBUTTONDOWN cap=1 -> swallowed=1");
+        return 0;
+      }
+
+      // --- Cursor: hide the OS cursor over the client area without touching
+      //     the process-wide ShowCursor counter (fixes the double cursor). ----
+      case WM_SETCURSOR:
+      {
+        if (SK_Input_DecisionRL ("minwndproc.setcursor", 0))
+          SK_Input_DecisionLog ("minwndproc.setcursor", "WM_SETCURSOR cap=1 -> SetCursor(NULL)");
+        SetCursor (nullptr);
+        return TRUE;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  // Not interactive (Off/Toast), or a message we don't handle: chain to the game.
+  return prev != nullptr ? CallWindowProcW (prev, hWnd, uMsg, wParam, lParam)
+                         : DefWindowProcW  (      hWnd, uMsg, wParam, lParam);
+}
+
+// Idempotent installer.  Subclasses hWnd's window proc, saving the prior one for
+// chaining.  Re-binds if the window changed (resize / fullscreen toggle gives a
+// new OutputWindow).  Safe to call every present frame.
+void
+SK_Input_InstallMinimalWndProc (HWND hWnd)
+{
+  if (hWnd == nullptr || (! IsWindow (hWnd)))
+    return;
+
+  // Already installed on this exact window -> no-op.
+  if (hWnd == s_sidecar_min_wndproc_hwnd && s_sidecar_min_wndproc_prev != nullptr)
+    return;
+
+  const WNDPROC prev =
+    reinterpret_cast <WNDPROC> (
+      SetWindowLongPtrW (hWnd, GWLP_WNDPROC,
+                         reinterpret_cast <LONG_PTR> (SK_Sidecar_MinimalWndProc)) );
+
+  // Never chain to ourselves (would infinite-loop): only adopt a non-self prior.
+  if (prev != SK_Sidecar_MinimalWndProc)
+    s_sidecar_min_wndproc_prev = prev;
+
+  s_sidecar_min_wndproc_hwnd = hWnd;
+
+  SK_Input_DecisionLog ("minwndproc",
+    "installed on hwnd=%p prior_proc=%p ok=%d",
+    (void *)hWnd, (void *)prev, prev != nullptr ? 1 : 0);
+}
+
 bool
 __SKX_WinHook_InstallInputHooks (HWND hWnd)
 {
@@ -6367,6 +6519,18 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
                       _In_  WPARAM wParam,
                       _In_  LPARAM lParam )
 {
+  // [decision-probe] confirm this WndProc is actually in the chain for this
+  // (minimal DXGI) run; logged once on first entry.  Instrumentation only.
+  {
+    extern uint32_t SKC_DiagOverlayModeValue (void);
+    static volatile LONG s_wndproc_live_logged = 0;
+    if (InterlockedCompareExchange (&s_wndproc_live_logged, 1, 0) == 0)
+      SK_Input_DecisionLog ("wndproc",
+        "WndProc live, hwnd=%p game_hwnd=%p is_game=%d mode=%u",
+        (void *)hWnd, (void *)game_window.hWnd,
+        (hWnd == game_window.hWnd) ? 1 : 0, SKC_DiagOverlayModeValue ());
+  }
+
   if (SK_GetFramesDrawn () > 5 && game_window.hWnd == hWnd)
   {
     void SK_ImGui_InitDragAndDrop (void);
@@ -6396,6 +6560,35 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
     const bool bIgnoreKeyboard        = bIgnoreKeyboardAndMouse || SK_ImGui_WantKeyboardCapture () || bOverlayActive;
     const bool bIgnoreMouse           = bIgnoreKeyboardAndMouse || SK_ImGui_WantMouseCapture    () || bOverlayActive;
     const bool bIgnoreKeyboardOrMouse = bIgnoreKeyboard         || bIgnoreMouse;
+
+    // [decision-probe] WndProc keyboard/mouse channel.  Logs the gate values and
+    // whether THIS path will swallow (return 0) or forward to the game.  The
+    // booleans above are the real decision inputs — we only read them.
+    if ( ( uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN ||
+           uMsg == WM_LBUTTONDOWN || uMsg == WM_LBUTTONUP ) &&
+         SK_Input_DecisionRL ("wndproc.A", uMsg) )
+    {
+      extern uint32_t SKC_DiagOverlayModeValue (void);
+      const bool key_in   = (uMsg >= WM_KEYFIRST   && uMsg <= WM_KEYLAST);
+      const bool mouse_in = (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST);
+      const bool swallow  = bIgnoreKeyboardOrMouse &&
+                            ((key_in && bIgnoreKeyboard) || (mouse_in && bIgnoreMouse));
+      SK_Input_DecisionLog ("wndproc.A",
+        "msg=0x%04X vk/wp=0x%IX capCached=%d mode=%u wantKbd=%d wantMouse=%d -> swallowed=%d",
+        uMsg, (size_t)wParam, bOverlayActive ? 1 : 0, SKC_DiagOverlayModeValue (),
+        bIgnoreKeyboard ? 1 : 0, bIgnoreMouse ? 1 : 0, swallow ? 1 : 0);
+
+      // One-time cross-thread mode read at the first instrumented WM_KEYDOWN
+      // (input/pump thread side of the present-vs-pump comparison).
+      if (uMsg == WM_KEYDOWN)
+      {
+        static volatile LONG s_xthread_once = 0;
+        if (InterlockedCompareExchange (&s_xthread_once, 1, 0) == 0)
+          SK_Input_DecisionLog ("xthread",
+            "first WndProc WM_KEYDOWN: mode=%u capCached=%d (input/pump thread)",
+            SKC_DiagOverlayModeValue (), bOverlayActive ? 1 : 0);
+      }
+    }
 
     if (bIgnoreKeyboardOrMouse)
     {
@@ -7339,6 +7532,20 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
   //   forward intercepted events to the named event pipe.
   if (hWnd == game_window.hWnd && SKC_IsInputCaptureEnabledCached ())
   {
+    // [decision-probe] SKI1 overlay-capture block reached: this path forwards to
+    // the SKI1 pipe and returns 0 (swallowed).  Note: region "wndproc.A" earlier
+    // in this function usually swallows interactive keys first, so seeing this
+    // fire for a key means A did NOT.  Instrumentation only.
+    if ( ( uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN ||
+           uMsg == WM_LBUTTONDOWN || uMsg == WM_LBUTTONUP ) &&
+         SK_Input_DecisionRL ("wndproc.B", uMsg) )
+    {
+      extern uint32_t SKC_DiagOverlayModeValue (void);
+      SK_Input_DecisionLog ("wndproc.B",
+        "SKI1-capture reached msg=0x%04X vk/wp=0x%IX mode=%u -> swallowed=1",
+        uMsg, (size_t)wParam, SKC_DiagOverlayModeValue ());
+    }
+
     switch (uMsg)
     {
       // --- Mouse messages ---

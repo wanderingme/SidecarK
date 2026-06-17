@@ -94,6 +94,31 @@ void SK_Input_HookWinMsg_Minimal (void);
 // obtain the shared device vtable and direct-hooks it.  See dinput8.cpp.
 void SK_Input_HookDI8_Minimal (void);
 
+// SidecarK/Virule minimal fast path (used by the DXGI/Unity present path).
+// Direct-installs the polled keyboard-state read detours (GetAsyncKeyState,
+// GetKeyState, GetKeyboardState) via the immediate per-target hook path so the
+// game cannot read Escape/keys while the interactive overlay is up — without the
+// queued-hook machinery whose apply-flush is unreliable in this build.  The
+// existing detours already self-gate on SKC_IsInputCaptureEnabled().  CRITICAL:
+// the queued boot path may have CREATED these hooks without ever ENABLING them,
+// so this installer ENABLES each target even when its trampoline is already set.
+// See definition in keyboard.cpp.
+void SK_Input_HookKeyboard_Minimal (void);
+
+// SidecarK DXGI overlay OS-cursor control.  Edge-triggered (never per-frame) hide
+// /restore of the OS cursor across the Interactive boundary, so the game's OS
+// cursor does not double up with CEF's software cursor.  Interactive-only.  See
+// definition in cursor.cpp.  NOTE: neutralized — cursor hide now lives in the
+// minimal DXGI WndProc's WM_SETCURSOR handler (kept as a no-op for ABI).
+void SK_Cursor_SetSidecarOverlayHidden (bool hidden);
+
+// SidecarK DXGI-path minimal window-proc subclass.  Installs a FRESH, SKC-gated
+// (Interactive-only) WndProc on the game's HWND so Unity's window-message Escape
+// /clicks are swallowed and the OS cursor is hidden via WM_SETCURSOR.  Idempotent;
+// re-binds on HWND change.  DXGI/Unity path only — NOT the GL or full-boot paths.
+// See definition in window.cpp.
+void SK_Input_InstallMinimalWndProc (HWND hWnd);
+
 // ---- Minimal-path input-hook diagnostics (instrumentation only) ------------
 // Appends to %TEMP%\sk_input_hook_<pid>.txt (same gating + location as the
 // sk_stage_* logs).  No-op unless SidecarK diagnostics are enabled.
@@ -113,6 +138,15 @@ void      SK_Input_DiagSnapshotMovementDetours (const char* when);
 // True if any DI8 device GetDeviceState/GetDeviceData trampoline is installed
 // (read-only accessor defined in dinput8.cpp).
 bool      SK_DI8_AreDeviceHooksLive          (void);
+
+// ---- Input DECISION-PATH probes (instrumentation only) ---------------------
+// Rate-limiter: true for the first 15 calls per distinct (tag,sub), else false
+// (and always false when diagnostics are off).  Use sub to discriminate e.g. the
+// window message or virtual-key at a shared callsite.
+bool      SK_Input_DecisionRL                (const char* tag, unsigned sub);
+// Appends one line to %TEMP%\sk_input_decision_<pid>.txt (diag-gated): a probe of
+// which channel an input event travels and what the capture gate evaluates to.
+void      SK_Input_DecisionLog               (const char* callsite, const char* fmt, ...);
 
 void SK_Input_PreHookKeyboard (void);
 void SK_Input_PreHookWinHook  (void);

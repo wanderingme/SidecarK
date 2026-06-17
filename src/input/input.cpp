@@ -590,6 +590,109 @@ SK_Input_DiagLog (const char* fmt, ...)
   }
 }
 
+// ===========================================================================
+//  Input DECISION-PATH probes (instrumentation only — no blocking logic).
+//
+//  Goal: in ONE run, identify which channel Unity's Escape key and a UI button
+//  click actually travel, and what the capture gate evaluates to at that point.
+//  Appends to %TEMP%\sk_input_decision_<pid>.txt, diag-gated.  Each probe site
+//  rate-limits to the first 15 hits per distinct (tag,sub) via SK_Input_DecisionRL
+//  so a polling game cannot flood the log.  These do NOT change any control flow.
+// ===========================================================================
+
+// True for the first 15 calls per distinct (tag,sub); false thereafter (or when
+// diagnostics are off).  Lock-free fixed table; collisions merge counters (fine
+// for a probe — there are only a handful of distinct keys).
+bool
+SK_Input_DecisionRL (const char* tag, unsigned sub)
+{
+  if (! SidecarK_DiagnosticsEnabled ())
+    return false;
+
+  static constexpr int SLOTS = 256;
+  static volatile LONG s_key [SLOTS] = { }; // 0 == empty slot
+  static volatile LONG s_cnt [SLOTS] = { };
+
+  // 32-bit FNV-1a over the tag, folded with sub; forced non-zero so 0 stays
+  // the "empty" sentinel.
+  unsigned h = 2166136261u;
+  for (const char* p = tag; p != nullptr && *p; ++p)
+  {
+    h ^= (unsigned char)*p;
+    h *= 16777619u;
+  }
+  h ^= (sub * 2654435761u);
+  h *= 16777619u;
+  if (h == 0u) h = 1u;
+
+  const LONG key = (LONG)h;
+
+  for (int i = 0; i < SLOTS; ++i)
+  {
+    const int  slot = (int)(((unsigned)h + (unsigned)i) % (unsigned)SLOTS);
+    const LONG cur  = InterlockedCompareExchange (&s_key [slot], key, 0);
+
+    if (cur == 0 || cur == key) // just claimed it, or it is already ours
+    {
+      const LONG n = InterlockedIncrement (&s_cnt [slot]);
+      return (n <= 15);
+    }
+    // occupied by a different key -> linear-probe the next slot
+  }
+
+  return false; // table full (not expected for our key count)
+}
+
+// Appends one decision-probe line:  HH:MM:SS.mmm tid=... [callsite] <msg>
+void
+SK_Input_DecisionLog (const char* callsite, const char* fmt, ...)
+{
+  if (! SidecarK_DiagnosticsEnabled ())
+    return;
+
+  wchar_t wszTempPath [MAX_PATH] = { };
+  DWORD   cch =
+    GetTempPathW (MAX_PATH, wszTempPath);
+  if (cch == 0 || cch >= MAX_PATH)
+    return;
+
+  wchar_t wszFilePath [MAX_PATH] = { };
+  wsprintfW ( wszFilePath, L"%ssk_input_decision_%lu.txt",
+              wszTempPath, (unsigned long)GetCurrentProcessId () );
+
+  char    szBody [1024] = { };
+  va_list args;
+  va_start (args, fmt);
+  _vsnprintf_s (szBody, _TRUNCATE, fmt, args);
+  va_end   (args);
+
+  SYSTEMTIME st = { };
+  GetLocalTime (&st);
+
+  char      szLine [1408] = { };
+  const int len =
+    _snprintf_s ( szLine, _TRUNCATE,
+                  "%02u:%02u:%02u.%03u tid=%lu [%hs] %hs\r\n",
+                  st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                  (unsigned long)GetCurrentThreadId (),
+                  callsite ? callsite : "?", szBody );
+  if (len <= 0)
+    return;
+
+  HANDLE hFile =
+    CreateFileW ( wszFilePath, FILE_APPEND_DATA,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                  nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr );
+
+  if (hFile != INVALID_HANDLE_VALUE)
+  {
+    DWORD cbWritten = 0;
+    SetFilePointer (hFile, 0, nullptr, FILE_END);
+    WriteFile      (hFile, szLine, (DWORD)len, &cbWritten, nullptr);
+    CloseHandle    (hFile);
+  }
+}
+
 // Reads the first instruction byte of a hooked export and reports whether it
 // looks patched (MinHook writes a relative/indirect JMP), so we can verify a
 // detour is actually ENABLED without calling MH_EnableHook (which would alter
@@ -651,6 +754,9 @@ SK_Input_DiagSnapshotMovementDetours (const char* when)
   _State ("winmsg",   "GetMessageA");
   _State ("winmsg",   "PeekMessageW");
   _State ("winmsg",   "PeekMessageA");
+  _State ("keyboard", "GetAsyncKeyState");
+  _State ("keyboard", "GetKeyState");
+  _State ("keyboard", "GetKeyboardState");
 
   const bool di8_loaded = (SK_GetModuleHandle (L"dinput8.dll") != nullptr);
   SK_Input_DiagLog ( "  state[di8] dinput8_loaded=%d device_hooks_live=%d (vtable)",

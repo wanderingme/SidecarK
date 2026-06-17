@@ -4201,6 +4201,100 @@ SKC_D3D11_AlphaCompositeOverlay ( ID3D11Device*        dev,
 // Thread-safety: all function-scope statics are accessed only on the single
 // render thread that calls Present; no locking is required.
 // ============================================================================
+
+// ---------------------------------------------------------------------------
+// SidecarK DXGI input/cursor enforcement (Unity/DXGI overlay path).
+//
+// The minimal DXGI present bypasses SK's full ImGui/input frame path, so the GL
+// minimal one-shot (opengl.cpp) never runs for a DXGI title and the only
+// API-level keyboard/raw-input blocking would otherwise be the queued-boot
+// detours, whose apply-flush is documented-unreliable in this build.  This runs
+// once per frame at the top of the present and does two surgical things:
+//
+//   (1) Exactly once, immediately and per-target (NO SK_ApplyQueuedHooks),
+//       installs the minimal Raw Input + polled-keyboard read detours.  Both
+//       self-gate on SKC_IsInputCaptureEnabled(), so installing them while the
+//       overlay is off/toast is inert.  Mouse already works via the WndProc, so
+//       we deliberately do NOT install winmsg/DI8/cursor-pos here.
+//
+//   (2) Edge-triggers OS-cursor hide/restore across the Interactive boundary so
+//       the game's OS cursor does not double with CEF's software cursor.  Gated
+//       strictly on SKC_IsInputCaptureEnabled() (Interactive only) — never
+//       ToastOnly, never Off — preserving the toast invariant.
+//
+// Must run before any early-return in the present (including the overlay-off
+// path), otherwise the Interactive->Off restore edge would never fire.
+// ---------------------------------------------------------------------------
+extern bool SKC_IsInputCaptureEnabled (void);
+
+static void
+SK_DXGI_Sidecar_EnforceInputState (IDXGISwapChain* This)
+{
+  extern void     SK_Input_HookRawInput_Minimal        (void);
+  extern void     SK_Input_HookKeyboard_Minimal        (void);
+  extern void     SK_Input_InstallMinimalWndProc       (HWND);
+  extern void     SK_Input_DiagLog                     (const char*, ...);
+  extern void     SK_Input_DiagSnapshotMovementDetours (const char*);
+  extern void     SK_Input_DecisionLog                 (const char*, const char*, ...);
+  extern uint32_t SKC_DiagOverlayModeValue             (void);
+
+  // (1) One-shot minimal input-detour install (immediate per-target, NO queue).
+  static volatile LONG s_input_hook_done = 0;
+  if (InterlockedCompareExchange (&s_input_hook_done, 1, 0) == 0)
+  {
+    SK_Input_DiagLog ("SK_DXGI_Sidecar_EnforceInputState: installing minimal DXGI input detours");
+    SK_Input_HookRawInput_Minimal        ();
+    SK_Input_HookKeyboard_Minimal        ();
+    SK_Input_DiagSnapshotMovementDetours ("dxgi-post-install");
+  }
+
+  // (2) Install our own minimal WndProc on the GAME window (the measured root
+  // cause: nothing subclasses the Unity window in this path, so Unity's
+  // window-message Escape/clicks were never intercepted).  Idempotent + re-binds
+  // when the OutputWindow changes (resize / fullscreen toggle).  HWND comes from
+  // the swapchain desc; if that fails we just retry next frame (no failure latch).
+  if (This != nullptr)
+  {
+    DXGI_SWAP_CHAIN_DESC scDesc = { };
+    if (SUCCEEDED (This->GetDesc (&scDesc)) && scDesc.OutputWindow != nullptr)
+      SK_Input_InstallMinimalWndProc (scDesc.OutputWindow);
+    else
+    {
+      static volatile LONG s_warned = 0;
+      if (InterlockedCompareExchange (&s_warned, 1, 0) == 0)
+        SK_Input_DiagLog ("SK_DXGI_Sidecar_EnforceInputState: no OutputWindow from GetDesc; will retry");
+    }
+  }
+
+  // (3) Capture-edge diagnostics.  The OS-cursor hide now lives in the minimal
+  // WndProc's WM_SETCURSOR handler (the prior present-thread ShowCursor edge-hide
+  // did not take and fought the ShowCursor counter; it is now neutralized).  We
+  // keep the edge detection purely to emit the cross-thread mode probe.
+  const bool  capture        = SKC_IsInputCaptureEnabled ();
+  static bool s_prev_capture = false;
+
+  if (capture != s_prev_capture)
+  {
+    // Log the first Off/Toast -> Interactive transition once (DXGI-path proof
+    // that the detours are still live at the moment capture actually engages).
+    if (capture)
+    {
+      static volatile LONG s_first_capture_logged = 0;
+      if (InterlockedCompareExchange (&s_first_capture_logged, 1, 0) == 0)
+      {
+        SK_Input_DiagSnapshotMovementDetours ("dxgi-capture-on");
+        // [decision-probe] present-thread side of the cross-thread mode check;
+        // compare mode= here vs the "xthread" line logged on the input/pump thread.
+        SK_Input_DecisionLog ("xthread",
+          "present capture-on edge: mode=%u cap=1 (present thread)",
+          SKC_DiagOverlayModeValue ());
+      }
+    }
+
+    s_prev_capture = capture;
+  }
+}
+
 static HRESULT STDMETHODCALLTYPE
 SK_DXGI_SKF1_Present ( IDXGISwapChain      *This,
                               UINT                 SyncInterval,
@@ -4250,6 +4344,10 @@ SK_DXGI_SKF1_Present ( IDXGISwapChain      *This,
       L"first minimal DXGI Present entered SyncInterval=%u Flags=0x%X sc=%p pfn=%p",
       SyncInterval, Flags, This, (void *)pfnPresent);
   }
+
+  // SidecarK input/cursor enforcement — must run every frame BEFORE any early
+  // return so the WndProc (re)install and the capture-edge probe always run.
+  SK_DXGI_Sidecar_EnforceInputState (This);
 
   // Null-safety guard for original Present
   if (pfnPresent == nullptr)
