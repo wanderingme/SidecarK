@@ -8120,6 +8120,9 @@ SK_Win32_IsDummyWindowClass (WNDCLASSEXW* pWindowClass)
     (!_wcsicmp (pWindowClass->lpszClassName, L"InvisibleWindowClassNvPresent"))         || // NVIDIA SmoothMotion
     (!_wcsicmp (pWindowClass->lpszClassName, L"TempDirect3D11OverlayWindow"))           || // Steam version of Titan Quest
     (!_wcsicmp (pWindowClass->lpszClassName, L"TempWindowClass"))                       || // Some kind of snake oil app called smart game booster
+    ((*pWindowClass->lpszClassName == L'G'||
+      *pWindowClass->lpszClassName == L'g' ) &&
+     StrStrIW   (pWindowClass->lpszClassName, L"graphics_hook"))                        || // OBS graphics-hook interop dummies (e.g. graphics_hook_gl_dummy_window)
 
     // F' it, there's a pattern here, just ignore all dummies.
     ((*pWindowClass->lpszClassName == L'D'||
@@ -8158,6 +8161,16 @@ SK_Win32_IsDummyWindowClass (HWND hWndInstance)
 
   if (RealGetWindowClassW (hWndInstance, wszClassName, 127) > 0)
   {
+    // OBS's graphics-hook registers its interop dummies (e.g.
+    //   graphics_hook_gl_dummy_window) from its own module; match by name so
+    //     classification does not depend on GetClassInfoExW resolving the class.
+    if ((wszClassName [0] == L'G' ||
+         wszClassName [0] == L'g' ) &&
+         StrStrIW (wszClassName, L"graphics_hook"))
+    {
+      return true;
+    }
+
     wnd_class.cbSize = sizeof (WNDCLASSEXW);
 
     if (GetClassInfoExW (hInstance, wszClassName, &wnd_class))
