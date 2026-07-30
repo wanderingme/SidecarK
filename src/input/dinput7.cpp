@@ -1260,10 +1260,18 @@ IDirectInput7A_CreateDevice_Detour ( IDirectInput7A        *This,
 void
 SK_Input_HookDI7 (void)
 {
+  static volatile LONG hooked = FALSE;
+
+  // SidecarK mode: calls SK_Input_HookHID() internally; HID is disabled.
+  // Set hooked=2 so any concurrent spinwait exits immediately.
+  if (SK_IsSidecarKMode ())
+  {
+    WriteRelease (&hooked, 2L);
+    return;
+  }
+
   if (! config.input.gamepad.hook_dinput7)
     return;
-
-  static volatile LONG hooked = FALSE;
 
   if (! SK_GetModuleHandle (L"dinput.dll"))
            SK_LoadLibraryW (L"dinput.dll");

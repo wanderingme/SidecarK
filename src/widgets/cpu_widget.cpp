@@ -144,6 +144,10 @@ volatile LONG __SK_WR0_NoThreads = 0;
 void
 SK_WinRing0_Unpack (void)
 {
+  // SidecarK mode: no Drivers\WinRing0\ creation.
+  if (SK_IsSidecarKMode ())
+    return;
+
   static
     SK_AutoHandle hTransferComplete (
       SK_CreateEvent (nullptr, TRUE, FALSE, nullptr)

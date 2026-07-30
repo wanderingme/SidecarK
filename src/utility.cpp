@@ -4116,6 +4116,10 @@ SK_WinRing0_Uninstall (void)
 void
 SK_WinRing0_Install (void)
 {
+  // SidecarK mode: no Drivers\WinRing0\ creation.
+  if (SK_IsSidecarKMode ())
+    return;
+
   static std::wstring path_to_driver =
     SK_FormatStringW ( LR"(%ws\Drivers\WinRing0\)",
                        SK_GetInstallPath () );
