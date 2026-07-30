@@ -1519,9 +1519,9 @@ SK_GL_ClipControl::glClipControl = nullptr;
   glBindFramebuffer       (GL_FRAMEBUFFER,          last_framebuffer);                                  \
                                                                                                         \
   if (last_readbuffer != last_framebuffer)                                                              \
-    glBindFramebuffer     (GL_READ_BUFFER,          last_readbuffer);                                   \
+    glBindFramebuffer     (GL_READ_FRAMEBUFFER,     last_readbuffer);                                   \
   if (last_drawbuffer != last_framebuffer)                                                              \
-    glBindFramebuffer     (GL_DRAW_BUFFER,          last_drawbuffer);                                   \
+    glBindFramebuffer     (GL_DRAW_FRAMEBUFFER,     last_drawbuffer);                                   \
                                                                                                         \
   glActiveTexture         (GL_TEXTURE0);                                                                \
   glBindTexture           (GL_TEXTURE_2D,           last_texture0);                                     \
@@ -1890,9 +1890,9 @@ SK_GL_PopMostStates (void)
   glBindFramebuffer (GL_FRAMEBUFFER, sb._fbo);
 
   if (sb._read_fbo != sb._fbo)
-    glBindFramebuffer (GL_READ_BUFFER, sb._read_fbo);
+    glBindFramebuffer (GL_READ_FRAMEBUFFER, sb._read_fbo);
   if (sb._draw_fbo != sb._fbo)
-    glBindFramebuffer (GL_DRAW_BUFFER, sb._draw_fbo);
+    glBindFramebuffer (GL_DRAW_FRAMEBUFFER, sb._draw_fbo);
 
   for (GLuint i = 0; i < 80; i++)
   {
@@ -3639,6 +3639,15 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
       // switches its GL context, all cached handles become invalid in the new context.
       static HGLRC s_fs_owner_hglrc = nullptr;
 
+      // Drawable-surface stability: HDC, HWND, and client rect are tracked in
+      // addition to HGLRC.  Mouse/focus/fullscreen transitions can change these
+      // without changing the GL context, which can leave the compositor drawing
+      // against a stale or mis-sized drawable.  Detecting changes here resets
+      // the stability counter and pauses GL work until the surface is stable.
+      static HDC  s_fs_owner_hdc  = nullptr;
+      static HWND s_fs_owner_hwnd = nullptr;
+      static RECT s_fs_owner_rect = { };
+
       // Stability observation: require SKF1_STABLE_FRAMES consecutive frames with the
       // same non-null HGLRC and valid SKF1 layout before starting heavy Phase 0a GPU
       // work.  This prevents warm-up from starting (and being immediately discarded)
@@ -3695,8 +3704,59 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           InterlockedExchange (&s_skf1_compositor_fully_warm, 0);
           const HGLRC hglrc_old = s_fs_owner_hglrc;
           s_fs_owner_hglrc = hglrc_now;
+          // Zero drawable-surface tracking so the HDC/HWND/rect check below
+          // re-baselines cleanly after the context switch.
+          s_fs_owner_hdc  = nullptr;
+          s_fs_owner_hwnd = nullptr;
+          s_fs_owner_rect = { };
           _SidecarLog_GL (L"[SKF1-WARM] HGLRC changed (%p->%p) — native GL resources reset",
                           (void *)hglrc_old, (void *)hglrc_now);
+        }
+
+        // -- HDC/HWND/client-rect stability check ----------------------------
+        // Mouse, focus, and fullscreen transitions may change HDC, HWND, or
+        // the client rect without changing HGLRC.  Detect that and reset the
+        // stability counter, pausing GL work until the surface is stable again.
+        // GL objects (tex, prog, vao etc.) remain valid — same HGLRC.
+        {
+          const HWND hwnd_chk = WindowFromDC (hDC);
+          RECT       rect_chk = { };
+          bool       rect_ok  = false;
+          if (hwnd_chk != nullptr)
+            rect_ok = (GetClientRect (hwnd_chk, &rect_chk) != FALSE);
+          // Only compare rect if GetClientRect succeeded; a failed query leaves
+          // rect_chk zeroed which would trigger false-positive change detection.
+          const bool hdc_chk_changed  = (hDC       != s_fs_owner_hdc);
+          const bool hwnd_chk_changed = (hwnd_chk  != s_fs_owner_hwnd);
+          const bool rect_chk_changed = rect_ok &&
+                                        (rect_chk.left   != s_fs_owner_rect.left  ||
+                                         rect_chk.right  != s_fs_owner_rect.right ||
+                                         rect_chk.top    != s_fs_owner_rect.top   ||
+                                         rect_chk.bottom != s_fs_owner_rect.bottom);
+          if (hdc_chk_changed || hwnd_chk_changed || rect_chk_changed)
+          {
+            if (s_fs_warm > 0)
+              _SidecarLog_GL (L"[SKF1-WARM] drawable surface changed"
+                              L" (hdc=%d hwnd=%d rect=%d) — stability reset; warm->0",
+                              (int)hdc_chk_changed, (int)hwnd_chk_changed,
+                              (int)rect_chk_changed);
+            s_fs_stable_frames = 0;
+            s_fs_stable_w      = 0;
+            s_fs_stable_h      = 0;
+            if (s_fs_warm > 0)
+            {
+              // Reset warm so Phase 0a does not resume until stable.
+              // GL objects (tex, prog, vao) are NOT destroyed — they remain
+              // valid in the unchanged HGLRC and will be reused.
+              s_fs_warm      = 0;
+              s_fs_has_frame = false;
+              InterlockedExchange (&s_skf1_compositor_fully_warm, 0);
+            }
+            s_fs_owner_hdc  = hDC;
+            s_fs_owner_hwnd = hwnd_chk;
+            if (rect_ok)
+              s_fs_owner_rect = rect_chk;
+          }
         }
 
         // -- Step 0: open / maintain the SidecarK_Control overlay-enable map --
@@ -3781,6 +3841,14 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
         // on the next ON transition.
         if (! s_fs_overlay_enabled)
           s_fs_has_frame = false;
+
+        // Skip all GL work while the compositor is already fully warm and
+        // overlay/toast is off.  Cached GPU resources (tex, prog, vao) are
+        // retained for the next overlay-on; no GL state is queried or mutated.
+        // This eliminates the hidden-frame GL stalls identified in wrapper logs
+        // as the source of intermittent hangs after startup toast auto-dismiss.
+        if (s_fs_warm == 6 && ! s_fs_overlay_enabled)
+          goto skf1_hglrc_block_end;
 
         // -- Step 1: open / maintain the SKF1 shared-memory mapping ----------
         if (s_fs_base == nullptr)
@@ -4252,25 +4320,6 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
                   glPixelStorei   (GL_UNPACK_ROW_LENGTH, pl_sv_rowlen);
 
                   _SidecarLog_GL (L"[SKF1-WARM] phase 1->6: first frame uploaded (ctr=%u)", c1);
-
-                  // Prewarm ImGui GL device objects (shader compile, font atlas
-                  // texture upload, VBO/VAO creation) so the first visible
-                  // SK_Overlay_DrawGL() call is not the first time these run.
-                  // ImGui_ImplGL3_CreateDeviceObjects saves/restores
-                  // GL_TEXTURE_BINDING_2D, GL_ARRAY_BUFFER_BINDING, and
-                  // GL_VERTEX_ARRAY_BINDING internally; it also fully handles
-                  // pixel unpack state (PBO, alignment, row length) inside
-                  // ImGui_ImplGL3_CreateFontsTexture.  The only state it does
-                  // not save is GL_ACTIVE_TEXTURE, so we guard that here.
-                  if (! s_fs_imgui_prewarmed)
-                  {
-                    s_fs_imgui_prewarmed = true;
-                    GLint pw_sv_active = 0;
-                    glGetIntegerv (GL_ACTIVE_TEXTURE, &pw_sv_active);
-                    glActiveTexture (GL_TEXTURE0);
-                    ImGui_ImplGL3_CreateDeviceObjects ();
-                    glActiveTexture ((GLenum)pw_sv_active);
-                  }
                 }
               }
             }
@@ -4462,6 +4511,32 @@ SK_GL_SwapBuffers (HDC hDC, LPVOID pfnSwapFunc)
           else
             glDisable (GL_SCISSOR_TEST);
         }
+
+        // -- ImGui device-object prewarm (visibility-gated) ------------------
+        // Run only when the overlay is about to be visible and the compositor
+        // is fully warm (stable HGLRC/HDC/HWND/rect, textures and shaders
+        // allocated).  Deferring to the first visible frame avoids absorbing
+        // shader-compile and font-atlas-upload cost into hidden frames where a
+        // GL stall can freeze the game.
+        // ImGui_ImplGL3_CreateDeviceObjects saves/restores GL_TEXTURE_BINDING_2D,
+        // GL_ARRAY_BUFFER_BINDING, and GL_VERTEX_ARRAY_BINDING internally; it
+        // also handles pixel unpack state inside ImGui_ImplGL3_CreateFontsTexture.
+        // The only state not saved by it is GL_ACTIVE_TEXTURE, guarded here.
+        // s_fs_imgui_prewarmed is set to true only on success; on failure the
+        // call is not retried in a tight loop (the gate will re-try next frame).
+        if (s_fs_warm == 6 && s_fs_overlay_enabled && ! s_fs_imgui_prewarmed)
+        {
+          GLint pw_sv_active = 0;
+          glGetIntegerv (GL_ACTIVE_TEXTURE, &pw_sv_active);
+          glActiveTexture (GL_TEXTURE0);
+          const bool pw_ok = ImGui_ImplGL3_CreateDeviceObjects ();
+          glActiveTexture ((GLenum)pw_sv_active);
+          if (pw_ok)
+            s_fs_imgui_prewarmed = true;
+          // On failure: fail open — overlay draw still proceeds; do not hang.
+        }
+
+        skf1_hglrc_block_end: ;
       } // end if (hglrc_now != nullptr)
     } // end use_gl_skf1_fallback
 
