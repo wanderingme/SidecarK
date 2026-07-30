@@ -1611,7 +1611,12 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
   // --------------------------------------------------------------------------
   // STAGE E/F: Upload (if stable) + Always Blit (last-good frame)
-  // CRITICAL: This MUST happen BEFORE PresentBase() so overlay is visible!
+  // Stage F must compose into the surface PresentBase() will present from.
+  // We acquire via this->GetBuffer(0) rather than pReal->GetBuffer(0) so that
+  // when flip_model.isOverrideActive() is true we write into _backbuffers[0]
+  // (which PresentBase() copies into the real backbuffer), and when it is false
+  // we write directly into the real backbuffer.  Either way, the overlay
+  // survives PresentBase().
   // --------------------------------------------------------------------------
   const bool skf1_stage_ef_ready =
     (s_skf1.view_ptr != nullptr && s_skf1.width > 0 && s_skf1.height > 0 &&
@@ -1655,7 +1660,7 @@ IWrapDXGISwapChain::Present (UINT SyncInterval, UINT Flags)
 
       const ULONGLONG tGetBuf11 = GetTickCount64 ();
       const HRESULT hrBuffer =
-        pReal->GetBuffer (0, __uuidof (ID3D11Texture2D), (void **)&bb);
+        GetBuffer (0, __uuidof (ID3D11Texture2D), (void **)&bb);
       _LogSlowStage (L"D3D11.GetBuffer", tGetBuf11);
 
       if (SUCCEEDED (hrBuffer) && bb != nullptr && ctx != nullptr)
