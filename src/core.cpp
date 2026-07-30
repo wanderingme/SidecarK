@@ -1164,9 +1164,9 @@ void BasicInit (void)
   SK_PreInitLoadLibrary ();
   SK_StageTraceW (L"10_preinit_loadlib_end");
 
+#ifndef SK_SIDECAR_MINIMAL
   if (config.system.handle_crashes)
     SK::Diagnostics::CrashHandler::Init   ();
-#ifndef SK_SIDECAR_MINIMAL
   SK::Diagnostics::CrashHandler::InitSyms ();
 #endif
 
@@ -1197,10 +1197,8 @@ void BasicInit (void)
   SK_HookWinAPI             ();
 #ifndef SK_SIDECAR_MINIMAL
   SK_CPU_InstallHooks       ();
-#endif
   SK_NvAPI_PreInitHDR       ();
   SK_NvAPI_InitializeHDR    ();
-#ifndef SK_SIDECAR_MINIMAL
   SK_DStorage_Init          ();
 #endif
 
@@ -1208,16 +1206,20 @@ void BasicInit (void)
   ////if ( (SK_IsInjected () && (! SK_IsSuperSpecialK ())) )
   ////  SK_Thread_Create ( CheckVersionThread );
 
+#ifndef SK_SIDECAR_MINIMAL
   if (config.dpi.disable_scaling)   SK_Display_DisableDPIScaling      (     );
   if (config.dpi.per_monitor.aware) SK_Display_SetMonitorDPIAwareness (false);
+#endif
 
 #ifndef SK_SIDECAR_MINIMAL
   SK_File_InitHooks    ();
   SK_Network_InitHooks ();
 #endif
 
+#ifndef SK_SIDECAR_MINIMAL
   if (config.system.display_debug_out)
     SK::Diagnostics::Debugger::SpawnConsole ();
+#endif
 
 
    // Games that need plug-in initialization before Steam
@@ -1282,8 +1284,10 @@ void BasicInit (void)
   }
 #endif
 
+#ifndef SK_SIDECAR_MINIMAL
   if (SK_COMPAT_IsFrapsPresent ())
       SK_COMPAT_UnloadFraps ();
+#endif
 
   //bool bEnable = SK_EnableApplyQueuedHooks  ();
   //{
@@ -1347,7 +1351,9 @@ DllThread (LPVOID user)
       // This must initialize COM, do it from a separate thread to avoid
       //   ReShade constructing objects that require COM and keeping them
       //     active after this function goes out of scope.
+#ifndef SK_SIDECAR_MINIMAL
       SK::Xbox::Init             ();
+#endif
       SK_D3D_SetupShaderCompiler ();
 
       WritePointerRelease ( (volatile PVOID *)(&hInitThread),
@@ -1356,6 +1362,7 @@ DllThread (LPVOID user)
                               0                    );
 
       // Implicitly load ReShade (ReShade{32|64}.dll) if it exists
+#ifndef SK_SIDECAR_MINIMAL
       SK_ReShade_LoadIfPresent  ();
 
       if (PathFileExistsW (L"fsr2streamline.asi"))
@@ -1367,6 +1374,7 @@ DllThread (LPVOID user)
 
       if (config.system.handle_crashes)
         SK::Diagnostics::CrashHandler::Reinstall ();
+#endif
     }
   }
 
